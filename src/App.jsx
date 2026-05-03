@@ -384,11 +384,13 @@ function savePersistedAppState(state) {
   if (typeof window === "undefined") return;
   try {
     window.localStorage.setItem(WIFFLE_LOCAL_STORAGE_KEY, JSON.stringify(state));
+    const baseSavedAt = window.__WIFFLE_SYNC_BASE_SAVED_AT || "";
+    window.__WIFFLE_SYNC_BASE_SAVED_AT = state.savedAt || baseSavedAt;
     window.fetch?.(WIFFLE_SHARED_STATE_ENDPOINT, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "X-Wiffle-Base-Saved-At": window.__WIFFLE_SYNC_BASE_SAVED_AT || "",
+        "X-Wiffle-Base-Saved-At": baseSavedAt,
       },
       body: JSON.stringify(state),
       keepalive: true,
@@ -402,8 +404,6 @@ function savePersistedAppState(state) {
       const conflict = await response.json().catch(() => null);
       const latestState = conflict?.state || null;
       if (!latestState || typeof latestState !== "object") return;
-      const localState = loadPersistedAppState();
-      if (getSavedAtTime(latestState) <= getSavedAtTime(localState)) return;
       window.localStorage.setItem(WIFFLE_LOCAL_STORAGE_KEY, JSON.stringify(latestState));
       window.__WIFFLE_SYNC_BASE_SAVED_AT = latestState.savedAt || "";
       console.warn("Skipped saving stale Wiffle data because another browser has newer saved data.");
@@ -3547,6 +3547,7 @@ export default function WiffleScoringPrototype() {
   const setupSignatureInitializedRef = useRef(false);
   const suppressNextPersistRef = useRef(true);
   const lastPersistedStateSignatureRef = useRef("");
+  const userHasInteractedRef = useRef(false);
   const [storageHydrated, setStorageHydrated] = useState(false);
   const [awayTeam, setAwayTeam] = useState("Away Team");
   const [homeTeam, setHomeTeam] = useState("Home Team");
@@ -4025,6 +4026,23 @@ export default function WiffleScoringPrototype() {
   }
 
   useEffect(() => {
+    function markUserInteraction() {
+      userHasInteractedRef.current = true;
+    }
+
+    window.addEventListener("pointerdown", markUserInteraction, true);
+    window.addEventListener("keydown", markUserInteraction, true);
+    window.addEventListener("input", markUserInteraction, true);
+    window.addEventListener("change", markUserInteraction, true);
+    return () => {
+      window.removeEventListener("pointerdown", markUserInteraction, true);
+      window.removeEventListener("keydown", markUserInteraction, true);
+      window.removeEventListener("input", markUserInteraction, true);
+      window.removeEventListener("change", markUserInteraction, true);
+    };
+  }, []);
+
+  useEffect(() => {
     const savedState = loadPersistedAppState();
     if (!savedState) {
       storageHydratedRef.current = true;
@@ -4125,7 +4143,7 @@ export default function WiffleScoringPrototype() {
       setupEditingDuringGame,
     };
     const nextStateSignature = getPersistedStateSignature(nextState);
-    if (suppressNextPersistRef.current || nextStateSignature === lastPersistedStateSignatureRef.current) {
+    if (!userHasInteractedRef.current || suppressNextPersistRef.current || nextStateSignature === lastPersistedStateSignatureRef.current) {
       suppressNextPersistRef.current = false;
       lastPersistedStateSignatureRef.current = nextStateSignature;
       return;

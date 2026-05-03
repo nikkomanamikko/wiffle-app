@@ -39,8 +39,8 @@ function sharedWiffleStatePlugin() {
               if (!parsed.savedAt) parsed.savedAt = new Date().toISOString();
               const currentState = fs.existsSync(stateFile) ? JSON.parse(fs.readFileSync(stateFile, "utf8")) : null;
               const currentSavedAt = currentState?.savedAt ? new Date(currentState.savedAt).getTime() : 0;
-              const nextSavedAt = parsed?.savedAt ? new Date(parsed.savedAt).getTime() : 0;
-              if (currentSavedAt > nextSavedAt) {
+              const baseSavedAt = req.headers["x-wiffle-base-saved-at"] ? new Date(String(req.headers["x-wiffle-base-saved-at"])).getTime() : 0;
+              if (currentSavedAt > baseSavedAt) {
                 res.statusCode = 409;
                 res.end(JSON.stringify({ ok: false, error: "Shared state is newer than this browser state.", state: currentState }));
                 return;

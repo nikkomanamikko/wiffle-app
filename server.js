@@ -75,9 +75,9 @@ async function handleStateApi(request, response) {
 
       const currentState = readSharedState();
       const currentSavedAt = getSavedAtTime(currentState);
-      const nextSavedAt = getSavedAtTime(parsed);
+      const baseSavedAt = request.headers["x-wiffle-base-saved-at"] ? new Date(String(request.headers["x-wiffle-base-saved-at"])).getTime() : 0;
 
-      if (currentSavedAt > nextSavedAt) {
+      if (currentSavedAt > baseSavedAt) {
         sendJson(response, 409, { ok: false, error: "Shared state is newer than this browser state.", state: currentState });
         return;
       }

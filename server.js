@@ -119,7 +119,7 @@ function serveStatic(request, response) {
 }
 
 const server = http.createServer((request, response) => {
-  if ((request.url || "").startsWith("/api/wiffle-state")) {
+  if ((request.url || "").startsWith("/api/wiffle-state") || (request.url || "").startsWith("/.netlify/functions/wiffle-state")) {
     handleStateApi(request, response);
     return;
   }

@@ -352,7 +352,7 @@ function canonicalizePlayerRecordsForDirtyCheck(players = []) {
 const WIFFLE_LOCAL_STORAGE_KEY = "wiffle-app-state-v1";
 const WIFFLE_PENDING_SAVE_KEY = "wiffle-app-pending-save-v1";
 const WIFFLE_SHARED_STATE_ENDPOINT = "/.netlify/functions/wiffle-state";
-const WIFFLE_SHARED_STATE_POLL_MS = 2000;
+const WIFFLE_SHARED_STATE_POLL_MS = 1000;
 const WIFFLE_SHARED_SAVE_RETRY_MS = 1200;
 let queuedSharedStateSave = null;
 let sharedStateSaveInFlight = false;
@@ -401,6 +401,11 @@ function clearPendingSharedSave(savedAt = "") {
   } catch (error) {
     window.localStorage.removeItem(WIFFLE_PENDING_SAVE_KEY);
   }
+}
+
+function hasPendingSharedSave() {
+  if (typeof window === "undefined") return false;
+  return Boolean(sharedStateSaveInFlight || queuedSharedStateSave || window.localStorage.getItem(WIFFLE_PENDING_SAVE_KEY));
 }
 
 function scheduleSharedStateSaveRetry() {
@@ -1861,6 +1866,7 @@ function isWhammyBlockingPowerPlayThisHalf(events, defensiveTeam, inning, half) 
       event.defensiveTeam === defensiveTeam &&
       event.inning === inning &&
       event.half === half &&
+      !event.whammyWalk &&
       !event.walk,
   );
 }
@@ -2531,6 +2537,11 @@ function runSelfTests() {
   test("Whammy walk does not prevent Power Play from being used in the same half inning", () => {
     const events = [{ type: "play", team: "away", defensiveTeam: "home", inning: 1, half: "top", modifier: "whammy", walk: 1 }];
     expectEqual(isPowerPlayUsedThisHalf(events, "away", "home", 1, "top"), false, "Whammy walk should not lock out power play");
+  });
+
+  test("Whammy walk that is scored as a run-rule HR still leaves Power Play available", () => {
+    const events = [{ type: "play", team: "away", defensiveTeam: "home", inning: 1, half: "top", modifier: "whammy", whammyWalk: true, walk: 0, homeRun: 1 }];
+    expectEqual(isPowerPlayUsedThisHalf(events, "away", "home", 1, "top"), false, "Original Whammy walk should not lock out power play even if scored as HR");
   });
 
   test("Whammy is consumed for the game even when the batter walks", () => {
@@ -4215,7 +4226,8 @@ export default function WiffleScoringPrototype() {
 
     async function pollSharedState() {
       try {
-        if (hasLocalDraftChanges) return;
+        if (hasPendingSharedSave()) return;
+        if (hasLocalDraftChanges && activePage !== "score") return;
         const response = await fetch(WIFFLE_SHARED_STATE_ENDPOINT, { cache: "no-store" });
         if (!response.ok) return;
         const sharedState = await response.json();
@@ -4234,7 +4246,7 @@ export default function WiffleScoringPrototype() {
     }
 
     function handleSharedStateUpdated(event) {
-      if (!event.detail || hasLocalDraftChanges) return;
+      if (!event.detail || hasPendingSharedSave() || (hasLocalDraftChanges && activePage !== "score")) return;
       applyPersistedState(event.detail);
     }
 
@@ -4244,7 +4256,7 @@ export default function WiffleScoringPrototype() {
       window.removeEventListener("wiffle:shared-state-updated", handleSharedStateUpdated);
       window.clearInterval(timer);
     };
-  }, [storageHydrated, hasLocalDraftChanges]);
+  }, [storageHydrated, hasLocalDraftChanges, activePage]);
 
   useEffect(() => {
     if ((activePage !== "league" && activePage !== "rules" && activePage !== "fields") || !selectedLeagueSaved) return;
@@ -6454,6 +6466,7 @@ export default function WiffleScoringPrototype() {
       result: scoringResult.strikeoutType ? `${scoringResult.label} (${scoringResult.strikeoutType === "looking" ? "Looking" : "Swinging"})` : scoringResult.label,
       strikeoutType: scoringResult.strikeoutType || "",
       modifier: activeModifierInvalid ? null : selectedModifier,
+      whammyWalk: !activeModifierInvalid && selectedModifier === "whammy" && result.type === "walk",
       runs,
       rbi,
       outs: scoringResult.outs ?? (scoringResult.out ? 1 : 0),

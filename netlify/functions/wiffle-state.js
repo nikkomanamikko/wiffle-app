@@ -89,8 +89,9 @@ export default async function handler(request) {
       const currentSavedAt = getSavedAtTime(currentState);
       const baseSavedAtHeader = request.headers.get("x-wiffle-base-saved-at");
       const baseSavedAt = baseSavedAtHeader ? new Date(baseSavedAtHeader).getTime() : 0;
+      const forceSave = request.headers.get("x-wiffle-force-save") === "1";
 
-      if (currentState && currentSavedAt > baseSavedAt) {
+      if (!forceSave && currentState && currentSavedAt > baseSavedAt) {
         return jsonResponse(409, {
           ok: false,
           error: "Shared state is newer than this browser state.",

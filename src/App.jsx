@@ -371,6 +371,60 @@ function getPersistedStateSignature(state) {
   return JSON.stringify(stateWithoutSavedAt);
 }
 
+const deviceSessionStateKeys = [
+  "events",
+  "archivedFinalEventId",
+  "expandedGameId",
+  "activeSavedGameId",
+  "activePage",
+  "statsViewMode",
+  "statsLeagueId",
+  "statsSeasonYear",
+  "statsSessionId",
+  "statsPlayerFilter",
+  "statsVsHitterFilter",
+  "statsVsPitcherFilter",
+  "statsVsScope",
+  "leadersViewMode",
+  "leadersLeagueId",
+  "leadersSeasonYear",
+  "selectedLeaderStats",
+  "fieldImportSourceLeagueId",
+  "selectedImportFieldIds",
+  "setupAttempted",
+  "matchupStatScopeIndex",
+  "selectedLeagueTeamsSessionId",
+  "copyScheduleTargetSessionId",
+  "copyScheduleFirstWeekDate",
+  "copySeasonSourceId",
+  "copySeasonTargetId",
+  "copySeasonFirstWeekDate",
+  "activeScheduleCopyTool",
+  "pendingCopyWeekId",
+  "copyWeekOneWeekLater",
+  "draftSessionId",
+  "draftSelectedPlayer",
+  "draftBidTeamId",
+  "draftBidAmount",
+  "draftTimerRemaining",
+  "draftTimerRunning",
+  "draftAwardError",
+  "mockDraftMode",
+  "mockDrafts",
+  "draftStartedOverrides",
+  "gameStarted",
+  "setupEditingDuringGame",
+];
+
+function mergeSharedStateForLocalStorage(currentState, sharedState) {
+  const nextState = { ...(currentState || {}), ...(sharedState || {}) };
+  deviceSessionStateKeys.forEach((key) => {
+    if (currentState && Object.prototype.hasOwnProperty.call(currentState, key)) nextState[key] = currentState[key];
+    else delete nextState[key];
+  });
+  return nextState;
+}
+
 function loadPersistedAppState() {
   if (typeof window === "undefined") return null;
   try {
@@ -418,7 +472,7 @@ function scheduleSharedStateSaveRetry() {
 
 function flushQueuedSharedStateSave() {
   if (typeof window === "undefined" || sharedStateSaveInFlight || !queuedSharedStateSave) return;
-  const { state, baseSavedAt } = queuedSharedStateSave;
+  const { state, baseSavedAt, forceSave = false } = queuedSharedStateSave;
   queuedSharedStateSave = null;
   sharedStateSaveInFlight = true;
 
@@ -427,6 +481,7 @@ function flushQueuedSharedStateSave() {
     headers: {
       "Content-Type": "application/json",
       "X-Wiffle-Base-Saved-At": baseSavedAt || "",
+      "X-Wiffle-Force-Save": forceSave ? "1" : "0",
     },
     body: JSON.stringify(state),
     keepalive: true,
@@ -438,7 +493,7 @@ function flushQueuedSharedStateSave() {
     }
 
     if (response.status !== 409) {
-      queuedSharedStateSave = { state, baseSavedAt: window.__WIFFLE_SYNC_BASE_SAVED_AT || baseSavedAt || "" };
+      queuedSharedStateSave = { state, baseSavedAt: window.__WIFFLE_SYNC_BASE_SAVED_AT || baseSavedAt || "", forceSave };
       scheduleSharedStateSaveRetry();
       return;
     }
@@ -446,14 +501,15 @@ function flushQueuedSharedStateSave() {
     const conflict = await response.json().catch(() => null);
     const latestState = conflict?.state || null;
     if (!latestState || typeof latestState !== "object") return;
-    window.localStorage.setItem(WIFFLE_LOCAL_STORAGE_KEY, JSON.stringify(latestState));
+    const localState = mergeSharedStateForLocalStorage(loadPersistedAppState(), latestState);
+    window.localStorage.setItem(WIFFLE_LOCAL_STORAGE_KEY, JSON.stringify(localState));
     clearPendingSharedSave();
     window.__WIFFLE_SYNC_BASE_SAVED_AT = latestState.savedAt || "";
     console.warn("Skipped saving stale Wiffle data because another browser has newer saved data.");
     window.dispatchEvent(new CustomEvent("wiffle:shared-state-updated", { detail: latestState }));
   }).catch((error) => {
     console.warn("Unable to save shared Wiffle app data.", error);
-    queuedSharedStateSave = { state, baseSavedAt: window.__WIFFLE_SYNC_BASE_SAVED_AT || baseSavedAt || "" };
+    queuedSharedStateSave = { state, baseSavedAt: window.__WIFFLE_SYNC_BASE_SAVED_AT || baseSavedAt || "", forceSave };
     scheduleSharedStateSaveRetry();
   }).finally(() => {
     sharedStateSaveInFlight = false;
@@ -466,14 +522,21 @@ function savePersistedAppState(state) {
   try {
     window.localStorage.setItem(WIFFLE_LOCAL_STORAGE_KEY, JSON.stringify(state));
     const baseSavedAt = window.__WIFFLE_SYNC_BASE_SAVED_AT || "";
+    const forceSave = Boolean(window.__WIFFLE_FORCE_NEXT_SHARED_SAVE);
+    window.__WIFFLE_FORCE_NEXT_SHARED_SAVE = false;
     window.__WIFFLE_SYNC_BASE_SAVED_AT = state.savedAt || baseSavedAt;
     markPendingSharedSave(state);
-    queuedSharedStateSave = { state, baseSavedAt };
+    queuedSharedStateSave = { state, baseSavedAt, forceSave };
     flushQueuedSharedStateSave();
   } catch (error) {
     console.warn("Unable to save Wiffle app data. Browser storage may be full, usually from large uploaded photos/logos.", error);
     window.alert?.("Some Wiffle data could not be saved because browser storage is full. Try removing or replacing large team/player pictures.");
   }
+}
+
+function markNextSharedStateSaveAuthoritative() {
+  if (typeof window === "undefined") return;
+  window.__WIFFLE_FORCE_NEXT_SHARED_SAVE = true;
 }
 
 function liveEventsSignature(events = []) {
@@ -4065,8 +4128,9 @@ export default function WiffleScoringPrototype() {
   if (unsavedSetupChanges) setupErrors.push("Save setup changes before starting the game.");
   const setupComplete = setupErrors.length === 0;
 
-  function applyPersistedState(savedState) {
+  function applyPersistedState(savedState, options = {}) {
     if (!savedState) return;
+    const { includeSessionState = true } = options;
     suppressNextPersistRef.current = true;
     lastPersistedStateSignatureRef.current = getPersistedStateSignature(savedState);
     if (Array.isArray(savedState.leagues) && savedState.leagues.length > 0) setLeagues(removeUnsavedBlankLeaguePlayers(savedState.leagues));
@@ -4098,61 +4162,67 @@ export default function WiffleScoringPrototype() {
     if (savedState.battingOrder) setBattingOrder(savedState.battingOrder);
     if (savedState.pitchingOrder) setPitchingOrder(savedState.pitchingOrder);
     if (savedState.extraPitchers) setExtraPitchers(savedState.extraPitchers);
-    if (Array.isArray(savedState.events)) setEvents(savedState.events);
+    if (includeSessionState && Array.isArray(savedState.events)) setEvents(savedState.events);
     if (Array.isArray(savedState.previousGames)) setPreviousGames(savedState.previousGames);
-    if (savedState.archivedFinalEventId !== undefined) setArchivedFinalEventId(savedState.archivedFinalEventId);
-    if (savedState.expandedGameId !== undefined) setExpandedGameId(savedState.expandedGameId);
-    if (savedState.activeSavedGameId !== undefined) setActiveSavedGameId(savedState.activeSavedGameId);
-    if (savedState.activePage != null) setActivePage(savedState.activePage);
+    if (includeSessionState && savedState.archivedFinalEventId !== undefined) setArchivedFinalEventId(savedState.archivedFinalEventId);
+    if (includeSessionState && savedState.expandedGameId !== undefined) setExpandedGameId(savedState.expandedGameId);
+    if (includeSessionState && savedState.activeSavedGameId !== undefined) setActiveSavedGameId(savedState.activeSavedGameId);
+    if (includeSessionState && savedState.activePage != null) setActivePage(savedState.activePage);
     if (savedState.selectedLeagueId != null) setSelectedLeagueId(savedState.selectedLeagueId);
     if (savedState.setupLeagueId != null) setSetupLeagueId(savedState.setupLeagueId);
     if (savedState.leagueGameMode != null) setLeagueGameMode(savedState.leagueGameMode);
     if (savedState.awayLeagueTeamId != null) setAwayLeagueTeamId(savedState.awayLeagueTeamId);
     if (savedState.homeLeagueTeamId != null) setHomeLeagueTeamId(savedState.homeLeagueTeamId);
-    if (savedState.statsViewMode != null) setStatsViewMode(savedState.statsViewMode);
-    if (savedState.statsLeagueId != null) setStatsLeagueId(savedState.statsLeagueId);
-    if (savedState.statsSeasonYear != null) setStatsSeasonYear(savedState.statsSeasonYear);
-    if (savedState.statsSessionId != null) setStatsSessionId(savedState.statsSessionId);
-    if (savedState.statsPlayerFilter != null) setStatsPlayerFilter(savedState.statsPlayerFilter);
-    if (savedState.statsVsHitterFilter != null) setStatsVsHitterFilter(savedState.statsVsHitterFilter);
-    if (savedState.statsVsPitcherFilter != null) setStatsVsPitcherFilter(savedState.statsVsPitcherFilter);
-    if (savedState.statsVsScope != null) setStatsVsScope(savedState.statsVsScope);
-    if (savedState.leadersViewMode != null) setLeadersViewMode(savedState.leadersViewMode);
-    if (savedState.leadersLeagueId != null) setLeadersLeagueId(savedState.leadersLeagueId);
-    if (savedState.leadersSeasonYear != null) setLeadersSeasonYear(savedState.leadersSeasonYear);
-    if (Array.isArray(savedState.selectedLeaderStats)) setSelectedLeaderStats(savedState.selectedLeaderStats);
-    if (savedState.fieldImportSourceLeagueId != null) setFieldImportSourceLeagueId(savedState.fieldImportSourceLeagueId);
-    if (Array.isArray(savedState.selectedImportFieldIds)) setSelectedImportFieldIds(savedState.selectedImportFieldIds);
-    if (savedState.setupAttempted != null) setSetupAttempted(savedState.setupAttempted);
-    if (savedState.matchupStatScopeIndex != null) setMatchupStatScopeIndex(savedState.matchupStatScopeIndex);
-    if (savedState.selectedLeagueTeamsSessionId != null) setSelectedLeagueTeamsSessionId(savedState.selectedLeagueTeamsSessionId);
+    if (includeSessionState) {
+      if (savedState.statsViewMode != null) setStatsViewMode(savedState.statsViewMode);
+      if (savedState.statsLeagueId != null) setStatsLeagueId(savedState.statsLeagueId);
+      if (savedState.statsSeasonYear != null) setStatsSeasonYear(savedState.statsSeasonYear);
+      if (savedState.statsSessionId != null) setStatsSessionId(savedState.statsSessionId);
+      if (savedState.statsPlayerFilter != null) setStatsPlayerFilter(savedState.statsPlayerFilter);
+      if (savedState.statsVsHitterFilter != null) setStatsVsHitterFilter(savedState.statsVsHitterFilter);
+      if (savedState.statsVsPitcherFilter != null) setStatsVsPitcherFilter(savedState.statsVsPitcherFilter);
+      if (savedState.statsVsScope != null) setStatsVsScope(savedState.statsVsScope);
+      if (savedState.leadersViewMode != null) setLeadersViewMode(savedState.leadersViewMode);
+      if (savedState.leadersLeagueId != null) setLeadersLeagueId(savedState.leadersLeagueId);
+      if (savedState.leadersSeasonYear != null) setLeadersSeasonYear(savedState.leadersSeasonYear);
+      if (Array.isArray(savedState.selectedLeaderStats)) setSelectedLeaderStats(savedState.selectedLeaderStats);
+      if (savedState.fieldImportSourceLeagueId != null) setFieldImportSourceLeagueId(savedState.fieldImportSourceLeagueId);
+      if (Array.isArray(savedState.selectedImportFieldIds)) setSelectedImportFieldIds(savedState.selectedImportFieldIds);
+      if (savedState.setupAttempted != null) setSetupAttempted(savedState.setupAttempted);
+      if (savedState.matchupStatScopeIndex != null) setMatchupStatScopeIndex(savedState.matchupStatScopeIndex);
+      if (savedState.selectedLeagueTeamsSessionId != null) setSelectedLeagueTeamsSessionId(savedState.selectedLeagueTeamsSessionId);
+    }
     if (savedState.useLeagueSchedule != null) setUseLeagueSchedule(savedState.useLeagueSchedule);
     if (savedState.selectedScheduledWeekId != null) setSelectedScheduledWeekId(savedState.selectedScheduledWeekId);
     if (savedState.selectedScheduledGameId != null) setSelectedScheduledGameId(savedState.selectedScheduledGameId);
-    if (savedState.copyScheduleTargetSessionId != null) setCopyScheduleTargetSessionId(savedState.copyScheduleTargetSessionId);
-    if (savedState.copyScheduleFirstWeekDate != null) setCopyScheduleFirstWeekDate(savedState.copyScheduleFirstWeekDate);
-    if (savedState.copySeasonSourceId != null) setCopySeasonSourceId(savedState.copySeasonSourceId);
-    if (savedState.copySeasonTargetId != null) setCopySeasonTargetId(savedState.copySeasonTargetId);
-    if (savedState.copySeasonFirstWeekDate != null) setCopySeasonFirstWeekDate(savedState.copySeasonFirstWeekDate);
-    if (savedState.activeScheduleCopyTool != null) setActiveScheduleCopyTool(savedState.activeScheduleCopyTool);
-    if (savedState.pendingCopyWeekId != null) setPendingCopyWeekId(savedState.pendingCopyWeekId);
-    if (savedState.copyWeekOneWeekLater != null) setCopyWeekOneWeekLater(savedState.copyWeekOneWeekLater);
-    if (savedState.draftSessionId != null) setDraftSessionId(savedState.draftSessionId);
-    if (savedState.draftSelectedPlayer != null) setDraftSelectedPlayer(savedState.draftSelectedPlayer);
-    if (savedState.draftBidTeamId != null) setDraftBidTeamId(savedState.draftBidTeamId);
-    if (savedState.draftBidAmount != null) setDraftBidAmount(savedState.draftBidAmount);
-    if (savedState.draftTimerRemaining != null) setDraftTimerRemaining(savedState.draftTimerRemaining);
-    if (savedState.draftTimerRunning != null) setDraftTimerRunning(savedState.draftTimerRunning);
-    if (savedState.draftAwardError != null) setDraftAwardError(savedState.draftAwardError);
-    if (savedState.mockDraftMode != null) setMockDraftMode(savedState.mockDraftMode);
-    if (savedState.mockDrafts) setMockDrafts(savedState.mockDrafts);
-    if (savedState.draftStartedOverrides) setDraftStartedOverrides(savedState.draftStartedOverrides);
-    if (savedState.gameStarted != null) setGameStarted(savedState.gameStarted);
+    if (includeSessionState) {
+      if (savedState.copyScheduleTargetSessionId != null) setCopyScheduleTargetSessionId(savedState.copyScheduleTargetSessionId);
+      if (savedState.copyScheduleFirstWeekDate != null) setCopyScheduleFirstWeekDate(savedState.copyScheduleFirstWeekDate);
+      if (savedState.copySeasonSourceId != null) setCopySeasonSourceId(savedState.copySeasonSourceId);
+      if (savedState.copySeasonTargetId != null) setCopySeasonTargetId(savedState.copySeasonTargetId);
+      if (savedState.copySeasonFirstWeekDate != null) setCopySeasonFirstWeekDate(savedState.copySeasonFirstWeekDate);
+      if (savedState.activeScheduleCopyTool != null) setActiveScheduleCopyTool(savedState.activeScheduleCopyTool);
+      if (savedState.pendingCopyWeekId != null) setPendingCopyWeekId(savedState.pendingCopyWeekId);
+      if (savedState.copyWeekOneWeekLater != null) setCopyWeekOneWeekLater(savedState.copyWeekOneWeekLater);
+      if (savedState.draftSessionId != null) setDraftSessionId(savedState.draftSessionId);
+      if (savedState.draftSelectedPlayer != null) setDraftSelectedPlayer(savedState.draftSelectedPlayer);
+      if (savedState.draftBidTeamId != null) setDraftBidTeamId(savedState.draftBidTeamId);
+      if (savedState.draftBidAmount != null) setDraftBidAmount(savedState.draftBidAmount);
+      if (savedState.draftTimerRemaining != null) setDraftTimerRemaining(savedState.draftTimerRemaining);
+      if (savedState.draftTimerRunning != null) setDraftTimerRunning(savedState.draftTimerRunning);
+      if (savedState.draftAwardError != null) setDraftAwardError(savedState.draftAwardError);
+      if (savedState.mockDraftMode != null) setMockDraftMode(savedState.mockDraftMode);
+      if (savedState.mockDrafts) setMockDrafts(savedState.mockDrafts);
+      if (savedState.draftStartedOverrides) setDraftStartedOverrides(savedState.draftStartedOverrides);
+      if (savedState.gameStarted != null) setGameStarted(savedState.gameStarted);
+    }
     if (savedState.savedSetupSignature != null) setSavedSetupSignature(savedState.savedSetupSignature);
-    if (savedState.setupEditingDuringGame != null) setSetupEditingDuringGame(savedState.setupEditingDuringGame);
-    setPlayerDrafts(null);
-    setLeagueDraft(null);
-    setLeagueDraftLeagueId("");
+    if (includeSessionState && savedState.setupEditingDuringGame != null) setSetupEditingDuringGame(savedState.setupEditingDuringGame);
+    if (includeSessionState) {
+      setPlayerDrafts(null);
+      setLeagueDraft(null);
+      setLeagueDraftLeagueId("");
+    }
   }
 
   useEffect(() => {
@@ -4328,9 +4398,10 @@ export default function WiffleScoringPrototype() {
         const baseSavedAt = window.__WIFFLE_SYNC_BASE_SAVED_AT ? new Date(window.__WIFFLE_SYNC_BASE_SAVED_AT).getTime() : 0;
         if (sharedSavedAt <= baseSavedAt) return;
 
-        window.localStorage.setItem(WIFFLE_LOCAL_STORAGE_KEY, JSON.stringify(sharedState));
+        const localState = mergeSharedStateForLocalStorage(loadPersistedAppState(), sharedState);
+        window.localStorage.setItem(WIFFLE_LOCAL_STORAGE_KEY, JSON.stringify(localState));
         window.__WIFFLE_SYNC_BASE_SAVED_AT = sharedState.savedAt || "";
-        applyPersistedState(sharedState);
+        applyPersistedState(sharedState, { includeSessionState: false });
       } catch (error) {
         // The shared API can be unavailable in static previews or while offline.
       }
@@ -4338,7 +4409,7 @@ export default function WiffleScoringPrototype() {
 
     function handleSharedStateUpdated(event) {
       if (!event.detail || hasPendingSharedSave() || (hasLocalDraftChanges && activePage !== "score")) return;
-      applyPersistedState(event.detail);
+      applyPersistedState(event.detail, { includeSessionState: false });
     }
 
     window.addEventListener("wiffle:shared-state-updated", handleSharedStateUpdated);
@@ -4362,6 +4433,7 @@ export default function WiffleScoringPrototype() {
   }, [activePage, allPlayerRecords, playerDrafts]);
 
   function saveSetupChanges() {
+    markNextSharedStateSaveAuthoritative();
     setSavedSetupSignature(currentSetupSignature);
   }
 
@@ -4376,6 +4448,7 @@ export default function WiffleScoringPrototype() {
 
   function saveLeagueDraftChanges() {
     if (!leagueDraft || !leagueDraftLeagueId) return;
+    markNextSharedStateSaveAuthoritative();
     const beforeLeague = leagues.find((league) => league.id === leagueDraftLeagueId) || selectedLeagueSaved || {};
     const savedDraft = cloneLeagueRecord(leagueDraft);
     const rulesChanged = JSON.stringify(beforeLeague.leagueRules || []) !== JSON.stringify(savedDraft.leagueRules || []);
@@ -4500,6 +4573,7 @@ export default function WiffleScoringPrototype() {
   }
 
   function savePlayerPageChanges() {
+    markNextSharedStateSaveAuthoritative();
     const drafts = playerDrafts || [];
     const nextLeagues = syncGlobalPlayerDraftsToLeagues(leagues, drafts);
     const nextFreeAgentPlayers = syncGlobalPlayerDraftsToFreeAgents(drafts);
@@ -6809,6 +6883,7 @@ export default function WiffleScoringPrototype() {
   }
 
   function saveCurrentGame() {
+    markNextSharedStateSaveAuthoritative();
     const snapshot = makeGameArchiveEntry(events, activeSavedGameId);
     setPreviousGames((prev) => {
       if (activeSavedGameId && prev.some((savedGame) => savedGame.id === activeSavedGameId)) {
@@ -6891,6 +6966,7 @@ export default function WiffleScoringPrototype() {
   useEffect(() => {
     const lastEventId = events[events.length - 1]?.id || null;
     if (game.status === "final" && events.length > 0 && lastEventId && archivedFinalEventId !== lastEventId) {
+      markNextSharedStateSaveAuthoritative();
       const snapshot = makeGameArchiveEntry(events, activeSavedGameId);
       setPreviousGames((prev) => {
         if (activeSavedGameId && prev.some((savedGame) => savedGame.id === activeSavedGameId)) {

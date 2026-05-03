@@ -350,8 +350,13 @@ function canonicalizePlayerRecordsForDirtyCheck(players = []) {
 }
 
 const WIFFLE_LOCAL_STORAGE_KEY = "wiffle-app-state-v1";
+const WIFFLE_PENDING_SAVE_KEY = "wiffle-app-pending-save-v1";
 const WIFFLE_SHARED_STATE_ENDPOINT = "/.netlify/functions/wiffle-state";
-const WIFFLE_SHARED_STATE_POLL_MS = 15000;
+const WIFFLE_SHARED_STATE_POLL_MS = 2000;
+const WIFFLE_SHARED_SAVE_RETRY_MS = 1200;
+let queuedSharedStateSave = null;
+let sharedStateSaveInFlight = false;
+let sharedStateSaveRetryTimer = null;
 
 function getSavedAtTime(state) {
   const savedAt = state?.savedAt ? new Date(state.savedAt).getTime() : 0;
@@ -380,37 +385,84 @@ function loadPersistedAppState() {
   }
 }
 
+function markPendingSharedSave(state) {
+  if (typeof window === "undefined" || !state?.savedAt) return;
+  window.localStorage.setItem(WIFFLE_PENDING_SAVE_KEY, JSON.stringify({ savedAt: state.savedAt }));
+}
+
+function clearPendingSharedSave(savedAt = "") {
+  if (typeof window === "undefined") return;
+  try {
+    const pendingRaw = window.localStorage.getItem(WIFFLE_PENDING_SAVE_KEY);
+    const pending = pendingRaw ? JSON.parse(pendingRaw) : null;
+    if (!savedAt || !pending?.savedAt || pending.savedAt <= savedAt) {
+      window.localStorage.removeItem(WIFFLE_PENDING_SAVE_KEY);
+    }
+  } catch (error) {
+    window.localStorage.removeItem(WIFFLE_PENDING_SAVE_KEY);
+  }
+}
+
+function scheduleSharedStateSaveRetry() {
+  if (typeof window === "undefined") return;
+  window.clearTimeout(sharedStateSaveRetryTimer);
+  sharedStateSaveRetryTimer = window.setTimeout(flushQueuedSharedStateSave, WIFFLE_SHARED_SAVE_RETRY_MS);
+}
+
+function flushQueuedSharedStateSave() {
+  if (typeof window === "undefined" || sharedStateSaveInFlight || !queuedSharedStateSave) return;
+  const { state, baseSavedAt } = queuedSharedStateSave;
+  queuedSharedStateSave = null;
+  sharedStateSaveInFlight = true;
+
+  window.fetch?.(WIFFLE_SHARED_STATE_ENDPOINT, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Wiffle-Base-Saved-At": baseSavedAt || "",
+    },
+    body: JSON.stringify(state),
+    keepalive: true,
+  }).then(async (response) => {
+    if (response.ok) {
+      window.__WIFFLE_SYNC_BASE_SAVED_AT = state.savedAt || window.__WIFFLE_SYNC_BASE_SAVED_AT || "";
+      clearPendingSharedSave(state.savedAt || "");
+      return;
+    }
+
+    if (response.status !== 409) {
+      queuedSharedStateSave = { state, baseSavedAt: window.__WIFFLE_SYNC_BASE_SAVED_AT || baseSavedAt || "" };
+      scheduleSharedStateSaveRetry();
+      return;
+    }
+
+    const conflict = await response.json().catch(() => null);
+    const latestState = conflict?.state || null;
+    if (!latestState || typeof latestState !== "object") return;
+    window.localStorage.setItem(WIFFLE_LOCAL_STORAGE_KEY, JSON.stringify(latestState));
+    clearPendingSharedSave();
+    window.__WIFFLE_SYNC_BASE_SAVED_AT = latestState.savedAt || "";
+    console.warn("Skipped saving stale Wiffle data because another browser has newer saved data.");
+    window.dispatchEvent(new CustomEvent("wiffle:shared-state-updated", { detail: latestState }));
+  }).catch((error) => {
+    console.warn("Unable to save shared Wiffle app data.", error);
+    queuedSharedStateSave = { state, baseSavedAt: window.__WIFFLE_SYNC_BASE_SAVED_AT || baseSavedAt || "" };
+    scheduleSharedStateSaveRetry();
+  }).finally(() => {
+    sharedStateSaveInFlight = false;
+    if (queuedSharedStateSave) flushQueuedSharedStateSave();
+  });
+}
+
 function savePersistedAppState(state) {
   if (typeof window === "undefined") return;
   try {
     window.localStorage.setItem(WIFFLE_LOCAL_STORAGE_KEY, JSON.stringify(state));
     const baseSavedAt = window.__WIFFLE_SYNC_BASE_SAVED_AT || "";
     window.__WIFFLE_SYNC_BASE_SAVED_AT = state.savedAt || baseSavedAt;
-    window.fetch?.(WIFFLE_SHARED_STATE_ENDPOINT, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Wiffle-Base-Saved-At": baseSavedAt,
-      },
-      body: JSON.stringify(state),
-      keepalive: true,
-    }).then(async (response) => {
-      if (response.ok) {
-        window.__WIFFLE_SYNC_BASE_SAVED_AT = state.savedAt || "";
-        return;
-      }
-
-      if (response.status !== 409) return;
-      const conflict = await response.json().catch(() => null);
-      const latestState = conflict?.state || null;
-      if (!latestState || typeof latestState !== "object") return;
-      window.localStorage.setItem(WIFFLE_LOCAL_STORAGE_KEY, JSON.stringify(latestState));
-      window.__WIFFLE_SYNC_BASE_SAVED_AT = latestState.savedAt || "";
-      console.warn("Skipped saving stale Wiffle data because another browser has newer saved data.");
-      window.dispatchEvent(new CustomEvent("wiffle:shared-state-updated", { detail: latestState }));
-    }).catch((error) => {
-      console.warn("Unable to save shared Wiffle app data.", error);
-    });
+    markPendingSharedSave(state);
+    queuedSharedStateSave = { state, baseSavedAt };
+    flushQueuedSharedStateSave();
   } catch (error) {
     console.warn("Unable to save Wiffle app data. Browser storage may be full, usually from large uploaded photos/logos.", error);
     window.alert?.("Some Wiffle data could not be saved because browser storage is full. Try removing or replacing large team/player pictures.");

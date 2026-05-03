@@ -56,7 +56,7 @@ function startSharedStatePolling() {
       window.__WIFFLE_SYNC_BASE_SAVED_AT = sharedState.savedAt || "";
       window.location.reload();
     } catch (error) {
-      // The API is optional during static preview, so polling failures stay quiet.
+      // API may be unavailable in static preview.
     }
   }, WIFFLE_SHARED_STATE_POLL_MS);
 }

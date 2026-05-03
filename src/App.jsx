@@ -358,6 +358,12 @@ function getSavedAtTime(state) {
   return Number.isFinite(savedAt) ? savedAt : 0;
 }
 
+function getPersistedStateSignature(state) {
+  if (!state || typeof state !== "object") return "";
+  const { savedAt, ...stateWithoutSavedAt } = state;
+  return JSON.stringify(stateWithoutSavedAt);
+}
+
 function loadPersistedAppState() {
   if (typeof window === "undefined") return null;
   try {
@@ -3539,6 +3545,8 @@ function LeagueTeamEditor({ team, teamIndex, playersPerTeam, divisions = [], pla
 export default function WiffleScoringPrototype() {
   const storageHydratedRef = useRef(false);
   const setupSignatureInitializedRef = useRef(false);
+  const suppressNextPersistRef = useRef(true);
+  const lastPersistedStateSignatureRef = useRef("");
   const [storageHydrated, setStorageHydrated] = useState(false);
   const [awayTeam, setAwayTeam] = useState("Away Team");
   const [homeTeam, setHomeTeam] = useState("Home Team");
@@ -3928,6 +3936,8 @@ export default function WiffleScoringPrototype() {
 
   function applyPersistedState(savedState) {
     if (!savedState) return;
+    suppressNextPersistRef.current = true;
+    lastPersistedStateSignatureRef.current = getPersistedStateSignature(savedState);
     if (Array.isArray(savedState.leagues) && savedState.leagues.length > 0) setLeagues(removeUnsavedBlankLeaguePlayers(savedState.leagues));
     if (Array.isArray(savedState.freeAgentPlayers)) setFreeAgentPlayers(savedState.freeAgentPlayers.map(normalizeLeaguePlayer).filter((player) => String(player.name || "").trim()));
     if (savedState.awayTeam != null) setAwayTeam(savedState.awayTeam);
@@ -4030,9 +4040,8 @@ export default function WiffleScoringPrototype() {
 
   useEffect(() => {
     if (!storageHydrated) return;
-    savePersistedAppState({
+    const nextState = {
       version: 1,
-      savedAt: new Date().toISOString(),
       awayTeam,
       homeTeam,
       gameDate,
@@ -4114,7 +4123,15 @@ export default function WiffleScoringPrototype() {
       gameStarted,
       savedSetupSignature,
       setupEditingDuringGame,
-    });
+    };
+    const nextStateSignature = getPersistedStateSignature(nextState);
+    if (suppressNextPersistRef.current || nextStateSignature === lastPersistedStateSignatureRef.current) {
+      suppressNextPersistRef.current = false;
+      lastPersistedStateSignatureRef.current = nextStateSignature;
+      return;
+    }
+    lastPersistedStateSignatureRef.current = nextStateSignature;
+    savePersistedAppState({ ...nextState, savedAt: new Date().toISOString() });
   }, [storageHydrated, awayTeam, homeTeam, gameDate, gameTime, gameLocation, gameSeasonYear, gameSessionId, selectedFieldId, gameInnings, powerPlaysEnabled, powerPlayLimitType, powerPlayLimitAmount, whammysEnabled, pudwhackerEnabled, extraRunnerRules, ghostRunnersCountAsRbi, runRuleEnabled, runRuleRuns, runRuleBeforeFourthOnly, walkRunRuleCountsAsHr, useLeagueDefaultRules, teamPlayers, subPlayers, subSlots, battingOrder, pitchingOrder, extraPitchers, events, previousGames, archivedFinalEventId, expandedGameId, activeSavedGameId, activePage, leagues, freeAgentPlayers, selectedLeagueId, setupLeagueId, leagueGameMode, awayLeagueTeamId, homeLeagueTeamId, statsViewMode, statsLeagueId, statsSeasonYear, statsSessionId, statsPlayerFilter, statsVsHitterFilter, statsVsPitcherFilter, statsVsScope, leadersViewMode, leadersLeagueId, leadersSeasonYear, selectedLeaderStats, fieldImportSourceLeagueId, selectedImportFieldIds, setupAttempted, matchupStatScopeIndex, selectedLeagueTeamsSessionId, useLeagueSchedule, selectedScheduledWeekId, selectedScheduledGameId, copyScheduleTargetSessionId, copyScheduleFirstWeekDate, copySeasonSourceId, copySeasonTargetId, copySeasonFirstWeekDate, activeScheduleCopyTool, pendingCopyWeekId, copyWeekOneWeekLater, draftSessionId, draftSelectedPlayer, draftBidTeamId, draftBidAmount, draftTimerRemaining, draftTimerRunning, draftAwardError, mockDraftMode, mockDrafts, draftStartedOverrides, gameStarted, savedSetupSignature, setupEditingDuringGame]);
 
   useEffect(() => {

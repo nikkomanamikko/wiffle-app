@@ -18,14 +18,7 @@ async function syncNewestSharedStateBeforeRender() {
     const sharedState = await response.json();
     if (!sharedState || typeof sharedState !== "object") return;
 
-    const localRaw = window.localStorage.getItem(WIFFLE_LOCAL_STORAGE_KEY);
-    const localState = localRaw ? JSON.parse(localRaw) : null;
-    const localSavedAt = savedAtTime(localState);
-    const sharedSavedAt = savedAtTime(sharedState);
-
-    if (!localState || sharedSavedAt > localSavedAt) {
-      window.localStorage.setItem(WIFFLE_LOCAL_STORAGE_KEY, JSON.stringify(sharedState));
-    }
+    window.localStorage.setItem(WIFFLE_LOCAL_STORAGE_KEY, JSON.stringify(sharedState));
   } catch (error) {
     console.warn("Unable to load shared Wiffle data before startup.", error);
   } finally {

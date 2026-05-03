@@ -8,6 +8,7 @@ const port = Number(process.env.PORT) || 5173;
 const distDir = path.join(__dirname, "dist");
 const stateDir = process.env.WIFFLE_DATA_DIR ? path.resolve(process.env.WIFFLE_DATA_DIR) : path.join(__dirname, ".data");
 const stateFile = path.join(stateDir, "wiffle-state.json");
+const liveEventsFile = path.join(stateDir, "wiffle-live-events.json");
 
 const contentTypes = {
   ".css": "text/css; charset=utf-8",
@@ -58,7 +59,62 @@ function writeSharedState(state) {
   fs.writeFileSync(stateFile, JSON.stringify(state, null, 2));
 }
 
+function readLiveEvents() {
+  if (!fs.existsSync(liveEventsFile)) return { events: [], updatedAt: "" };
+  return JSON.parse(fs.readFileSync(liveEventsFile, "utf8"));
+}
+
+function writeLiveEvents(events) {
+  const nextLiveEvents = { events, updatedAt: new Date().toISOString() };
+  fs.mkdirSync(stateDir, { recursive: true });
+  fs.writeFileSync(liveEventsFile, JSON.stringify(nextLiveEvents, null, 2));
+  return nextLiveEvents;
+}
+
 async function handleStateApi(request, response) {
+  const isLiveEventsRequest = (request.url || "").includes("liveEvents=1");
+
+  if (isLiveEventsRequest) {
+    if (request.method === "GET") {
+      sendJson(response, 200, readLiveEvents());
+      return;
+    }
+
+    if (request.method === "DELETE") {
+      if (fs.existsSync(liveEventsFile)) fs.unlinkSync(liveEventsFile);
+      sendJson(response, 200, { ok: true, deleted: true });
+      return;
+    }
+
+    if (request.method === "POST") {
+      try {
+        const parsed = JSON.parse((await readRequestBody(request)) || "null");
+        const operation = parsed?.operation || "append";
+        let events = Array.isArray(readLiveEvents().events) ? readLiveEvents().events : [];
+        if (operation === "replace") events = Array.isArray(parsed.events) ? parsed.events : [];
+        else if (operation === "clear") events = [];
+        else {
+          const incomingEvents = Array.isArray(parsed?.events) ? parsed.events : parsed?.event ? [parsed.event] : [];
+          const existingIds = new Set(events.map((event) => event?.id).filter(Boolean));
+          incomingEvents.forEach((event) => {
+            if (!event || typeof event !== "object") return;
+            if (event.id && existingIds.has(event.id)) return;
+            events.push(event);
+            if (event.id) existingIds.add(event.id);
+          });
+        }
+        const nextLiveEvents = writeLiveEvents(events);
+        sendJson(response, 200, { ok: true, eventCount: events.length, updatedAt: nextLiveEvents.updatedAt });
+      } catch (error) {
+        sendJson(response, 400, { ok: false, error: error?.message || "Invalid JSON." });
+      }
+      return;
+    }
+
+    sendJson(response, 405, { ok: false, error: "Method not allowed." });
+    return;
+  }
+
   if (request.method === "GET") {
     sendJson(response, 200, readSharedState());
     return;

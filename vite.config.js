@@ -6,6 +6,7 @@ import { defineConfig } from "vite";
 
 const stateDir = path.resolve(".data");
 const stateFile = path.join(stateDir, "wiffle-state.json");
+const liveEventsFile = path.join(stateDir, "wiffle-live-events.json");
 
 function sharedWiffleStatePlugin() {
   return {
@@ -13,18 +14,20 @@ function sharedWiffleStatePlugin() {
     configureServer(server) {
       function handleSharedStateRequest(req, res) {
         res.setHeader("Content-Type", "application/json");
+        const isLiveEventsRequest = (req.url || "").includes("liveEvents=1");
+        const activeStateFile = isLiveEventsRequest ? liveEventsFile : stateFile;
 
         if (req.method === "GET") {
-          if (!fs.existsSync(stateFile)) {
-            res.end(JSON.stringify(null));
+          if (!fs.existsSync(activeStateFile)) {
+            res.end(JSON.stringify(isLiveEventsRequest ? { events: [], updatedAt: "" } : null));
             return;
           }
-          res.end(fs.readFileSync(stateFile, "utf8"));
+          res.end(fs.readFileSync(activeStateFile, "utf8"));
           return;
         }
 
         if (req.method === "DELETE") {
-          if (fs.existsSync(stateFile)) fs.unlinkSync(stateFile);
+          if (fs.existsSync(activeStateFile)) fs.unlinkSync(activeStateFile);
           res.end(JSON.stringify({ ok: true, deleted: true }));
           return;
         }
@@ -37,6 +40,29 @@ function sharedWiffleStatePlugin() {
           req.on("end", () => {
             try {
               const parsed = JSON.parse(body || "null");
+              if (isLiveEventsRequest) {
+                const operation = parsed?.operation || "append";
+                const current = fs.existsSync(liveEventsFile) ? JSON.parse(fs.readFileSync(liveEventsFile, "utf8")) : { events: [], updatedAt: "" };
+                let events = Array.isArray(current.events) ? current.events : [];
+                if (operation === "replace") events = Array.isArray(parsed.events) ? parsed.events : [];
+                else if (operation === "clear") events = [];
+                else {
+                  const incomingEvents = Array.isArray(parsed.events) ? parsed.events : parsed?.event ? [parsed.event] : [];
+                  const existingIds = new Set(events.map((event) => event?.id).filter(Boolean));
+                  incomingEvents.forEach((event) => {
+                    if (!event || typeof event !== "object") return;
+                    if (event.id && existingIds.has(event.id)) return;
+                    events.push(event);
+                    if (event.id) existingIds.add(event.id);
+                  });
+                }
+                const nextLiveEvents = { events, updatedAt: new Date().toISOString() };
+                fs.mkdirSync(stateDir, { recursive: true });
+                fs.writeFileSync(liveEventsFile, JSON.stringify(nextLiveEvents, null, 2));
+                res.end(JSON.stringify({ ok: true, eventCount: events.length, updatedAt: nextLiveEvents.updatedAt }));
+                return;
+              }
+
               if (!parsed || typeof parsed !== "object") {
                 res.statusCode = 400;
                 res.end(JSON.stringify({ ok: false, error: "Invalid app state." }));

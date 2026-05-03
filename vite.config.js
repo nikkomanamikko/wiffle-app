@@ -11,7 +11,7 @@ function sharedWiffleStatePlugin() {
   return {
     name: "shared-wiffle-state",
     configureServer(server) {
-      server.middlewares.use("/api/wiffle-state", (req, res) => {
+      function handleSharedStateRequest(req, res) {
         res.setHeader("Content-Type", "application/json");
 
         if (req.method === "GET") {
@@ -52,7 +52,10 @@ function sharedWiffleStatePlugin() {
 
         res.statusCode = 405;
         res.end(JSON.stringify({ ok: false, error: "Method not allowed" }));
-      });
+      }
+
+      server.middlewares.use("/api/wiffle-state", handleSharedStateRequest);
+      server.middlewares.use("/.netlify/functions/wiffle-state", handleSharedStateRequest);
     },
   };
 }

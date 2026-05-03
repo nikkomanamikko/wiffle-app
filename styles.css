@@ -1,0 +1,52 @@
+@import "tailwindcss";
+
+body {
+  margin: 0;
+}
+
+html,
+body,
+#root {
+  min-height: 100%;
+}
+
+body {
+  overflow-x: hidden;
+  -webkit-tap-highlight-color: transparent;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+.mobile-nav {
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+}
+
+.mobile-nav::-webkit-scrollbar {
+  display: none;
+}
+
+@media (max-width: 640px) {
+  body {
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+
+  table {
+    white-space: nowrap;
+  }
+
+  input,
+  select,
+  textarea {
+    font-size: 16px;
+  }
+
+  summary {
+    touch-action: manipulation;
+  }
+}

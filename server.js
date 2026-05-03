@@ -64,6 +64,12 @@ async function handleStateApi(request, response) {
     return;
   }
 
+  if (request.method === "DELETE") {
+    if (fs.existsSync(stateFile)) fs.unlinkSync(stateFile);
+    sendJson(response, 200, { ok: true, deleted: true });
+    return;
+  }
+
   if (request.method === "POST") {
     try {
       const parsed = JSON.parse((await readRequestBody(request)) || "null");

@@ -1871,6 +1871,18 @@ function isWhammyBlockingPowerPlayThisHalf(events, defensiveTeam, inning, half) 
   );
 }
 
+function isPowerPlayBlockingWhammyThisHalf(events, team, inning, half) {
+  return events.some(
+    (event) =>
+      event.type === "play" &&
+      event.modifier === "power_play" &&
+      event.team === team &&
+      event.inning === inning &&
+      event.half === half &&
+      !event.walk,
+  );
+}
+
 function countPowerPlaysThisGame(events, team) {
   return events.filter((event) => event.type === "play" && event.modifier === "power_play" && event.team === team && !event.walk).length;
 }
@@ -1916,6 +1928,10 @@ function countWhammysThisHalf(events, defensiveTeam, inning, half) {
 
 function isWhammyUsedThisGame(events, defensiveTeam) {
   return countWhammysThisGame(events, defensiveTeam) > 0;
+}
+
+function isWhammyUnavailable(events, team, defensiveTeam, inning, half) {
+  return isWhammyUsedThisGame(events, defensiveTeam) || isPowerPlayBlockingWhammyThisHalf(events, team, inning, half);
 }
 
 function isWhammyLimitReached(events, defensiveTeam, inning, half, limitType, limitAmount) {
@@ -2527,6 +2543,16 @@ function runSelfTests() {
   test("Power Play is not consumed when the batter walks", () => {
     const events = [{ type: "play", team: "away", defensiveTeam: "home", inning: 1, half: "top", modifier: "power_play", walk: 1 }];
     expectEqual(isPowerPlayUsedThisHalf(events, "away", "home", 1, "top"), false, "Walk should not consume power play");
+  });
+
+  test("Power Play prevents Whammy from being used in the same half inning when the batter does not walk", () => {
+    const events = [{ type: "play", team: "away", defensiveTeam: "home", inning: 1, half: "top", modifier: "power_play", walk: 0 }];
+    expectEqual(isWhammyUnavailable(events, "away", "home", 1, "top"), true, "Non-walk Power Play should lock out Whammy");
+  });
+
+  test("Power Play walk does not prevent Whammy from being used in the same half inning", () => {
+    const events = [{ type: "play", team: "away", defensiveTeam: "home", inning: 1, half: "top", modifier: "power_play", walk: 1 }];
+    expectEqual(isWhammyUnavailable(events, "away", "home", 1, "top"), false, "Power Play walk should not lock out Whammy");
   });
 
   test("Whammy prevents Power Play from being used in the same half inning when the batter does not walk", () => {
@@ -3754,7 +3780,7 @@ export default function WiffleScoringPrototype() {
   const lastEvent = events[events.length - 1];
   const allTestsPassed = testResults.every((item) => item.pass);
   const powerPlayUsed = !powerPlaysEnabled || isPowerPlayLimitReached(events, battingTeam, defensiveTeam, game.inning, game.half, powerPlayLimitType, powerPlayLimitAmount);
-  const whammyUsed = !powerPlaysEnabled || !whammysEnabled || isWhammyUsedThisGame(events, defensiveTeam);
+  const whammyUsed = !powerPlaysEnabled || !whammysEnabled || isWhammyUnavailable(events, battingTeam, defensiveTeam, game.inning, game.half);
   const pudwhackerUsed = isPudwhackerUsedThisGame(events, battingTeam);
   const pudwhackerAvailable = isPudwhackerAvailable(events, battingTeam, game.inning, pudwhackerEnabled);
   const activeModifierInvalid = (selectedModifier === "power_play" && (!powerPlaysEnabled || powerPlayUsed)) || (selectedModifier === "whammy" && (!powerPlaysEnabled || !whammysEnabled || whammyUsed)) || (selectedModifier === "pudwhacker" && !pudwhackerAvailable);

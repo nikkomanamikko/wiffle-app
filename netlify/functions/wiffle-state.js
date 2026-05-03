@@ -25,6 +25,11 @@ export default async function handler(request) {
     return jsonResponse(200, state || null);
   }
 
+  if (request.method === "DELETE") {
+    await store.delete(STATE_KEY);
+    return jsonResponse(200, { ok: true, deleted: true });
+  }
+
   if (request.method === "POST") {
     try {
       const nextState = await request.json();

@@ -23,6 +23,12 @@ function sharedWiffleStatePlugin() {
           return;
         }
 
+        if (req.method === "DELETE") {
+          if (fs.existsSync(stateFile)) fs.unlinkSync(stateFile);
+          res.end(JSON.stringify({ ok: true, deleted: true }));
+          return;
+        }
+
         if (req.method === "POST") {
           let body = "";
           req.on("data", (chunk) => {

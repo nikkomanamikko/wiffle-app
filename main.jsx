@@ -4,7 +4,7 @@ import App from "./App.jsx";
 import "./styles.css";
 
 const WIFFLE_LOCAL_STORAGE_KEY = "wiffle-app-state-v1";
-const WIFFLE_SHARED_STATE_ENDPOINT = "/api/wiffle-state";
+const WIFFLE_SHARED_STATE_ENDPOINT = "/.netlify/functions/wiffle-state";
 const WIFFLE_SHARED_STATE_POLL_MS = 5000;
 
 function savedAtTime(state) {

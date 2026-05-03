@@ -71,12 +71,13 @@ async function handleStateApi(request, response) {
         sendJson(response, 400, { ok: false, error: "Invalid app state." });
         return;
       }
+      if (!parsed.savedAt) parsed.savedAt = new Date().toISOString();
 
       const currentState = readSharedState();
       const currentSavedAt = getSavedAtTime(currentState);
-      const baseSavedAt = request.headers["x-wiffle-base-saved-at"] ? new Date(String(request.headers["x-wiffle-base-saved-at"])).getTime() : 0;
+      const nextSavedAt = getSavedAtTime(parsed);
 
-      if (currentSavedAt > baseSavedAt) {
+      if (currentSavedAt > nextSavedAt) {
         sendJson(response, 409, { ok: false, error: "Shared state is newer than this browser state.", state: currentState });
         return;
       }

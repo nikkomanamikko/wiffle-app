@@ -396,6 +396,8 @@ function savePersistedAppState(state) {
       const conflict = await response.json().catch(() => null);
       const latestState = conflict?.state || null;
       if (!latestState || typeof latestState !== "object") return;
+      const localState = loadPersistedAppState();
+      if (getSavedAtTime(latestState) <= getSavedAtTime(localState)) return;
       window.localStorage.setItem(WIFFLE_LOCAL_STORAGE_KEY, JSON.stringify(latestState));
       window.__WIFFLE_SYNC_BASE_SAVED_AT = latestState.savedAt || "";
       console.warn("Skipped saving stale Wiffle data because another browser has newer saved data.");

@@ -31,12 +31,18 @@ function sharedWiffleStatePlugin() {
           req.on("end", () => {
             try {
               const parsed = JSON.parse(body || "null");
+              if (!parsed || typeof parsed !== "object") {
+                res.statusCode = 400;
+                res.end(JSON.stringify({ ok: false, error: "Invalid app state." }));
+                return;
+              }
+              if (!parsed.savedAt) parsed.savedAt = new Date().toISOString();
               const currentState = fs.existsSync(stateFile) ? JSON.parse(fs.readFileSync(stateFile, "utf8")) : null;
               const currentSavedAt = currentState?.savedAt ? new Date(currentState.savedAt).getTime() : 0;
-              const baseSavedAt = req.headers["x-wiffle-base-saved-at"] ? new Date(String(req.headers["x-wiffle-base-saved-at"])).getTime() : 0;
-              if (currentSavedAt > baseSavedAt) {
+              const nextSavedAt = parsed?.savedAt ? new Date(parsed.savedAt).getTime() : 0;
+              if (currentSavedAt > nextSavedAt) {
                 res.statusCode = 409;
-                res.end(JSON.stringify({ ok: false, error: "Shared state is newer than this browser state." }));
+                res.end(JSON.stringify({ ok: false, error: "Shared state is newer than this browser state.", state: currentState }));
                 return;
               }
               fs.mkdirSync(stateDir, { recursive: true });

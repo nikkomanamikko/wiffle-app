@@ -31,13 +31,13 @@ export default async function handler(request) {
       if (!nextState || typeof nextState !== "object") {
         return jsonResponse(400, { ok: false, error: "Invalid app state." });
       }
+      if (!nextState.savedAt) nextState.savedAt = new Date().toISOString();
 
       const currentState = await store.get(STATE_KEY, { type: "json", consistency: "strong" });
       const currentSavedAt = getSavedAtTime(currentState);
-      const baseSavedAtHeader = request.headers.get("x-wiffle-base-saved-at");
-      const baseSavedAt = baseSavedAtHeader ? new Date(baseSavedAtHeader).getTime() : 0;
+      const nextSavedAt = getSavedAtTime(nextState);
 
-      if (currentState && currentSavedAt > baseSavedAt) {
+      if (currentState && currentSavedAt > nextSavedAt) {
         return jsonResponse(409, {
           ok: false,
           error: "Shared state is newer than this browser state.",

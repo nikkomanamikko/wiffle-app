@@ -44,9 +44,21 @@ function sharedWiffleStatePlugin() {
                 const operation = parsed?.operation || "append";
                 const current = fs.existsSync(liveEventsFile) ? JSON.parse(fs.readFileSync(liveEventsFile, "utf8")) : { events: [], updatedAt: "" };
                 let events = Array.isArray(current.events) ? current.events : [];
-                if (operation === "replace") events = Array.isArray(parsed.events) ? parsed.events : [];
-                else if (operation === "clear") events = [];
-                else {
+                let setupSnapshot = current.setupSnapshot || null;
+                let status = current.status || "";
+                if (operation === "replace") {
+                  events = Array.isArray(parsed.events) ? parsed.events : [];
+                  setupSnapshot = parsed.setupSnapshot || setupSnapshot;
+                  status = parsed.status || "live";
+                } else if (operation === "clear") {
+                  events = [];
+                  setupSnapshot = null;
+                  status = "cleared";
+                } else if (operation === "cancel") {
+                  events = [];
+                  setupSnapshot = null;
+                  status = "cancelled";
+                } else {
                   const incomingEvents = Array.isArray(parsed.events) ? parsed.events : parsed?.event ? [parsed.event] : [];
                   const existingIds = new Set(events.map((event) => event?.id).filter(Boolean));
                   incomingEvents.forEach((event) => {
@@ -55,8 +67,10 @@ function sharedWiffleStatePlugin() {
                     events.push(event);
                     if (event.id) existingIds.add(event.id);
                   });
+                  setupSnapshot = parsed.setupSnapshot || setupSnapshot;
+                  status = parsed.status || status || "live";
                 }
-                const nextLiveEvents = { events, updatedAt: new Date().toISOString() };
+                const nextLiveEvents = { events, setupSnapshot, status, updatedAt: new Date().toISOString() };
                 fs.mkdirSync(stateDir, { recursive: true });
                 fs.writeFileSync(liveEventsFile, JSON.stringify(nextLiveEvents, null, 2));
                 res.end(JSON.stringify({ ok: true, eventCount: events.length, updatedAt: nextLiveEvents.updatedAt }));

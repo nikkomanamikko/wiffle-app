@@ -64,8 +64,8 @@ function readLiveEvents() {
   return JSON.parse(fs.readFileSync(liveEventsFile, "utf8"));
 }
 
-function writeLiveEvents(events) {
-  const nextLiveEvents = { events, updatedAt: new Date().toISOString() };
+function writeLiveEvents(events, setupSnapshot = null, status = "") {
+  const nextLiveEvents = { events, setupSnapshot, status, updatedAt: new Date().toISOString() };
   fs.mkdirSync(stateDir, { recursive: true });
   fs.writeFileSync(liveEventsFile, JSON.stringify(nextLiveEvents, null, 2));
   return nextLiveEvents;
@@ -90,10 +90,23 @@ async function handleStateApi(request, response) {
       try {
         const parsed = JSON.parse((await readRequestBody(request)) || "null");
         const operation = parsed?.operation || "append";
-        let events = Array.isArray(readLiveEvents().events) ? readLiveEvents().events : [];
-        if (operation === "replace") events = Array.isArray(parsed.events) ? parsed.events : [];
-        else if (operation === "clear") events = [];
-        else {
+        const current = readLiveEvents();
+        let events = Array.isArray(current.events) ? current.events : [];
+        let setupSnapshot = current.setupSnapshot || null;
+        let status = current.status || "";
+        if (operation === "replace") {
+          events = Array.isArray(parsed.events) ? parsed.events : [];
+          setupSnapshot = parsed.setupSnapshot || setupSnapshot;
+          status = parsed.status || "live";
+        } else if (operation === "clear") {
+          events = [];
+          setupSnapshot = null;
+          status = "cleared";
+        } else if (operation === "cancel") {
+          events = [];
+          setupSnapshot = null;
+          status = "cancelled";
+        } else {
           const incomingEvents = Array.isArray(parsed?.events) ? parsed.events : parsed?.event ? [parsed.event] : [];
           const existingIds = new Set(events.map((event) => event?.id).filter(Boolean));
           incomingEvents.forEach((event) => {
@@ -102,8 +115,10 @@ async function handleStateApi(request, response) {
             events.push(event);
             if (event.id) existingIds.add(event.id);
           });
+          setupSnapshot = parsed.setupSnapshot || setupSnapshot;
+          status = parsed.status || status || "live";
         }
-        const nextLiveEvents = writeLiveEvents(events);
+        const nextLiveEvents = writeLiveEvents(events, setupSnapshot, status);
         sendJson(response, 200, { ok: true, eventCount: events.length, updatedAt: nextLiveEvents.updatedAt });
       } catch (error) {
         sendJson(response, 400, { ok: false, error: error?.message || "Invalid JSON." });

@@ -40,11 +40,21 @@ export default async function handler(request) {
         const operation = payload?.operation || "append";
         const current = await store.get(LIVE_EVENTS_KEY, { type: "json", consistency: "strong" }) || { events: [], updatedAt: "" };
         let events = Array.isArray(current.events) ? current.events : [];
+        let setupSnapshot = current.setupSnapshot || null;
+        let status = current.status || "";
 
         if (operation === "replace") {
           events = Array.isArray(payload.events) ? payload.events : [];
+          setupSnapshot = payload.setupSnapshot || setupSnapshot;
+          status = payload.status || "live";
         } else if (operation === "clear") {
           events = [];
+          setupSnapshot = null;
+          status = "cleared";
+        } else if (operation === "cancel") {
+          events = [];
+          setupSnapshot = null;
+          status = "cancelled";
         } else {
           const incomingEvents = Array.isArray(payload.events) ? payload.events : payload.event ? [payload.event] : [];
           const existingIds = new Set(events.map((event) => event?.id).filter(Boolean));
@@ -54,9 +64,11 @@ export default async function handler(request) {
             events.push(event);
             if (event.id) existingIds.add(event.id);
           });
+          setupSnapshot = payload.setupSnapshot || setupSnapshot;
+          status = payload.status || status || "live";
         }
 
-        const nextLiveEvents = { events, updatedAt: new Date().toISOString() };
+        const nextLiveEvents = { events, setupSnapshot, status, updatedAt: new Date().toISOString() };
         await store.setJSON(LIVE_EVENTS_KEY, nextLiveEvents);
         return jsonResponse(200, { ok: true, eventCount: events.length, updatedAt: nextLiveEvents.updatedAt });
       } catch (error) {

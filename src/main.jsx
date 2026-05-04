@@ -6,10 +6,63 @@ import "./styles.css";
 const WIFFLE_LOCAL_STORAGE_KEY = "wiffle-app-state-v1";
 const WIFFLE_PENDING_SAVE_KEY = "wiffle-app-pending-save-v1";
 const WIFFLE_SHARED_STATE_ENDPOINT = "/.netlify/functions/wiffle-state";
+const DEVICE_SESSION_STATE_KEYS = [
+  "events",
+  "archivedFinalEventId",
+  "expandedGameId",
+  "activeSavedGameId",
+  "activePage",
+  "statsViewMode",
+  "statsLeagueId",
+  "statsSeasonYear",
+  "statsSessionId",
+  "statsPlayerFilter",
+  "statsVsHitterFilter",
+  "statsVsPitcherFilter",
+  "statsVsScope",
+  "leadersViewMode",
+  "leadersLeagueId",
+  "leadersSeasonYear",
+  "selectedLeaderStats",
+  "fieldImportSourceLeagueId",
+  "selectedImportFieldIds",
+  "setupAttempted",
+  "matchupStatScopeIndex",
+  "selectedLeagueTeamsSessionId",
+  "copyScheduleTargetSessionId",
+  "copyScheduleFirstWeekDate",
+  "copySeasonSourceId",
+  "copySeasonTargetId",
+  "copySeasonFirstWeekDate",
+  "activeScheduleCopyTool",
+  "pendingCopyWeekId",
+  "copyWeekOneWeekLater",
+  "draftSessionId",
+  "draftSelectedPlayer",
+  "draftBidTeamId",
+  "draftBidAmount",
+  "draftTimerRemaining",
+  "draftTimerRunning",
+  "draftAwardError",
+  "mockDraftMode",
+  "mockDrafts",
+  "draftStartedOverrides",
+  "gameStarted",
+  "setupEditingDuringGame",
+];
 
 function savedAtTime(state) {
   const value = state?.savedAt ? new Date(state.savedAt).getTime() : 0;
   return Number.isFinite(value) ? value : 0;
+}
+
+function mergeSharedStateForStartup(currentState, sharedState) {
+  const nextState = { ...(currentState || {}), ...(sharedState || {}) };
+  DEVICE_SESSION_STATE_KEYS.forEach((key) => {
+    if (currentState && Object.prototype.hasOwnProperty.call(currentState, key)) nextState[key] = currentState[key];
+    else delete nextState[key];
+  });
+  return nextState;
 }
 
 async function syncNewestSharedStateBeforeRender() {
@@ -32,7 +85,6 @@ async function syncNewestSharedStateBeforeRender() {
           "X-Wiffle-Base-Saved-At": sharedState?.savedAt || "",
         },
         body: JSON.stringify(localState),
-        keepalive: true,
       });
       if (saveResponse.ok) {
         window.localStorage.removeItem(WIFFLE_PENDING_SAVE_KEY);
@@ -43,7 +95,7 @@ async function syncNewestSharedStateBeforeRender() {
 
     if (!sharedState || typeof sharedState !== "object") return;
 
-    window.localStorage.setItem(WIFFLE_LOCAL_STORAGE_KEY, JSON.stringify(sharedState));
+    window.localStorage.setItem(WIFFLE_LOCAL_STORAGE_KEY, JSON.stringify(mergeSharedStateForStartup(localState, sharedState)));
     window.localStorage.removeItem(WIFFLE_PENDING_SAVE_KEY);
   } catch (error) {
     console.warn("Unable to load shared Wiffle data before startup.", error);

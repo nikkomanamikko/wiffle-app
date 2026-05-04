@@ -443,7 +443,7 @@ function loadPersistedAppState() {
 
 function markPendingSharedSave(state) {
   if (typeof window === "undefined" || !state?.savedAt) return;
-  window.localStorage.setItem(WIFFLE_PENDING_SAVE_KEY, JSON.stringify({ savedAt: state.savedAt }));
+  window.localStorage.setItem(WIFFLE_PENDING_SAVE_KEY, JSON.stringify({ savedAt: state.savedAt, createdAt: new Date().toISOString() }));
 }
 
 function clearPendingSharedSave(savedAt = "") {
@@ -461,7 +461,21 @@ function clearPendingSharedSave(savedAt = "") {
 
 function hasPendingSharedSave() {
   if (typeof window === "undefined") return false;
-  return Boolean(sharedStateSaveInFlight || queuedSharedStateSave || window.localStorage.getItem(WIFFLE_PENDING_SAVE_KEY));
+  if (sharedStateSaveInFlight || queuedSharedStateSave) return true;
+  try {
+    const pendingRaw = window.localStorage.getItem(WIFFLE_PENDING_SAVE_KEY);
+    if (!pendingRaw) return false;
+    const pending = JSON.parse(pendingRaw);
+    const createdAtTime = pending?.createdAt ? new Date(pending.createdAt).getTime() : 0;
+    if (!createdAtTime || Date.now() - createdAtTime > 15000) {
+      window.localStorage.removeItem(WIFFLE_PENDING_SAVE_KEY);
+      return false;
+    }
+    return true;
+  } catch (error) {
+    window.localStorage.removeItem(WIFFLE_PENDING_SAVE_KEY);
+    return false;
+  }
 }
 
 function scheduleSharedStateSaveRetry() {
@@ -484,7 +498,6 @@ function flushQueuedSharedStateSave() {
       "X-Wiffle-Force-Save": forceSave ? "1" : "0",
     },
     body: JSON.stringify(state),
-    keepalive: true,
   }).then(async (response) => {
     if (response.ok) {
       window.__WIFFLE_SYNC_BASE_SAVED_AT = state.savedAt || window.__WIFFLE_SYNC_BASE_SAVED_AT || "";
@@ -539,17 +552,20 @@ function markNextSharedStateSaveAuthoritative() {
   window.__WIFFLE_FORCE_NEXT_SHARED_SAVE = true;
 }
 
-function liveEventsSignature(events = []) {
-  return (events || []).map((event) => event?.id || "").join("|");
+function liveEventsSignature(events = [], setupSnapshot = null, updatedAt = "", status = "") {
+  const eventIds = (events || []).map((event) => event?.id || "").join("|");
+  const setupSignature = setupSnapshot ? JSON.stringify(setupSnapshot) : "";
+  return `${eventIds}::${setupSignature}::${status || ""}::${updatedAt || ""}`;
 }
 
 function writeLiveEvents(payload) {
   if (typeof window === "undefined") return;
   liveEventsWriteInFlight = true;
+  const setupSnapshot = payload?.operation === "clear" ? null : payload?.setupSnapshot || window.__WIFFLE_LIVE_SETUP_SNAPSHOT || null;
   window.fetch?.(WIFFLE_LIVE_EVENTS_ENDPOINT, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
+    body: JSON.stringify(setupSnapshot ? { ...payload, setupSnapshot } : payload),
     keepalive: true,
   }).catch((error) => {
     console.warn("Unable to sync live game event log.", error);
@@ -563,12 +579,16 @@ function appendLiveEvent(event) {
   writeLiveEvents({ operation: "append", event });
 }
 
-function replaceLiveEvents(events = []) {
-  writeLiveEvents({ operation: "replace", events });
+function replaceLiveEvents(events = [], setupSnapshot = null, status = "live") {
+  writeLiveEvents({ operation: "replace", status, events, ...(setupSnapshot ? { setupSnapshot } : {}) });
 }
 
 function clearLiveEvents() {
   writeLiveEvents({ operation: "clear", events: [] });
+}
+
+function cancelLiveEvents() {
+  writeLiveEvents({ operation: "cancel", status: "cancelled", events: [] });
 }
 
 function makeDefaultSeasonRecord(year = currentYearNumber(), defaultAwards = makeDefaultAwards()) {
@@ -1268,7 +1288,7 @@ function formatInningsPitched(outs) {
 }
 
 function cleanRoster(roster) {
-  const cleaned = roster.map((name) => String(name || "").trim()).filter(Boolean);
+  const cleaned = [...new Set(roster.map((name) => String(name || "").trim()).filter(Boolean))];
   return cleaned.length > 0 ? cleaned : ["Player 1"];
 }
 
@@ -3734,6 +3754,7 @@ export default function WiffleScoringPrototype() {
   const suppressNextPersistRef = useRef(true);
   const lastPersistedStateSignatureRef = useRef("");
   const userHasInteractedRef = useRef(false);
+  const lastLocalEditAtRef = useRef(0);
   const eventsRef = useRef([]);
   const lastLiveEventsSignatureRef = useRef("");
   const [storageHydrated, setStorageHydrated] = useState(false);
@@ -3862,7 +3883,6 @@ export default function WiffleScoringPrototype() {
   const game = useMemo(() => calculateState(events, { extraRunnerRules, battingOrder, ghostRunnersCountAsRbi, gameInnings }), [events, extraRunnerRules, battingOrder, ghostRunnersCountAsRbi, gameInnings]);
   useEffect(() => {
     eventsRef.current = events;
-    lastLiveEventsSignatureRef.current = liveEventsSignature(events);
   }, [events]);
 
   const matchupStatScopes = ["game", "season", "career", "head-to-head"];
@@ -3882,6 +3902,14 @@ export default function WiffleScoringPrototype() {
   const batterIndex = battingTeam === "away" ? game.awayBatterIndex : game.homeBatterIndex;
   const currentBatter = currentBattingOrder[batterIndex % currentBattingOrder.length];
   const lastEvent = events[events.length - 1];
+  const finalDisplayGame = game.status === "final" && activeSavedGameId
+    ? previousGames.find((savedGame) => savedGame.id === activeSavedGameId) || null
+    : null;
+  const scoreDisplayAwayTeam = game.status === "final" ? finalDisplayGame?.awayTeam || awayTeam : awayTeam;
+  const scoreDisplayHomeTeam = game.status === "final" ? finalDisplayGame?.homeTeam || homeTeam : homeTeam;
+  const scoreDisplayAwayScore = game.status === "final" ? finalDisplayGame?.awayScore ?? game.awayScore : game.awayScore;
+  const scoreDisplayHomeScore = game.status === "final" ? finalDisplayGame?.homeScore ?? game.homeScore : game.homeScore;
+  const scoreDisplayWinner = game.status === "final" ? finalDisplayGame?.winner || game.winner : game.winner;
   const allTestsPassed = testResults.every((item) => item.pass);
   const powerPlayUsed = !powerPlaysEnabled || isPowerPlayLimitReached(events, battingTeam, defensiveTeam, game.inning, game.half, powerPlayLimitType, powerPlayLimitAmount);
   const whammyUsed = !powerPlaysEnabled || !whammysEnabled || isWhammyUnavailable(events, battingTeam, defensiveTeam, game.inning, game.half);
@@ -4090,6 +4118,51 @@ export default function WiffleScoringPrototype() {
     setupBattingSignature,
     setupPitchingSignature,
   });
+  const liveGameSetupSnapshot = useMemo(() => ({
+    setupLeagueId,
+    leagueGameMode,
+    awayTeam,
+    homeTeam,
+    gameDate,
+    gameTime,
+    gameLocation,
+    gameSeasonYear,
+    gameSessionId,
+    selectedFieldId,
+    gameInnings,
+    powerPlaysEnabled,
+    powerPlayLimitType,
+    powerPlayLimitAmount,
+    whammysEnabled,
+    pudwhackerEnabled,
+    extraRunnerRules,
+    ghostRunnersCountAsRbi,
+    runRuleEnabled,
+    runRuleRuns,
+    runRuleBeforeFourthOnly,
+    walkRunRuleCountsAsHr,
+    useLeagueDefaultRules,
+    teamPlayers,
+    subPlayers,
+    subSlots,
+    battingOrder,
+    pitchingOrder,
+    extraPitchers,
+    selectedLeagueId,
+    awayLeagueTeamId,
+    homeLeagueTeamId,
+    useLeagueSchedule,
+    selectedScheduledWeekId,
+    selectedScheduledGameId,
+    savedSetupSignature,
+    setupSignature: currentSetupSignature,
+  }), [setupLeagueId, leagueGameMode, awayTeam, homeTeam, gameDate, gameTime, gameLocation, gameSeasonYear, gameSessionId, selectedFieldId, gameInnings, powerPlaysEnabled, powerPlayLimitType, powerPlayLimitAmount, whammysEnabled, pudwhackerEnabled, extraRunnerRules, ghostRunnersCountAsRbi, runRuleEnabled, runRuleRuns, runRuleBeforeFourthOnly, walkRunRuleCountsAsHr, useLeagueDefaultRules, teamPlayers, subPlayers, subSlots, battingOrder, pitchingOrder, extraPitchers, selectedLeagueId, awayLeagueTeamId, homeLeagueTeamId, useLeagueSchedule, selectedScheduledWeekId, selectedScheduledGameId, savedSetupSignature, currentSetupSignature]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.__WIFFLE_LIVE_SETUP_SNAPSHOT = liveGameSetupSnapshot;
+  }, [liveGameSetupSnapshot]);
+
   let savedSetupParts = {};
   try {
     savedSetupParts = savedSetupSignature ? JSON.parse(savedSetupSignature) : {};
@@ -4105,6 +4178,8 @@ export default function WiffleScoringPrototype() {
   const setupCanResumeGame = Boolean(gameStarted && !unsavedSetupChanges);
   const finalGameAwaitingNewSetup = Boolean(gameStarted && game.status === "final");
   const hasLocalDraftChanges = Boolean(playerPageHasUnsavedChanges || leagueHasUnsavedChanges || unsavedSetupChanges || selectedPlayerDraft || inlinePlayerCreationModalOpen || pendingPlayerSaveConfirm || pendingPlayerPageExit || pendingLeagueExitPage || pendingLeagueSwitchId || pendingDraftAward || pendingDraftRestart || pendingRealDraftStart || pendingPlayerRename || confirmCancelGameOpen);
+  const sharedStateSyncBlocked = Boolean(hasLocalDraftChanges);
+  const isRemoteSyncPaused = () => sharedStateSyncBlocked || Date.now() - lastLocalEditAtRef.current < 5000;
 
   const setupErrors = [];
   if (!setupLeagueId && !isCustomGame) setupErrors.push("Select a league or choose Custom Game.");
@@ -4218,27 +4293,29 @@ export default function WiffleScoringPrototype() {
     }
     if (savedState.savedSetupSignature != null) setSavedSetupSignature(savedState.savedSetupSignature);
     if (includeSessionState && savedState.setupEditingDuringGame != null) setSetupEditingDuringGame(savedState.setupEditingDuringGame);
-    if (includeSessionState) {
-      setPlayerDrafts(null);
-      setLeagueDraft(null);
-      setLeagueDraftLeagueId("");
-    }
+    setPlayerDrafts(null);
+    setLeagueDraft(null);
+    setLeagueDraftLeagueId("");
   }
 
   useEffect(() => {
     function markUserInteraction() {
       userHasInteractedRef.current = true;
     }
+    function markLocalEdit() {
+      userHasInteractedRef.current = true;
+      lastLocalEditAtRef.current = Date.now();
+    }
 
     window.addEventListener("pointerdown", markUserInteraction, true);
-    window.addEventListener("keydown", markUserInteraction, true);
-    window.addEventListener("input", markUserInteraction, true);
-    window.addEventListener("change", markUserInteraction, true);
+    window.addEventListener("keydown", markLocalEdit, true);
+    window.addEventListener("input", markLocalEdit, true);
+    window.addEventListener("change", markLocalEdit, true);
     return () => {
       window.removeEventListener("pointerdown", markUserInteraction, true);
-      window.removeEventListener("keydown", markUserInteraction, true);
-      window.removeEventListener("input", markUserInteraction, true);
-      window.removeEventListener("change", markUserInteraction, true);
+      window.removeEventListener("keydown", markLocalEdit, true);
+      window.removeEventListener("input", markLocalEdit, true);
+      window.removeEventListener("change", markLocalEdit, true);
     };
   }, []);
 
@@ -4343,7 +4420,8 @@ export default function WiffleScoringPrototype() {
       setupEditingDuringGame,
     };
     const nextStateSignature = getPersistedStateSignature(nextState);
-    if (!userHasInteractedRef.current || suppressNextPersistRef.current || nextStateSignature === lastPersistedStateSignatureRef.current) {
+    const forceSaveRequested = typeof window !== "undefined" && Boolean(window.__WIFFLE_FORCE_NEXT_SHARED_SAVE);
+    if (!userHasInteractedRef.current || (!forceSaveRequested && (suppressNextPersistRef.current || nextStateSignature === lastPersistedStateSignatureRef.current))) {
       suppressNextPersistRef.current = false;
       lastPersistedStateSignatureRef.current = nextStateSignature;
       return;
@@ -4368,10 +4446,52 @@ export default function WiffleScoringPrototype() {
         if (!response.ok) return;
         const liveEventState = await response.json();
         const remoteEvents = Array.isArray(liveEventState?.events) ? liveEventState.events : [];
-        const remoteSignature = liveEventsSignature(remoteEvents);
+        const liveStatus = liveEventState?.status || "";
+        const remoteSignature = liveEventsSignature(remoteEvents, liveEventState?.setupSnapshot || null, liveEventState?.updatedAt || "", liveStatus);
         if (remoteSignature === lastLiveEventsSignatureRef.current) return;
         lastLiveEventsSignatureRef.current = remoteSignature;
-        setEvents(remoteEvents);
+        if (liveStatus === "cancelled") {
+          setEvents([]);
+          setArchivedFinalEventId(null);
+          setActiveSavedGameId(null);
+          setManualRuns(0);
+          setManualRbi(0);
+          setSelectedModifier(null);
+          setRepeatBatter(false);
+          setEndHalf(false);
+          setManualMode(false);
+          setNote("");
+          setPendingFieldRule(null);
+          setConfirmCancelGameOpen(false);
+          setGameStarted(false);
+          setSetupEditingDuringGame(false);
+          setActivePage("setup");
+          return;
+        }
+        if (liveStatus === "started" && liveEventState?.setupSnapshot && !hasPendingSharedSave() && !isRemoteSyncPaused()) {
+          applyPersistedState(liveEventState.setupSnapshot, { includeSessionState: false });
+          setEvents(remoteEvents);
+          setArchivedFinalEventId(null);
+          setActiveSavedGameId(null);
+          setManualRuns(0);
+          setManualRbi(0);
+          setSelectedModifier(null);
+          setRepeatBatter(false);
+          setEndHalf(false);
+          setManualMode(false);
+          setNote("");
+          setPendingFieldRule(null);
+          setConfirmCancelGameOpen(false);
+          if (!gameStarted) setGameStarted(true);
+          setSetupEditingDuringGame(false);
+          if (!gameStarted) setActivePage("score");
+          return;
+        }
+        const shouldFollowLiveGame = Boolean(gameStarted || activePage === "score");
+        if (shouldFollowLiveGame && liveEventState?.setupSnapshot && !hasPendingSharedSave() && !isRemoteSyncPaused()) {
+          applyPersistedState(liveEventState.setupSnapshot, { includeSessionState: false });
+        }
+        if (shouldFollowLiveGame) setEvents(remoteEvents);
       } catch (error) {
         // Live event sync can be unavailable in static previews or while offline.
       }
@@ -4380,7 +4500,7 @@ export default function WiffleScoringPrototype() {
     pollLiveEvents();
     const timer = window.setInterval(pollLiveEvents, WIFFLE_SHARED_STATE_POLL_MS);
     return () => window.clearInterval(timer);
-  }, [storageHydrated]);
+  }, [storageHydrated, sharedStateSyncBlocked, gameStarted, activePage]);
 
   useEffect(() => {
     if (!storageHydrated) return undefined;
@@ -4388,7 +4508,7 @@ export default function WiffleScoringPrototype() {
     async function pollSharedState() {
       try {
         if (hasPendingSharedSave()) return;
-        if (hasLocalDraftChanges && activePage !== "score") return;
+        if (isRemoteSyncPaused()) return;
         const response = await fetch(WIFFLE_SHARED_STATE_ENDPOINT, { cache: "no-store" });
         if (!response.ok) return;
         const sharedState = await response.json();
@@ -4408,7 +4528,7 @@ export default function WiffleScoringPrototype() {
     }
 
     function handleSharedStateUpdated(event) {
-      if (!event.detail || hasPendingSharedSave() || (hasLocalDraftChanges && activePage !== "score")) return;
+      if (!event.detail || hasPendingSharedSave() || isRemoteSyncPaused()) return;
       applyPersistedState(event.detail, { includeSessionState: false });
     }
 
@@ -4418,7 +4538,7 @@ export default function WiffleScoringPrototype() {
       window.removeEventListener("wiffle:shared-state-updated", handleSharedStateUpdated);
       window.clearInterval(timer);
     };
-  }, [storageHydrated, hasLocalDraftChanges, activePage]);
+  }, [storageHydrated, sharedStateSyncBlocked]);
 
   useEffect(() => {
     if ((activePage !== "league" && activePage !== "rules" && activePage !== "fields") || !selectedLeagueSaved) return;
@@ -4435,6 +4555,7 @@ export default function WiffleScoringPrototype() {
   function saveSetupChanges() {
     markNextSharedStateSaveAuthoritative();
     setSavedSetupSignature(currentSetupSignature);
+    if (gameStarted || eventsRef.current.length > 0) replaceLiveEvents(eventsRef.current, liveGameSetupSnapshot);
   }
 
   function resumeGameFromSetup() {
@@ -4754,6 +4875,7 @@ export default function WiffleScoringPrototype() {
   }
 
   function commitCreateLeague() {
+    markNextSharedStateSaveAuthoritative();
     if (activePage === "league" && leagueHasUnsavedChanges) saveLeagueDraftChanges();
     const year = currentYearNumber();
     const league = {
@@ -6762,7 +6884,6 @@ export default function WiffleScoringPrototype() {
 
   function clearCurrentGame() {
     setEvents([]);
-    clearLiveEvents();
     setManualRuns(0);
     setManualRbi(0);
     setSelectedModifier(null);
@@ -6798,7 +6919,7 @@ export default function WiffleScoringPrototype() {
 
   function cancelCurrentGame() {
     setEvents([]);
-    clearLiveEvents();
+    cancelLiveEvents();
     setArchivedFinalEventId(null);
     setActiveSavedGameId(null);
     setManualRuns(0);
@@ -6982,6 +7103,7 @@ export default function WiffleScoringPrototype() {
   function startGameFromSetup() {
     setSetupAttempted(true);
     if (!setupComplete) return;
+    replaceLiveEvents([], liveGameSetupSnapshot, "started");
     setGameStarted(true);
     setSetupEditingDuringGame(false);
     setActivePage("score");
@@ -7704,9 +7826,9 @@ export default function WiffleScoringPrototype() {
               <div className="animate-pulse rounded-2xl border-4 border-slate-900 bg-white p-4 text-center shadow-lg sm:rounded-3xl sm:p-6">
                 <div className="text-sm font-black uppercase tracking-[0.35em] text-slate-500">Final</div>
                 <div className="mt-2 text-3xl font-black sm:text-4xl md:text-6xl">
-                  {game.winner === "away" ? awayTeam : game.winner === "home" ? homeTeam : "Tie Game"} {game.winner ? "Wins!" : ""}
+                  {scoreDisplayWinner === "away" ? scoreDisplayAwayTeam : scoreDisplayWinner === "home" ? scoreDisplayHomeTeam : "Tie Game"} {scoreDisplayWinner ? "Wins!" : ""}
                 </div>
-                <div className="mt-2 text-xl font-black sm:text-2xl md:text-3xl">{awayTeam} {game.awayScore} — {homeTeam} {game.homeScore}</div>
+                <div className="mt-2 text-xl font-black sm:text-2xl md:text-3xl">{scoreDisplayAwayTeam} {scoreDisplayAwayScore} — {scoreDisplayHomeTeam} {scoreDisplayHomeScore}</div>
                 {game.finalReason && <div className="mt-2 text-sm font-semibold text-slate-500">{game.finalReason}</div>}
                 <div className="mt-4 flex justify-center gap-2">
                   <Button variant="danger" onClick={undoLast} disabled={events.length === 0}>↶ Undo Last Play</Button>
@@ -7718,8 +7840,8 @@ export default function WiffleScoringPrototype() {
               <div className="p-3 sm:p-4">
                 <div className="grid w-full min-w-0 grid-cols-2 gap-2 lg:grid-cols-[1fr_auto_1fr] lg:items-center">
                   <div className="order-1 min-w-0 rounded-xl bg-slate-50 p-3 text-center shadow-sm sm:rounded-2xl sm:p-4 lg:order-none">
-                    <div className="truncate text-xs font-semibold text-slate-500 sm:text-sm">{awayTeam}</div>
-                    <div className="text-4xl font-black tracking-tight sm:text-5xl md:text-6xl">{game.awayScore}</div>
+                    <div className="truncate text-xs font-semibold text-slate-500 sm:text-sm">{scoreDisplayAwayTeam}</div>
+                    <div className="text-4xl font-black tracking-tight sm:text-5xl md:text-6xl">{scoreDisplayAwayScore}</div>
                   </div>
                   <div className="order-3 col-span-2 grid min-w-0 grid-cols-3 gap-2 rounded-xl bg-slate-900 p-2 text-center text-white shadow-sm sm:rounded-2xl sm:p-3 lg:order-none lg:col-span-1 lg:min-w-80">
                     <div><div className="text-[10px] uppercase text-slate-300">Inning</div><div className="text-base font-black sm:text-lg">{game.half === "top" ? "Top" : "Bot"} {game.inning}</div></div>
@@ -7727,8 +7849,8 @@ export default function WiffleScoringPrototype() {
                     <div><div className="text-[10px] uppercase text-slate-300">Status</div><div className="text-base font-black uppercase sm:text-lg">{game.status}</div></div>
                   </div>
                   <div className="order-2 min-w-0 rounded-xl bg-slate-50 p-3 text-center shadow-sm sm:rounded-2xl sm:p-4 lg:order-none">
-                    <div className="truncate text-xs font-semibold text-slate-500 sm:text-sm">{homeTeam}</div>
-                    <div className="text-4xl font-black tracking-tight sm:text-5xl md:text-6xl">{game.homeScore}</div>
+                    <div className="truncate text-xs font-semibold text-slate-500 sm:text-sm">{scoreDisplayHomeTeam}</div>
+                    <div className="text-4xl font-black tracking-tight sm:text-5xl md:text-6xl">{scoreDisplayHomeScore}</div>
                   </div>
                 </div>
               </div>

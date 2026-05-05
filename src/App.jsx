@@ -372,6 +372,41 @@ function getPersistedStateSignature(state) {
 }
 
 const deviceSessionStateKeys = [
+  "awayTeam",
+  "homeTeam",
+  "gameDate",
+  "gameTime",
+  "gameLocation",
+  "gameSeasonYear",
+  "gameSessionId",
+  "selectedFieldId",
+  "gameInnings",
+  "powerPlaysEnabled",
+  "powerPlayLimitType",
+  "powerPlayLimitAmount",
+  "whammysEnabled",
+  "pudwhackerEnabled",
+  "extraRunnerRules",
+  "ghostRunnersCountAsRbi",
+  "runRuleEnabled",
+  "runRuleRuns",
+  "runRuleBeforeFourthOnly",
+  "walkRunRuleCountsAsHr",
+  "useLeagueDefaultRules",
+  "teamPlayers",
+  "subPlayers",
+  "subSlots",
+  "battingOrder",
+  "pitchingOrder",
+  "extraPitchers",
+  "setupLeagueId",
+  "leagueGameMode",
+  "useExhibitionLeagueTeams",
+  "awayLeagueTeamId",
+  "homeLeagueTeamId",
+  "useLeagueSchedule",
+  "selectedScheduledWeekId",
+  "selectedScheduledGameId",
   "events",
   "archivedFinalEventId",
   "expandedGameId",
@@ -385,6 +420,13 @@ const deviceSessionStateKeys = [
   "statsVsHitterFilter",
   "statsVsPitcherFilter",
   "statsVsScope",
+  "splitsScope",
+  "splitsLeagueId",
+  "splitsSeasonYear",
+  "splitsSessionId",
+  "splitsPlayerFilter",
+  "splitsGroupBy",
+  "splitsIncludeSubs",
   "leadersViewMode",
   "leadersLeagueId",
   "leadersSeasonYear",
@@ -413,6 +455,7 @@ const deviceSessionStateKeys = [
   "mockDrafts",
   "draftStartedOverrides",
   "gameStarted",
+  "gamePaused",
   "setupEditingDuringGame",
 ];
 
@@ -530,10 +573,14 @@ function flushQueuedSharedStateSave() {
   });
 }
 
-function savePersistedAppState(state) {
+function savePersistedAppState(state, options = {}) {
   if (typeof window === "undefined") return;
   try {
     window.localStorage.setItem(WIFFLE_LOCAL_STORAGE_KEY, JSON.stringify(state));
+    if (options.shared === false) {
+      window.__WIFFLE_FORCE_NEXT_SHARED_SAVE = false;
+      return;
+    }
     const baseSavedAt = window.__WIFFLE_SYNC_BASE_SAVED_AT || "";
     const forceSave = Boolean(window.__WIFFLE_FORCE_NEXT_SHARED_SAVE);
     window.__WIFFLE_FORCE_NEXT_SHARED_SAVE = false;
@@ -2514,6 +2561,167 @@ function buildPlayerVsStats({ league, previousGames, scope = "season", seasonYea
   return { hittingStats, pitchingStats };
 }
 
+const customSplitGroupOptions = [
+  { value: "pitcherThrows", label: "Pitcher Throws" },
+  { value: "batterSide", label: "Batter Side" },
+  { value: "pitcher", label: "Pitcher" },
+  { value: "battingTeam", label: "Batting Team" },
+  { value: "defensiveTeam", label: "Defensive Team" },
+  { value: "modifier", label: "Power Play / Whammy" },
+  { value: "inning", label: "Inning" },
+  { value: "gameType", label: "Game Type" },
+];
+
+function gameTypeLabel(savedGame = {}) {
+  const setup = savedGame.savedSetup || {};
+  if (!setup.setupLeagueId || setup.setupLeagueId === "custom") return "Custom / Exhibition";
+  if (setup.isLeagueExhibition) return "League Exhibition";
+  return "Official League";
+}
+
+function splitGameMatchesScope(savedGame, options = {}) {
+  const { scope = "all", leagueId = "", seasonYear = null, sessionId = "all" } = options;
+  if (!savedGame || savedGame.status !== "final") return false;
+  if (scope === "all") return true;
+  const setup = savedGame.savedSetup || {};
+  const isExhibitionGame = !setup.setupLeagueId || setup.setupLeagueId === "custom" || Boolean(setup.isLeagueExhibition);
+  if (scope === "exhibition") return isExhibitionGame;
+  if (scope === "league_career" || scope === "league_season") {
+    if (!leagueId || setup.setupLeagueId !== leagueId || setup.isLeagueExhibition) return false;
+    if (scope === "league_season") {
+      const gameYear = setup.gameSeasonYear || (savedGame.gameDate ? Number(String(savedGame.gameDate).slice(0, 4)) : null);
+      if (seasonYear && Number(gameYear) !== Number(seasonYear)) return false;
+      if (sessionId && sessionId !== "all" && setup.gameSessionId !== sessionId) return false;
+    }
+    return true;
+  }
+  return false;
+}
+
+function splitGroupLabelForEvent(event, savedGame, groupBy) {
+  if (groupBy === "pitcherThrows") {
+    if (event.pitcherThrows === "L") return "vs Left";
+    if (event.pitcherThrows === "B") return "vs Both";
+    if (event.pitcherThrows === "R") return "vs Right";
+    return "vs Unknown";
+  }
+  if (groupBy === "batterSide") {
+    if (event.batterSide === "L") return "Batting Left";
+    if (event.batterSide === "B") return "Batting Switch";
+    if (event.batterSide === "R") return "Batting Right";
+    return "Batting Side Unknown";
+  }
+  if (groupBy === "pitcher") return String(event.pitcher || "").trim() || "Unknown Pitcher";
+  if (groupBy === "battingTeam") return event.team === "home" ? savedGame.homeTeam || "Home Team" : savedGame.awayTeam || "Away Team";
+  if (groupBy === "defensiveTeam") return event.defensiveTeam === "home" ? savedGame.homeTeam || "Home Team" : savedGame.awayTeam || "Away Team";
+  if (groupBy === "modifier") return event.modifier ? modifierLabel(event.modifier) : "Standard";
+  if (groupBy === "inning") return event.inning ? `Inning ${event.inning}` : "Unknown Inning";
+  if (groupBy === "gameType") return gameTypeLabel(savedGame);
+  return "All Plate Appearances";
+}
+
+function addEventToSplitStat(stat, event) {
+  stat.PA += 1;
+  stat.AB += event.atBat || 0;
+  stat.H += event.hit || 0;
+  stat.D2 += event.double || 0;
+  stat.D3 += event.triple || 0;
+  stat.BB += event.walk || 0;
+  stat.K += event.strikeout || 0;
+  stat.HR += event.homeRun || 0;
+  stat.RBI += event.rbi || 0;
+  if ((event.outs || 0) > 0 && (event.atBat || 0) > 0 && !(event.hit || 0) && !(event.walk || 0) && !(event.homeRun || 0)) {
+    stat.LOB += countBaseRunners(event.basesAfter || event.basesBefore || emptyBases());
+  }
+}
+
+function makeCurrentGameForSplits({ events = [], awayTeam = "", homeTeam = "", setupLeagueId = "custom", leagueGameMode = "official", gameSeasonYear = null, gameSessionId = "", subPlayers = {} }) {
+  return {
+    id: "current-game",
+    status: "final",
+    events,
+    awayTeam,
+    homeTeam,
+    gameDate: todayInputValue(),
+    savedSetup: {
+      setupLeagueId,
+      gameSeasonYear,
+      gameSessionId,
+      isLeagueExhibition: setupLeagueId !== "custom" && leagueGameMode === "exhibition",
+      subPlayers,
+    },
+  };
+}
+
+function collectSplitEvents(options = {}) {
+  const {
+    previousGames = [],
+    currentGame = null,
+    scope = "all",
+    leagueId = "",
+    seasonYear = null,
+    sessionId = "all",
+    playerFilter = "all",
+    includeSubs = false,
+  } = options;
+  const games = scope === "current" && currentGame ? [currentGame] : previousGames;
+  const splitEvents = [];
+
+  (games || []).forEach((savedGame) => {
+    if (scope !== "current" && !splitGameMatchesScope(savedGame, { scope, leagueId, seasonYear, sessionId })) return;
+    const savedSubIndex = buildSubIndexFromSavedGames([savedGame], "career");
+    (savedGame.events || []).forEach((event) => {
+      if (event.type !== "play") return;
+      const batter = String(event.batter || "").trim();
+      if (!batter) return;
+      if (!includeSubs && savedSubIndex[batter]) return;
+      if (playerFilter !== "all" && batter !== playerFilter) return;
+      splitEvents.push({ event, savedGame });
+    });
+  });
+
+  return splitEvents;
+}
+
+function buildCustomHittingSplits(options = {}) {
+  const { groupBy = "pitcherThrows" } = options;
+  const splitMap = new Map();
+
+  collectSplitEvents(options).forEach(({ event, savedGame }) => {
+    const label = splitGroupLabelForEvent(event, savedGame, groupBy);
+    if (!splitMap.has(label)) splitMap.set(label, { label, ...emptyStats() });
+    addEventToSplitStat(splitMap.get(label), event);
+  });
+
+  return [...splitMap.values()].sort((a, b) => (b.PA || 0) - (a.PA || 0) || a.label.localeCompare(b.label));
+}
+
+function getCustomSplitPlayerOptions(options = {}) {
+  const names = new Set();
+  collectSplitEvents({ ...options, playerFilter: "all", includeSubs: true }).forEach(({ event }) => {
+    const batter = String(event.batter || "").trim();
+    if (batter) names.add(batter);
+  });
+  return [...names].sort((a, b) => a.localeCompare(b));
+}
+
+function totalCustomSplitRows(rows = []) {
+  const total = { label: "Total", ...emptyStats() };
+  (rows || []).forEach((row) => {
+    total.PA += row.PA || 0;
+    total.AB += row.AB || 0;
+    total.H += row.H || 0;
+    total.D2 += row.D2 || 0;
+    total.D3 += row.D3 || 0;
+    total.BB += row.BB || 0;
+    total.K += row.K || 0;
+    total.HR += row.HR || 0;
+    total.RBI += row.RBI || 0;
+    total.LOB += row.LOB || 0;
+  });
+  return total;
+}
+
 function formatAverageValue(value) {
   return value.toFixed(3).replace(/^0/, "");
 }
@@ -3756,6 +3964,7 @@ export default function WiffleScoringPrototype() {
   const userHasInteractedRef = useRef(false);
   const lastLocalEditAtRef = useRef(0);
   const eventsRef = useRef([]);
+  const setupEditingDuringGameRef = useRef(false);
   const lastLiveEventsSignatureRef = useRef("");
   const [storageHydrated, setStorageHydrated] = useState(false);
   const [awayTeam, setAwayTeam] = useState("Away Team");
@@ -3808,6 +4017,7 @@ export default function WiffleScoringPrototype() {
   const [selectedLeagueId, setSelectedLeagueId] = useState("default-league");
   const [setupLeagueId, setSetupLeagueId] = useState("custom");
   const [leagueGameMode, setLeagueGameMode] = useState("official");
+  const [useExhibitionLeagueTeams, setUseExhibitionLeagueTeams] = useState(false);
   const [awayLeagueTeamId, setAwayLeagueTeamId] = useState("");
   const [homeLeagueTeamId, setHomeLeagueTeamId] = useState("");
   const [statsViewMode, setStatsViewMode] = useState("current");
@@ -3818,6 +4028,13 @@ export default function WiffleScoringPrototype() {
   const [statsVsHitterFilter, setStatsVsHitterFilter] = useState("all");
   const [statsVsPitcherFilter, setStatsVsPitcherFilter] = useState("all");
   const [statsVsScope, setStatsVsScope] = useState("season");
+  const [splitsScope, setSplitsScope] = useState("all");
+  const [splitsLeagueId, setSplitsLeagueId] = useState("");
+  const [splitsSeasonYear, setSplitsSeasonYear] = useState(currentYearNumber());
+  const [splitsSessionId, setSplitsSessionId] = useState("all");
+  const [splitsPlayerFilter, setSplitsPlayerFilter] = useState("all");
+  const [splitsGroupBy, setSplitsGroupBy] = useState("pitcherThrows");
+  const [splitsIncludeSubs, setSplitsIncludeSubs] = useState(false);
   const [leadersViewMode, setLeadersViewMode] = useState("season");
   const [leadersLeagueId, setLeadersLeagueId] = useState("");
   const [leadersSeasonYear, setLeadersSeasonYear] = useState(currentYearNumber());
@@ -3857,12 +4074,15 @@ export default function WiffleScoringPrototype() {
   const [pendingLeagueExitPage, setPendingLeagueExitPage] = useState(null);
   const [pendingLeagueSwitchId, setPendingLeagueSwitchId] = useState("");
   const [confirmCancelGameOpen, setConfirmCancelGameOpen] = useState(false);
+  const [confirmResetGameOpen, setConfirmResetGameOpen] = useState(false);
   const [pendingPlayerRename, setPendingPlayerRename] = useState(null);
   const [blockedRosterAssignment, setBlockedRosterAssignment] = useState(null);
   const [pendingPlayerSaveConfirm, setPendingPlayerSaveConfirm] = useState(null);
   const [leagueDraft, setLeagueDraft] = useState(null);
   const [leagueDraftLeagueId, setLeagueDraftLeagueId] = useState("");
   const [gameStarted, setGameStarted] = useState(false);
+  const [gamePaused, setGamePaused] = useState(false);
+  const [pendingGameDelete, setPendingGameDelete] = useState(null);
   const [savedSetupSignature, setSavedSetupSignature] = useState("");
   const [pendingInningNotification, setPendingInningNotification] = useState(null);
   const [pendingStrikeoutResult, setPendingStrikeoutResult] = useState(null);
@@ -3884,6 +4104,9 @@ export default function WiffleScoringPrototype() {
   useEffect(() => {
     eventsRef.current = events;
   }, [events]);
+  useEffect(() => {
+    setupEditingDuringGameRef.current = setupEditingDuringGame;
+  }, [setupEditingDuringGame]);
 
   const matchupStatScopes = ["game", "season", "career", "head-to-head"];
   const matchupStatScope = matchupStatScopes[matchupStatScopeIndex % matchupStatScopes.length];
@@ -3902,6 +4125,8 @@ export default function WiffleScoringPrototype() {
   const batterIndex = battingTeam === "away" ? game.awayBatterIndex : game.homeBatterIndex;
   const currentBatter = currentBattingOrder[batterIndex % currentBattingOrder.length];
   const lastEvent = events[events.length - 1];
+  const latestGameStatusEvent = [...events].reverse().find((event) => event.type === "game_status") || null;
+  const syncedGameStatus = latestGameStatusEvent?.status || "";
   const finalDisplayGame = game.status === "final" && activeSavedGameId
     ? previousGames.find((savedGame) => savedGame.id === activeSavedGameId) || null
     : null;
@@ -3910,6 +4135,8 @@ export default function WiffleScoringPrototype() {
   const scoreDisplayAwayScore = game.status === "final" ? finalDisplayGame?.awayScore ?? game.awayScore : game.awayScore;
   const scoreDisplayHomeScore = game.status === "final" ? finalDisplayGame?.homeScore ?? game.homeScore : game.homeScore;
   const scoreDisplayWinner = game.status === "final" ? finalDisplayGame?.winner || game.winner : game.winner;
+  const displayedGameStatus = game.status === "final" ? "final" : (setupEditingDuringGame || (syncedGameStatus ? syncedGameStatus === "paused" : gamePaused) ? "paused" : game.status);
+  const scoringPaused = displayedGameStatus === "paused";
   const allTestsPassed = testResults.every((item) => item.pass);
   const powerPlayUsed = !powerPlaysEnabled || isPowerPlayLimitReached(events, battingTeam, defensiveTeam, game.inning, game.half, powerPlayLimitType, powerPlayLimitAmount);
   const whammyUsed = !powerPlaysEnabled || !whammysEnabled || isWhammyUnavailable(events, battingTeam, defensiveTeam, game.inning, game.half);
@@ -3933,8 +4160,10 @@ export default function WiffleScoringPrototype() {
   const isCustomGame = setupLeagueId === "custom";
   const isLeagueExhibitionGame = !isCustomGame && leagueGameMode === "exhibition";
   const isOfficialLeagueGame = !isCustomGame && !isLeagueExhibitionGame;
+  const setupUsesLeagueTeamSelect = isOfficialLeagueGame || (isLeagueExhibitionGame && useExhibitionLeagueTeams);
   const setupLeague = isCustomGame ? null : leagues.find((league) => league.id === setupLeagueId) || selectedLeague || leagues[0];
-  const setupFieldOptions = setupLeague?.fields || [];
+  const allCreatedFieldOptions = leagues.flatMap((league) => (league.fields || []).map((field) => ({ ...field, sourceLeagueId: league.id, sourceLeagueName: league.name })));
+  const setupFieldOptions = isCustomGame ? allCreatedFieldOptions : setupLeague?.fields || [];
   const setupSeasons = (setupLeague?.years || []).map(normalizeSeasonRecord);
   const setupCurrentSeason = setupSeasons.find((season) => Number(season.year) === Number(setupLeague?.currentSeasonYear)) || setupSeasons[0] || null;
   const setupSessionOptions = setupCurrentSeason?.sessionsEnabled ? setupCurrentSeason.sessions : [];
@@ -4063,6 +4292,26 @@ export default function WiffleScoringPrototype() {
   const selectedField = setupLeague?.fields?.find((field) => field.id === selectedFieldId) || null;
   const knownSubPlayers = getKnownSubPlayers(previousGames, subPlayers);
   const currentSubIndex = Object.fromEntries(getSubPlayerNamesFromSubStatus(subPlayers).map((name) => [name, true]));
+  const splitsLeague = leagues.find((league) => league.id === splitsLeagueId) || selectedLeague || leagues[0];
+  const splitsSeasonYears = leagueSeasonYears(splitsLeague, previousGames);
+  const selectedSplitsSeasonYear = splitsSeasonYears.includes(Number(splitsSeasonYear)) ? Number(splitsSeasonYear) : splitsSeasonYears[0] || currentYearNumber();
+  const splitsSeasonRecord = (splitsLeague?.years || []).map(normalizeSeasonRecord).find((season) => Number(season.year) === Number(selectedSplitsSeasonYear)) || null;
+  const splitsSessionOptions = splitsSeasonRecord?.sessionsEnabled ? splitsSeasonRecord.sessions : [];
+  const selectedSplitsSessionId = splitsSessionId === "all" || splitsSessionOptions.some((session) => session.id === splitsSessionId) ? splitsSessionId : "all";
+  const currentGameForSplits = makeCurrentGameForSplits({ events, awayTeam, homeTeam, setupLeagueId, leagueGameMode, gameSeasonYear, gameSessionId, subPlayers });
+  const splitsBaseOptions = {
+    previousGames,
+    currentGame: currentGameForSplits,
+    scope: splitsScope,
+    leagueId: splitsLeague?.id || "",
+    seasonYear: selectedSplitsSeasonYear,
+    sessionId: selectedSplitsSessionId,
+    includeSubs: splitsIncludeSubs,
+  };
+  const splitsPlayerOptions = getCustomSplitPlayerOptions(splitsBaseOptions);
+  const selectedSplitsPlayerFilter = splitsPlayerFilter === "all" || splitsPlayerOptions.includes(splitsPlayerFilter) ? splitsPlayerFilter : "all";
+  const customSplitRows = buildCustomHittingSplits({ ...splitsBaseOptions, playerFilter: selectedSplitsPlayerFilter, groupBy: splitsGroupBy });
+  const customSplitTotal = totalCustomSplitRows(customSplitRows);
   const setupMainField = getMainField(setupFieldOptions);
   const activeFieldRules = selectedField?.rules || [];
   const setupScheduleSeason = setupCurrentSeason;
@@ -4097,9 +4346,28 @@ export default function WiffleScoringPrototype() {
   const setupPlayersSignature = JSON.stringify({ teamPlayers, subPlayers, subSlots });
   const setupBattingSignature = JSON.stringify({ battingOrder });
   const setupPitchingSignature = JSON.stringify({ pitchingOrder, extraPitchers });
+  const setupRulesDetails = {
+    gameInnings,
+    powerPlaysEnabled,
+    powerPlayLimitType,
+    powerPlayLimitAmount,
+    whammysEnabled,
+    pudwhackerEnabled,
+    extraRunnerRules,
+    ghostRunnersCountAsRbi,
+    runRuleEnabled,
+    runRuleRuns,
+    runRuleBeforeFourthOnly,
+    walkRunRuleCountsAsHr,
+    useLeagueDefaultRules,
+  };
+  const setupPlayersDetails = { teamPlayers, subPlayers, subSlots };
+  const setupBattingDetails = { battingOrder };
+  const setupPitchingDetails = { pitchingOrder, extraPitchers };
   const currentSetupSignature = JSON.stringify({
     setupLeagueId,
     leagueGameMode,
+    useExhibitionLeagueTeams,
     awayTeam,
     homeTeam,
     gameDate,
@@ -4117,10 +4385,15 @@ export default function WiffleScoringPrototype() {
     setupPlayersSignature,
     setupBattingSignature,
     setupPitchingSignature,
+    setupRulesDetails,
+    setupPlayersDetails,
+    setupBattingDetails,
+    setupPitchingDetails,
   });
   const liveGameSetupSnapshot = useMemo(() => ({
     setupLeagueId,
     leagueGameMode,
+    useExhibitionLeagueTeams,
     awayTeam,
     homeTeam,
     gameDate,
@@ -4156,7 +4429,7 @@ export default function WiffleScoringPrototype() {
     selectedScheduledGameId,
     savedSetupSignature,
     setupSignature: currentSetupSignature,
-  }), [setupLeagueId, leagueGameMode, awayTeam, homeTeam, gameDate, gameTime, gameLocation, gameSeasonYear, gameSessionId, selectedFieldId, gameInnings, powerPlaysEnabled, powerPlayLimitType, powerPlayLimitAmount, whammysEnabled, pudwhackerEnabled, extraRunnerRules, ghostRunnersCountAsRbi, runRuleEnabled, runRuleRuns, runRuleBeforeFourthOnly, walkRunRuleCountsAsHr, useLeagueDefaultRules, teamPlayers, subPlayers, subSlots, battingOrder, pitchingOrder, extraPitchers, selectedLeagueId, awayLeagueTeamId, homeLeagueTeamId, useLeagueSchedule, selectedScheduledWeekId, selectedScheduledGameId, savedSetupSignature, currentSetupSignature]);
+  }), [setupLeagueId, leagueGameMode, useExhibitionLeagueTeams, awayTeam, homeTeam, gameDate, gameTime, gameLocation, gameSeasonYear, gameSessionId, selectedFieldId, gameInnings, powerPlaysEnabled, powerPlayLimitType, powerPlayLimitAmount, whammysEnabled, pudwhackerEnabled, extraRunnerRules, ghostRunnersCountAsRbi, runRuleEnabled, runRuleRuns, runRuleBeforeFourthOnly, walkRunRuleCountsAsHr, useLeagueDefaultRules, teamPlayers, subPlayers, subSlots, battingOrder, pitchingOrder, extraPitchers, selectedLeagueId, awayLeagueTeamId, homeLeagueTeamId, useLeagueSchedule, selectedScheduledWeekId, selectedScheduledGameId, savedSetupSignature, currentSetupSignature]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -4175,9 +4448,11 @@ export default function WiffleScoringPrototype() {
   const unsavedBattingOrder = Boolean(savedSetupParts.setupBattingSignature && savedSetupParts.setupBattingSignature !== setupBattingSignature);
   const unsavedPitchingOrder = Boolean(savedSetupParts.setupPitchingSignature && savedSetupParts.setupPitchingSignature !== setupPitchingSignature);
   const setupEditingLocked = Boolean(gameStarted && !setupEditingDuringGame);
+  const setupIdentityLocked = Boolean(gameStarted && setupEditingDuringGame);
   const setupCanResumeGame = Boolean(gameStarted && !unsavedSetupChanges);
   const finalGameAwaitingNewSetup = Boolean(gameStarted && game.status === "final");
-  const hasLocalDraftChanges = Boolean(playerPageHasUnsavedChanges || leagueHasUnsavedChanges || unsavedSetupChanges || selectedPlayerDraft || inlinePlayerCreationModalOpen || pendingPlayerSaveConfirm || pendingPlayerPageExit || pendingLeagueExitPage || pendingLeagueSwitchId || pendingDraftAward || pendingDraftRestart || pendingRealDraftStart || pendingPlayerRename || confirmCancelGameOpen);
+  const pausedGameAwaitingNewSetup = Boolean(gameStarted && scoringPaused && !setupEditingDuringGame && game.status !== "final");
+  const hasLocalDraftChanges = Boolean(playerPageHasUnsavedChanges || leagueHasUnsavedChanges || unsavedSetupChanges || selectedPlayerDraft || inlinePlayerCreationModalOpen || pendingPlayerSaveConfirm || pendingPlayerPageExit || pendingLeagueExitPage || pendingLeagueSwitchId || pendingDraftAward || pendingDraftRestart || pendingRealDraftStart || pendingPlayerRename || confirmCancelGameOpen || confirmResetGameOpen);
   const sharedStateSyncBlocked = Boolean(hasLocalDraftChanges);
   const isRemoteSyncPaused = () => sharedStateSyncBlocked || Date.now() - lastLocalEditAtRef.current < 5000;
 
@@ -4205,49 +4480,55 @@ export default function WiffleScoringPrototype() {
 
   function applyPersistedState(savedState, options = {}) {
     if (!savedState) return;
-    const { includeSessionState = true } = options;
+    const { includeSessionState = true, skipGameSetup = false } = options;
     suppressNextPersistRef.current = true;
     lastPersistedStateSignatureRef.current = getPersistedStateSignature(savedState);
     if (Array.isArray(savedState.leagues) && savedState.leagues.length > 0) setLeagues(removeUnsavedBlankLeaguePlayers(savedState.leagues));
     if (Array.isArray(savedState.freeAgentPlayers)) setFreeAgentPlayers(savedState.freeAgentPlayers.map(normalizeLeaguePlayer).filter((player) => String(player.name || "").trim()));
-    if (savedState.awayTeam != null) setAwayTeam(savedState.awayTeam);
-    if (savedState.homeTeam != null) setHomeTeam(savedState.homeTeam);
-    if (savedState.gameDate != null) setGameDate(savedState.gameDate);
-    if (savedState.gameTime != null) setGameTime(savedState.gameTime);
-    if (savedState.gameLocation != null) setGameLocation(savedState.gameLocation);
-    if (savedState.gameSeasonYear != null) setGameSeasonYear(savedState.gameSeasonYear);
-    if (savedState.gameSessionId != null) setGameSessionId(savedState.gameSessionId);
-    if (savedState.selectedFieldId != null) setSelectedFieldId(savedState.selectedFieldId);
-    if (savedState.gameInnings != null) setGameInnings(Math.max(1, Number(savedState.gameInnings) || 4));
-    if (savedState.powerPlaysEnabled != null) setPowerPlaysEnabled(savedState.powerPlaysEnabled);
-    if (savedState.powerPlayLimitType != null) setPowerPlayLimitType(savedState.powerPlayLimitType);
-    if (savedState.powerPlayLimitAmount != null) setPowerPlayLimitAmount(savedState.powerPlayLimitAmount);
-    if (savedState.whammysEnabled != null) setWhammysEnabled(savedState.whammysEnabled);
-    if (savedState.pudwhackerEnabled != null) setPudwhackerEnabled(savedState.pudwhackerEnabled);
-    if (Array.isArray(savedState.extraRunnerRules)) setExtraRunnerRules(savedState.extraRunnerRules);
-    if (savedState.ghostRunnersCountAsRbi != null) setGhostRunnersCountAsRbi(savedState.ghostRunnersCountAsRbi);
-    if (savedState.runRuleEnabled != null) setRunRuleEnabled(savedState.runRuleEnabled);
-    if (savedState.runRuleRuns != null) setRunRuleRuns(savedState.runRuleRuns);
-    if (savedState.runRuleBeforeFourthOnly != null) setRunRuleBeforeFourthOnly(savedState.runRuleBeforeFourthOnly);
-    if (savedState.walkRunRuleCountsAsHr != null) setWalkRunRuleCountsAsHr(savedState.walkRunRuleCountsAsHr);
-    if (savedState.useLeagueDefaultRules != null) setUseLeagueDefaultRules(savedState.useLeagueDefaultRules);
-    if (savedState.teamPlayers) setTeamPlayers(savedState.teamPlayers);
-    if (savedState.subPlayers) setSubPlayers(savedState.subPlayers);
-    if (savedState.subSlots) setSubSlots(savedState.subSlots);
-    if (savedState.battingOrder) setBattingOrder(savedState.battingOrder);
-    if (savedState.pitchingOrder) setPitchingOrder(savedState.pitchingOrder);
-    if (savedState.extraPitchers) setExtraPitchers(savedState.extraPitchers);
+    if (!skipGameSetup) {
+      if (savedState.awayTeam != null) setAwayTeam(savedState.awayTeam);
+      if (savedState.homeTeam != null) setHomeTeam(savedState.homeTeam);
+      if (savedState.gameDate != null) setGameDate(savedState.gameDate);
+      if (savedState.gameTime != null) setGameTime(savedState.gameTime);
+      if (savedState.gameLocation != null) setGameLocation(savedState.gameLocation);
+      if (savedState.gameSeasonYear != null) setGameSeasonYear(savedState.gameSeasonYear);
+      if (savedState.gameSessionId != null) setGameSessionId(savedState.gameSessionId);
+      if (savedState.selectedFieldId != null) setSelectedFieldId(savedState.selectedFieldId);
+      if (savedState.gameInnings != null) setGameInnings(Math.max(1, Number(savedState.gameInnings) || 4));
+      if (savedState.powerPlaysEnabled != null) setPowerPlaysEnabled(savedState.powerPlaysEnabled);
+      if (savedState.powerPlayLimitType != null) setPowerPlayLimitType(savedState.powerPlayLimitType);
+      if (savedState.powerPlayLimitAmount != null) setPowerPlayLimitAmount(savedState.powerPlayLimitAmount);
+      if (savedState.whammysEnabled != null) setWhammysEnabled(savedState.whammysEnabled);
+      if (savedState.pudwhackerEnabled != null) setPudwhackerEnabled(savedState.pudwhackerEnabled);
+      if (Array.isArray(savedState.extraRunnerRules)) setExtraRunnerRules(savedState.extraRunnerRules);
+      if (savedState.ghostRunnersCountAsRbi != null) setGhostRunnersCountAsRbi(savedState.ghostRunnersCountAsRbi);
+      if (savedState.runRuleEnabled != null) setRunRuleEnabled(savedState.runRuleEnabled);
+      if (savedState.runRuleRuns != null) setRunRuleRuns(savedState.runRuleRuns);
+      if (savedState.runRuleBeforeFourthOnly != null) setRunRuleBeforeFourthOnly(savedState.runRuleBeforeFourthOnly);
+      if (savedState.walkRunRuleCountsAsHr != null) setWalkRunRuleCountsAsHr(savedState.walkRunRuleCountsAsHr);
+      if (savedState.useLeagueDefaultRules != null) setUseLeagueDefaultRules(savedState.useLeagueDefaultRules);
+      if (savedState.teamPlayers) setTeamPlayers(savedState.teamPlayers);
+      if (savedState.subPlayers) setSubPlayers(savedState.subPlayers);
+      if (savedState.subSlots) setSubSlots(savedState.subSlots);
+      if (savedState.battingOrder) setBattingOrder(savedState.battingOrder);
+      if (savedState.pitchingOrder) setPitchingOrder(savedState.pitchingOrder);
+      if (savedState.extraPitchers) setExtraPitchers(savedState.extraPitchers);
+    }
     if (includeSessionState && Array.isArray(savedState.events)) setEvents(savedState.events);
     if (Array.isArray(savedState.previousGames)) setPreviousGames(savedState.previousGames);
     if (includeSessionState && savedState.archivedFinalEventId !== undefined) setArchivedFinalEventId(savedState.archivedFinalEventId);
     if (includeSessionState && savedState.expandedGameId !== undefined) setExpandedGameId(savedState.expandedGameId);
     if (includeSessionState && savedState.activeSavedGameId !== undefined) setActiveSavedGameId(savedState.activeSavedGameId);
     if (includeSessionState && savedState.activePage != null) setActivePage(savedState.activePage);
+    if (includeSessionState && savedState.gamePaused != null) setGamePaused(Boolean(savedState.gamePaused));
     if (savedState.selectedLeagueId != null) setSelectedLeagueId(savedState.selectedLeagueId);
-    if (savedState.setupLeagueId != null) setSetupLeagueId(savedState.setupLeagueId);
-    if (savedState.leagueGameMode != null) setLeagueGameMode(savedState.leagueGameMode);
-    if (savedState.awayLeagueTeamId != null) setAwayLeagueTeamId(savedState.awayLeagueTeamId);
-    if (savedState.homeLeagueTeamId != null) setHomeLeagueTeamId(savedState.homeLeagueTeamId);
+    if (!skipGameSetup) {
+      if (savedState.setupLeagueId != null) setSetupLeagueId(savedState.setupLeagueId);
+      if (savedState.leagueGameMode != null) setLeagueGameMode(savedState.leagueGameMode);
+      if (savedState.useExhibitionLeagueTeams != null) setUseExhibitionLeagueTeams(Boolean(savedState.useExhibitionLeagueTeams));
+      if (savedState.awayLeagueTeamId != null) setAwayLeagueTeamId(savedState.awayLeagueTeamId);
+      if (savedState.homeLeagueTeamId != null) setHomeLeagueTeamId(savedState.homeLeagueTeamId);
+    }
     if (includeSessionState) {
       if (savedState.statsViewMode != null) setStatsViewMode(savedState.statsViewMode);
       if (savedState.statsLeagueId != null) setStatsLeagueId(savedState.statsLeagueId);
@@ -4257,6 +4538,13 @@ export default function WiffleScoringPrototype() {
       if (savedState.statsVsHitterFilter != null) setStatsVsHitterFilter(savedState.statsVsHitterFilter);
       if (savedState.statsVsPitcherFilter != null) setStatsVsPitcherFilter(savedState.statsVsPitcherFilter);
       if (savedState.statsVsScope != null) setStatsVsScope(savedState.statsVsScope);
+      if (savedState.splitsScope != null) setSplitsScope(savedState.splitsScope);
+      if (savedState.splitsLeagueId != null) setSplitsLeagueId(savedState.splitsLeagueId);
+      if (savedState.splitsSeasonYear != null) setSplitsSeasonYear(savedState.splitsSeasonYear);
+      if (savedState.splitsSessionId != null) setSplitsSessionId(savedState.splitsSessionId);
+      if (savedState.splitsPlayerFilter != null) setSplitsPlayerFilter(savedState.splitsPlayerFilter);
+      if (savedState.splitsGroupBy != null) setSplitsGroupBy(savedState.splitsGroupBy);
+      if (savedState.splitsIncludeSubs != null) setSplitsIncludeSubs(Boolean(savedState.splitsIncludeSubs));
       if (savedState.leadersViewMode != null) setLeadersViewMode(savedState.leadersViewMode);
       if (savedState.leadersLeagueId != null) setLeadersLeagueId(savedState.leadersLeagueId);
       if (savedState.leadersSeasonYear != null) setLeadersSeasonYear(savedState.leadersSeasonYear);
@@ -4267,9 +4555,11 @@ export default function WiffleScoringPrototype() {
       if (savedState.matchupStatScopeIndex != null) setMatchupStatScopeIndex(savedState.matchupStatScopeIndex);
       if (savedState.selectedLeagueTeamsSessionId != null) setSelectedLeagueTeamsSessionId(savedState.selectedLeagueTeamsSessionId);
     }
-    if (savedState.useLeagueSchedule != null) setUseLeagueSchedule(savedState.useLeagueSchedule);
-    if (savedState.selectedScheduledWeekId != null) setSelectedScheduledWeekId(savedState.selectedScheduledWeekId);
-    if (savedState.selectedScheduledGameId != null) setSelectedScheduledGameId(savedState.selectedScheduledGameId);
+    if (!skipGameSetup) {
+      if (savedState.useLeagueSchedule != null) setUseLeagueSchedule(savedState.useLeagueSchedule);
+      if (savedState.selectedScheduledWeekId != null) setSelectedScheduledWeekId(savedState.selectedScheduledWeekId);
+      if (savedState.selectedScheduledGameId != null) setSelectedScheduledGameId(savedState.selectedScheduledGameId);
+    }
     if (includeSessionState) {
       if (savedState.copyScheduleTargetSessionId != null) setCopyScheduleTargetSessionId(savedState.copyScheduleTargetSessionId);
       if (savedState.copyScheduleFirstWeekDate != null) setCopyScheduleFirstWeekDate(savedState.copyScheduleFirstWeekDate);
@@ -4375,6 +4665,7 @@ export default function WiffleScoringPrototype() {
       selectedLeagueId,
       setupLeagueId,
       leagueGameMode,
+      useExhibitionLeagueTeams,
       awayLeagueTeamId,
       homeLeagueTeamId,
       statsViewMode,
@@ -4385,6 +4676,13 @@ export default function WiffleScoringPrototype() {
       statsVsHitterFilter,
       statsVsPitcherFilter,
       statsVsScope,
+      splitsScope,
+      splitsLeagueId,
+      splitsSeasonYear,
+      splitsSessionId,
+      splitsPlayerFilter,
+      splitsGroupBy,
+      splitsIncludeSubs,
       leadersViewMode,
       leadersLeagueId,
       leadersSeasonYear,
@@ -4416,6 +4714,7 @@ export default function WiffleScoringPrototype() {
       mockDrafts,
       draftStartedOverrides,
       gameStarted,
+      gamePaused,
       savedSetupSignature,
       setupEditingDuringGame,
     };
@@ -4427,8 +4726,9 @@ export default function WiffleScoringPrototype() {
       return;
     }
     lastPersistedStateSignatureRef.current = nextStateSignature;
-    savePersistedAppState({ ...nextState, savedAt: new Date().toISOString() });
-  }, [storageHydrated, awayTeam, homeTeam, gameDate, gameTime, gameLocation, gameSeasonYear, gameSessionId, selectedFieldId, gameInnings, powerPlaysEnabled, powerPlayLimitType, powerPlayLimitAmount, whammysEnabled, pudwhackerEnabled, extraRunnerRules, ghostRunnersCountAsRbi, runRuleEnabled, runRuleRuns, runRuleBeforeFourthOnly, walkRunRuleCountsAsHr, useLeagueDefaultRules, teamPlayers, subPlayers, subSlots, battingOrder, pitchingOrder, extraPitchers, events, previousGames, archivedFinalEventId, expandedGameId, activeSavedGameId, activePage, leagues, freeAgentPlayers, selectedLeagueId, setupLeagueId, leagueGameMode, awayLeagueTeamId, homeLeagueTeamId, statsViewMode, statsLeagueId, statsSeasonYear, statsSessionId, statsPlayerFilter, statsVsHitterFilter, statsVsPitcherFilter, statsVsScope, leadersViewMode, leadersLeagueId, leadersSeasonYear, selectedLeaderStats, fieldImportSourceLeagueId, selectedImportFieldIds, setupAttempted, matchupStatScopeIndex, selectedLeagueTeamsSessionId, useLeagueSchedule, selectedScheduledWeekId, selectedScheduledGameId, copyScheduleTargetSessionId, copyScheduleFirstWeekDate, copySeasonSourceId, copySeasonTargetId, copySeasonFirstWeekDate, activeScheduleCopyTool, pendingCopyWeekId, copyWeekOneWeekLater, draftSessionId, draftSelectedPlayer, draftBidTeamId, draftBidAmount, draftTimerRemaining, draftTimerRunning, draftAwardError, mockDraftMode, mockDrafts, draftStartedOverrides, gameStarted, savedSetupSignature, setupEditingDuringGame]);
+    const activeLiveGameSession = Boolean(gameStarted || activePage === "score" || liveEventsWriteInFlight);
+    savePersistedAppState({ ...nextState, savedAt: new Date().toISOString() }, { shared: forceSaveRequested || !activeLiveGameSession });
+  }, [storageHydrated, awayTeam, homeTeam, gameDate, gameTime, gameLocation, gameSeasonYear, gameSessionId, selectedFieldId, gameInnings, powerPlaysEnabled, powerPlayLimitType, powerPlayLimitAmount, whammysEnabled, pudwhackerEnabled, extraRunnerRules, ghostRunnersCountAsRbi, runRuleEnabled, runRuleRuns, runRuleBeforeFourthOnly, walkRunRuleCountsAsHr, useLeagueDefaultRules, teamPlayers, subPlayers, subSlots, battingOrder, pitchingOrder, extraPitchers, events, previousGames, archivedFinalEventId, expandedGameId, activeSavedGameId, activePage, leagues, freeAgentPlayers, selectedLeagueId, setupLeagueId, leagueGameMode, useExhibitionLeagueTeams, awayLeagueTeamId, homeLeagueTeamId, statsViewMode, statsLeagueId, statsSeasonYear, statsSessionId, statsPlayerFilter, statsVsHitterFilter, statsVsPitcherFilter, statsVsScope, splitsScope, splitsLeagueId, splitsSeasonYear, splitsSessionId, splitsPlayerFilter, splitsGroupBy, splitsIncludeSubs, leadersViewMode, leadersLeagueId, leadersSeasonYear, selectedLeaderStats, fieldImportSourceLeagueId, selectedImportFieldIds, setupAttempted, matchupStatScopeIndex, selectedLeagueTeamsSessionId, useLeagueSchedule, selectedScheduledWeekId, selectedScheduledGameId, copyScheduleTargetSessionId, copyScheduleFirstWeekDate, copySeasonSourceId, copySeasonTargetId, copySeasonFirstWeekDate, activeScheduleCopyTool, pendingCopyWeekId, copyWeekOneWeekLater, draftSessionId, draftSelectedPlayer, draftBidTeamId, draftBidAmount, draftTimerRemaining, draftTimerRunning, draftAwardError, mockDraftMode, mockDrafts, draftStartedOverrides, gameStarted, gamePaused, savedSetupSignature, setupEditingDuringGame]);
 
   useEffect(() => {
     if (!storageHydrated || setupSignatureInitializedRef.current) return;
@@ -4463,12 +4763,19 @@ export default function WiffleScoringPrototype() {
           setNote("");
           setPendingFieldRule(null);
           setConfirmCancelGameOpen(false);
+          setConfirmResetGameOpen(false);
           setGameStarted(false);
+          setGamePaused(false);
           setSetupEditingDuringGame(false);
           setActivePage("setup");
           return;
         }
-        if (liveStatus === "started" && liveEventState?.setupSnapshot && !hasPendingSharedSave() && !isRemoteSyncPaused()) {
+        if ((liveStatus === "started" || liveStatus === "paused") && !hasPendingSharedSave()) {
+          if (!gameStarted) setGameStarted(true);
+          setGamePaused(liveStatus === "paused");
+          if (!setupEditingDuringGameRef.current) setSetupEditingDuringGame(false);
+        }
+        if ((liveStatus === "started" || liveStatus === "paused") && liveEventState?.setupSnapshot && !hasPendingSharedSave() && !isRemoteSyncPaused()) {
           applyPersistedState(liveEventState.setupSnapshot, { includeSessionState: false });
           setEvents(remoteEvents);
           setArchivedFinalEventId(null);
@@ -4482,8 +4789,7 @@ export default function WiffleScoringPrototype() {
           setNote("");
           setPendingFieldRule(null);
           setConfirmCancelGameOpen(false);
-          if (!gameStarted) setGameStarted(true);
-          setSetupEditingDuringGame(false);
+          setConfirmResetGameOpen(false);
           if (!gameStarted) setActivePage("score");
           return;
         }
@@ -4500,7 +4806,7 @@ export default function WiffleScoringPrototype() {
     pollLiveEvents();
     const timer = window.setInterval(pollLiveEvents, WIFFLE_SHARED_STATE_POLL_MS);
     return () => window.clearInterval(timer);
-  }, [storageHydrated, sharedStateSyncBlocked, gameStarted, activePage]);
+  }, [storageHydrated, sharedStateSyncBlocked, gameStarted, activePage, setupEditingDuringGame]);
 
   useEffect(() => {
     if (!storageHydrated) return undefined;
@@ -4521,7 +4827,7 @@ export default function WiffleScoringPrototype() {
         const localState = mergeSharedStateForLocalStorage(loadPersistedAppState(), sharedState);
         window.localStorage.setItem(WIFFLE_LOCAL_STORAGE_KEY, JSON.stringify(localState));
         window.__WIFFLE_SYNC_BASE_SAVED_AT = sharedState.savedAt || "";
-        applyPersistedState(sharedState, { includeSessionState: false });
+        applyPersistedState(sharedState, { includeSessionState: false, skipGameSetup: Boolean(gameStarted || activePage === "score") });
       } catch (error) {
         // The shared API can be unavailable in static previews or while offline.
       }
@@ -4529,7 +4835,7 @@ export default function WiffleScoringPrototype() {
 
     function handleSharedStateUpdated(event) {
       if (!event.detail || hasPendingSharedSave() || isRemoteSyncPaused()) return;
-      applyPersistedState(event.detail, { includeSessionState: false });
+      applyPersistedState(event.detail, { includeSessionState: false, skipGameSetup: Boolean(gameStarted || activePage === "score") });
     }
 
     window.addEventListener("wiffle:shared-state-updated", handleSharedStateUpdated);
@@ -4552,10 +4858,110 @@ export default function WiffleScoringPrototype() {
     if (!playerDrafts) setPlayerDrafts(cloneLeagueRecord(allPlayerRecords));
   }, [activePage, allPlayerRecords, playerDrafts]);
 
+  function describeOrderChanges(previousOrder = [], nextOrder = [], label = "Order") {
+    const previousPositions = new Map(cleanRoster(previousOrder || []).map((player, index) => [player, index + 1]));
+    return cleanRoster(nextOrder || [])
+      .map((player, index) => {
+        const oldSpot = previousPositions.get(player);
+        const newSpot = index + 1;
+        if (!oldSpot) return `${label}: ${player} added at #${newSpot}`;
+        if (oldSpot !== newSpot) return `${label}: ${player} moved from #${oldSpot} to #${newSpot}`;
+        return "";
+      })
+      .filter(Boolean);
+  }
+
+  function describeRosterChanges(previousPlayers = [], nextPlayers = [], teamName = "Team") {
+    const changes = [];
+    const maxLength = Math.max((previousPlayers || []).length, (nextPlayers || []).length);
+    for (let index = 0; index < maxLength; index += 1) {
+      const previousPlayer = String(previousPlayers?.[index] || "").trim();
+      const nextPlayer = String(nextPlayers?.[index] || "").trim();
+      if (previousPlayer === nextPlayer) continue;
+      if (previousPlayer && nextPlayer) changes.push(`${teamName}: ${nextPlayer} replaced ${previousPlayer} in roster spot #${index + 1}`);
+      else if (nextPlayer) changes.push(`${teamName}: ${nextPlayer} added to roster spot #${index + 1}`);
+      else if (previousPlayer) changes.push(`${teamName}: ${previousPlayer} removed from roster spot #${index + 1}`);
+    }
+    return changes;
+  }
+
+  function describeSetupChangeDetails() {
+    const previousRules = savedSetupParts.setupRulesDetails || {};
+    const previousPlayers = savedSetupParts.setupPlayersDetails || {};
+    const previousBatting = savedSetupParts.setupBattingDetails || {};
+    const previousPitching = savedSetupParts.setupPitchingDetails || {};
+    const changes = [];
+
+    if (savedSetupParts.selectedFieldId !== selectedFieldId || savedSetupParts.gameLocation !== gameLocation) {
+      changes.push(`Field/location changed from ${savedSetupParts.gameLocation || "none"} to ${gameLocation || "none"}`);
+    }
+
+    [
+      ["Game length", previousRules.gameInnings, gameInnings, " innings"],
+      ["Power Plays", previousRules.powerPlaysEnabled, powerPlaysEnabled],
+      ["Power Play limit", previousRules.powerPlayLimitAmount, powerPlayLimitAmount],
+      ["Whammys", previousRules.whammysEnabled, whammysEnabled],
+      ["Pudwhacker", previousRules.pudwhackerEnabled, pudwhackerEnabled],
+      ["Run rule", previousRules.runRuleEnabled, runRuleEnabled],
+      ["Run-rule runs", previousRules.runRuleRuns, runRuleRuns],
+      ["Ghost runners count as RBI", previousRules.ghostRunnersCountAsRbi, ghostRunnersCountAsRbi],
+    ].forEach(([label, before, after, suffix = ""]) => {
+      if (before !== undefined && JSON.stringify(before) !== JSON.stringify(after)) changes.push(`${label} changed from ${before}${suffix} to ${after}${suffix}`);
+    });
+
+    ["away", "home"].forEach((teamKey) => {
+      const teamLabel = teamKey === "away" ? awayTeam : homeTeam;
+      changes.push(...describeRosterChanges(previousPlayers.teamPlayers?.[teamKey] || [], teamPlayers[teamKey] || [], teamLabel));
+      changes.push(...describeOrderChanges(previousBatting.battingOrder?.[teamKey] || [], battingOrder[teamKey] || [], `${teamLabel} batting order`));
+      changes.push(...describeOrderChanges(previousPitching.pitchingOrder?.[teamKey] || [], pitchingOrder[teamKey] || [], `${teamLabel} pitching order`));
+    });
+
+    return changes.length ? changes : ["Game setup updated"];
+  }
+
   function saveSetupChanges() {
     markNextSharedStateSaveAuthoritative();
+    const status = gamePaused || setupEditingDuringGame ? "paused" : "started";
+    const changeLabels = describeSetupChangeDetails();
+    const shouldLogMidGameChange = Boolean(gameStarted && unsavedSetupChanges);
+    const setupChangeEvent = shouldLogMidGameChange
+      ? {
+          id: newId(),
+          type: "setup_change",
+          inning: game.inning,
+          half: game.half,
+          note: changeLabels.length ? changeLabels.join("; ") : "Game setup updated",
+          createdAt: new Date().toLocaleTimeString(),
+        }
+      : null;
+    const nextEvents = setupChangeEvent ? [...eventsRef.current, setupChangeEvent] : eventsRef.current;
+    const setupSnapshot = { ...liveGameSetupSnapshot, savedSetupSignature: currentSetupSignature, setupSignature: currentSetupSignature };
+    if (setupChangeEvent) setEvents(nextEvents);
     setSavedSetupSignature(currentSetupSignature);
-    if (gameStarted || eventsRef.current.length > 0) replaceLiveEvents(eventsRef.current, liveGameSetupSnapshot);
+    if (gameStarted || nextEvents.length > 0) replaceLiveEvents(nextEvents, setupSnapshot, status);
+  }
+
+  function beginSetupEditDuringGame() {
+    userHasInteractedRef.current = true;
+    lastLocalEditAtRef.current = Date.now();
+    setupEditingDuringGameRef.current = true;
+    const shouldAddPauseEvent = syncedGameStatus !== "paused";
+    const pauseEvent = shouldAddPauseEvent ? { id: newId(), type: "game_status", status: "paused", inning: game.inning, half: game.half, note: "Game paused while setup is edited.", createdAt: new Date().toLocaleTimeString() } : null;
+    const nextEvents = pauseEvent ? [...eventsRef.current, pauseEvent] : eventsRef.current;
+    if (pauseEvent) setEvents(nextEvents);
+    setGamePaused(true);
+    setSetupEditingDuringGame(true);
+    if (gameStarted || nextEvents.length > 0) replaceLiveEvents(nextEvents, liveGameSetupSnapshot, "paused");
+  }
+
+  function resumePausedGame() {
+    const event = { id: newId(), type: "game_status", status: "started", inning: game.inning, half: game.half, note: "Game resumed.", createdAt: new Date().toLocaleTimeString() };
+    const nextEvents = [...eventsRef.current, event];
+    setEvents(nextEvents);
+    setGamePaused(false);
+    setSetupEditingDuringGame(false);
+    replaceLiveEvents(nextEvents, liveGameSetupSnapshot, "started");
+    setActivePage("score");
   }
 
   function resumeGameFromSetup() {
@@ -4563,8 +4969,7 @@ export default function WiffleScoringPrototype() {
       window.alert("Save setup changes before resuming the game.");
       return;
     }
-    setSetupEditingDuringGame(false);
-    setActivePage("score");
+    resumePausedGame();
   }
 
   function saveLeagueDraftChanges() {
@@ -4993,18 +5398,21 @@ export default function WiffleScoringPrototype() {
     if (leagueId === "custom") {
       setSetupLeagueId("custom");
       setLeagueGameMode("official");
+      setUseExhibitionLeagueTeams(false);
       setAwayLeagueTeamId("");
       setHomeLeagueTeamId("");
       setSelectedScheduledWeekId("");
       setSelectedScheduledGameId("");
       setUseLeagueSchedule(false);
       setSelectedFieldId("");
+      setGameLocation("");
       return;
     }
 
     const league = leagues.find((item) => item.id === leagueId);
     setSetupLeagueId(leagueId);
     setLeagueGameMode("official");
+    setUseExhibitionLeagueTeams(false);
     setAwayLeagueTeamId("");
     setHomeLeagueTeamId("");
     setSelectedScheduledWeekId("");
@@ -6444,7 +6852,7 @@ export default function WiffleScoringPrototype() {
 
   function applyFieldToGame(fieldId) {
     setSelectedFieldId(fieldId || "");
-    const field = setupLeague?.fields?.find((item) => item.id === fieldId);
+    const field = setupFieldOptions.find((item) => item.id === fieldId);
     setGameLocation(field ? field.name : "");
   }
 
@@ -6708,6 +7116,7 @@ export default function WiffleScoringPrototype() {
   }
 
   function addPlay(result) {
+    if (game.status === "final" || scoringPaused) return;
     if (result.type === "strikeout" && !result.strikeoutType) {
       setPendingStrikeoutResult(result);
       return;
@@ -6807,6 +7216,7 @@ export default function WiffleScoringPrototype() {
   }
 
   function addTeamAdjustment(team, amount) {
+    if (game.status === "final" || scoringPaused) return;
     const event = { id: newId(), type: "score_adjustment", team, inning: game.inning, half: game.half, runs: amount, note: note || (amount > 0 ? "Bonus run" : "Run removed"), createdAt: new Date().toLocaleTimeString() };
     setEvents((prev) => [...prev, event]);
     appendLiveEvent(event);
@@ -6820,7 +7230,7 @@ export default function WiffleScoringPrototype() {
   }
 
   function applyFieldRule(rule) {
-    if (!rule || game.status === "final") return;
+    if (!rule || game.status === "final" || scoringPaused) return;
     const actions = getFieldRuleActions(rule);
     const runs = Number(rule.runs) || 0;
     const resultAction = fieldRulePrimaryResultAction(rule);
@@ -6884,6 +7294,7 @@ export default function WiffleScoringPrototype() {
 
   function clearCurrentGame() {
     setEvents([]);
+    setGamePaused(false);
     setManualRuns(0);
     setManualRbi(0);
     setSelectedModifier(null);
@@ -6891,19 +7302,9 @@ export default function WiffleScoringPrototype() {
     setEndHalf(false);
     setNote("");
     setSetupAttempted(false);
-    setAwayLeagueTeamId("");
-    setHomeLeagueTeamId("");
-    if (!isCustomGame) {
-      setAwayTeam("Away Team");
-      setHomeTeam("Home Team");
-      const resetRosters = isLeagueExhibitionGame ? emptyGameRosters : defaultPlayers;
-      setTeamPlayers(resetRosters);
-      setBattingOrder(resetRosters);
-      setPitchingOrder(resetRosters);
-      setSubPlayers({ away: {}, home: {} });
-      setSubSlots({ away: {}, home: {} });
-      setExtraPitchers({ away: {}, home: {} });
-    }
+    setSubPlayers({ away: {}, home: {} });
+    setSubSlots({ away: {}, home: {} });
+    setExtraPitchers({ away: {}, home: {} });
     setGameDate(todayInputValue());
     setGameTime(currentTimeInputValue());
     const mainField = getMainField(setupLeague?.fields || []);
@@ -6914,7 +7315,21 @@ export default function WiffleScoringPrototype() {
   }
 
   function resetGame() {
-    clearCurrentGame();
+    setEvents([]);
+    replaceLiveEvents([], liveGameSetupSnapshot, "started");
+    setArchivedFinalEventId(null);
+    setActiveSavedGameId(null);
+    setManualRuns(0);
+    setManualRbi(0);
+    setSelectedModifier(null);
+    setRepeatBatter(false);
+    setEndHalf(false);
+    setManualMode(false);
+    setNote("");
+    setPendingFieldRule(null);
+    setConfirmResetGameOpen(false);
+    setGamePaused(false);
+    setSetupEditingDuringGame(false);
   }
 
   function cancelCurrentGame() {
@@ -6931,15 +7346,18 @@ export default function WiffleScoringPrototype() {
     setNote("");
     setPendingFieldRule(null);
     setConfirmCancelGameOpen(false);
+    setConfirmResetGameOpen(false);
     setGameStarted(false);
+    setGamePaused(false);
     setSetupEditingDuringGame(false);
     setActivePage("setup");
   }
 
-  function makeGameArchiveEntry(eventsToArchive = events, existingId = null) {
+  function makeGameArchiveEntry(eventsToArchive = events, existingId = null, statusOverride = null) {
     const currentGame = calculateState(eventsToArchive, { extraRunnerRules, battingOrder, ghostRunnersCountAsRbi, gameInnings });
     const currentLineScore = buildLineScore(eventsToArchive, currentGame);
     const currentTaggedSplits = buildTaggedHittingSplits(eventsToArchive);
+    const archiveStatus = statusOverride || currentGame.status;
     return {
       id: existingId || newId(),
       savedAt: new Date().toLocaleString(),
@@ -6951,8 +7369,8 @@ export default function WiffleScoringPrototype() {
       awayScore: currentGame.awayScore,
       homeScore: currentGame.homeScore,
       winner: currentGame.winner || getWinner(currentGame),
-      status: currentGame.status,
-      finalReason: currentGame.finalReason,
+      status: archiveStatus,
+      finalReason: archiveStatus === "paused" ? "Game paused and saved to resume later." : currentGame.finalReason,
       innings: currentLineScore.inningNumbers.length,
       eventCount: eventsToArchive.length,
       stats: JSON.parse(JSON.stringify(currentGame.stats || {})),
@@ -6968,6 +7386,7 @@ export default function WiffleScoringPrototype() {
         homeTeam,
         setupLeagueId: isCustomGame ? "custom" : setupLeague?.id || setupLeagueId,
         isLeagueExhibition: Boolean(isLeagueExhibitionGame),
+        useExhibitionLeagueTeams,
         gameSeasonYear: isCustomGame ? gameSeasonYear : setupLeague?.currentSeasonYear || gameSeasonYear,
         gameSessionId,
         useLeagueSchedule,
@@ -7005,7 +7424,7 @@ export default function WiffleScoringPrototype() {
 
   function saveCurrentGame() {
     markNextSharedStateSaveAuthoritative();
-    const snapshot = makeGameArchiveEntry(events, activeSavedGameId);
+    const snapshot = makeGameArchiveEntry(events, activeSavedGameId, gamePaused ? "paused" : null);
     setPreviousGames((prev) => {
       if (activeSavedGameId && prev.some((savedGame) => savedGame.id === activeSavedGameId)) {
         return prev.map((savedGame) => (savedGame.id === activeSavedGameId ? snapshot : savedGame));
@@ -7013,6 +7432,43 @@ export default function WiffleScoringPrototype() {
       return [snapshot, ...prev];
     });
     setActiveSavedGameId(snapshot.id);
+    return snapshot;
+  }
+
+  function requestDeleteSavedGame(savedGame) {
+    if (!savedGame) return;
+    setPendingGameDelete(savedGame);
+  }
+
+  function confirmDeleteSavedGame() {
+    if (!pendingGameDelete?.id) return;
+    markNextSharedStateSaveAuthoritative();
+    setPreviousGames((prev) => (prev || []).filter((savedGame) => savedGame.id !== pendingGameDelete.id));
+    if (expandedGameId === pendingGameDelete.id) setExpandedGameId(null);
+    if (activeSavedGameId === pendingGameDelete.id) {
+      setActiveSavedGameId(null);
+      setArchivedFinalEventId(null);
+    }
+    setPendingGameDelete(null);
+  }
+
+  function pauseAndResumeLater() {
+    markNextSharedStateSaveAuthoritative();
+    const event = { id: newId(), type: "game_status", status: "paused", inning: game.inning, half: game.half, note: "Game paused to resume later.", createdAt: new Date().toLocaleTimeString() };
+    const nextEvents = [...eventsRef.current, event];
+    const snapshot = makeGameArchiveEntry(nextEvents, activeSavedGameId, "paused");
+    setPreviousGames((prev) => {
+      if (activeSavedGameId && prev.some((savedGame) => savedGame.id === activeSavedGameId)) {
+        return prev.map((savedGame) => (savedGame.id === activeSavedGameId ? snapshot : savedGame));
+      }
+      return [snapshot, ...prev];
+    });
+    setActiveSavedGameId(snapshot.id);
+    setEvents(nextEvents);
+    setGamePaused(true);
+    setSetupEditingDuringGame(false);
+    replaceLiveEvents(nextEvents, liveGameSetupSnapshot, "paused");
+    setActivePage("score");
     return snapshot;
   }
 
@@ -7032,6 +7488,7 @@ export default function WiffleScoringPrototype() {
     setGameInnings(Math.max(1, Number(setup.gameInnings) || 4));
     setSetupLeagueId(setup.setupLeagueId || "custom");
     setLeagueGameMode(setup.isLeagueExhibition ? "exhibition" : "official");
+    setUseExhibitionLeagueTeams(Boolean(setup.useExhibitionLeagueTeams));
     setAwayLeagueTeamId(setup.awayLeagueTeamId || "");
     setHomeLeagueTeamId(setup.homeLeagueTeamId || "");
     setPowerPlaysEnabled(setup.powerPlaysEnabled ?? true);
@@ -7053,9 +7510,10 @@ export default function WiffleScoringPrototype() {
     setPitchingOrder(setup.pitchingOrder || savedGame.teamPlayers || defaultPlayers);
     setExtraPitchers(setup.extraPitchers || { away: {}, home: {} });
     setEvents(savedGame.events || []);
-    replaceLiveEvents(savedGame.events || []);
+    replaceLiveEvents(savedGame.events || [], setup, savedGame.status === "paused" ? "paused" : "started");
     setActiveSavedGameId(savedGame.id);
     setGameStarted(true);
+    setGamePaused(savedGame.status === "paused");
     setSetupEditingDuringGame(false);
     const lastEventId = savedGame.events?.[savedGame.events.length - 1]?.id || null;
     setArchivedFinalEventId(savedGame.status === "final" ? lastEventId : null);
@@ -7076,6 +7534,7 @@ export default function WiffleScoringPrototype() {
     }
     clearCurrentGame();
     setGameStarted(false);
+    setGamePaused(false);
     setSetupEditingDuringGame(false);
     setSavedSetupSignature("");
     setupSignatureInitializedRef.current = false;
@@ -7105,6 +7564,7 @@ export default function WiffleScoringPrototype() {
     if (!setupComplete) return;
     replaceLiveEvents([], liveGameSetupSnapshot, "started");
     setGameStarted(true);
+    setGamePaused(false);
     setSetupEditingDuringGame(false);
     setActivePage("score");
   }
@@ -7117,7 +7577,7 @@ export default function WiffleScoringPrototype() {
   }
 
   function openFieldRuleConfirm(rule) {
-    if (!rule || game.status === "final") return;
+    if (!rule || game.status === "final" || scoringPaused) return;
     setPendingFieldRule(rule);
   }
 
@@ -7128,6 +7588,7 @@ export default function WiffleScoringPrototype() {
   }
 
   function endHalfInning() {
+    if (game.status === "final" || scoringPaused) return;
     const event = { id: newId(), type: "end_half", inning: game.inning, half: game.half, createdAt: new Date().toLocaleTimeString() };
     const nextEvents = [...events, event];
     setEvents(nextEvents);
@@ -7136,6 +7597,7 @@ export default function WiffleScoringPrototype() {
   }
 
   function finalizeGame() {
+    if (game.status === "final" || scoringPaused) return;
     const event = { id: newId(), type: "finalize", inning: game.inning, half: game.half, createdAt: new Date().toLocaleTimeString() };
     setEvents((prev) => [...prev, event]);
     appendLiveEvent(event);
@@ -7249,10 +7711,11 @@ export default function WiffleScoringPrototype() {
                 <Button variant={activePage === "draft" ? "primary" : "outline"} onClick={() => goToPage("draft")}>Draft</Button>
                 <Button variant={activePage === "standings" ? "primary" : "outline"} onClick={() => goToPage("standings")}>Standings</Button>
                 <Button variant={activePage === "leaders" ? "primary" : "outline"} onClick={() => goToPage("leaders")}>Leaders</Button>
+                <Button variant={activePage === "splits" ? "primary" : "outline"} onClick={() => goToPage("splits")}>Splits</Button>
                 <Button variant={activePage === "stats" ? "primary" : "outline"} onClick={() => goToPage("stats")}>Stats & Log</Button>
                 <Button variant={activePage === "history" ? "primary" : "outline"} onClick={() => goToPage("history")}>Previous Games</Button>
                 <Button variant={activePage === "rules" ? "primary" : "outline"} onClick={() => goToPage("rules")}>Rule Book</Button>
-                <span className="shrink-0 rounded-full bg-slate-900 px-3 py-1 text-xs font-bold uppercase text-white">{game.status}</span>
+                <span className="shrink-0 rounded-full bg-slate-900 px-3 py-1 text-xs font-bold uppercase text-white">{displayedGameStatus}</span>
               </div>
               {!gameStarted && events.length === 0 && !activeSavedGameId && (
                 <div className="mt-3 rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
@@ -7279,8 +7742,23 @@ export default function WiffleScoringPrototype() {
                   </div>
                 </div>
               </Card>
+            ) : pausedGameAwaitingNewSetup ? (
+              <Card>
+                <div className="p-6 text-center">
+                  <div className="text-xs font-black uppercase tracking-[0.3em] text-amber-600">Game Paused</div>
+                  <h2 className="mt-2 text-3xl font-black">Set up a new game?</h2>
+                  <p className="mx-auto mt-2 max-w-2xl text-sm font-semibold text-slate-600">
+                    The current game is paused and saved in Previous Games. Resume it from Score Game or start a new setup to choose new teams, rules, rosters, and orders.
+                  </p>
+                  <div className="mt-5 flex flex-wrap justify-center gap-2">
+                    <Button variant="outline" onClick={resumePausedGame}>Resume Paused Game</Button>
+                    <Button variant="primary" onClick={startNewGame}>Set Up New Game</Button>
+                  </div>
+                </div>
+              </Card>
             ) : (
               <>
+                {!gameStarted && (
                 <Card>
                   <div className="p-5">
                     <h2 className="mb-3 text-xl font-bold">Game Setup</h2>
@@ -7290,6 +7768,7 @@ export default function WiffleScoringPrototype() {
                     <select
                       className="mt-1 w-full rounded-xl border px-3 py-2"
                       value={isCustomGame ? "custom" : setupLeague?.id || "custom"}
+                      disabled={setupIdentityLocked}
                       onChange={(event) => handleSetupLeagueChange(event.target.value)}
                     >
                       <option value="custom">Custom Game</option>
@@ -7301,11 +7780,11 @@ export default function WiffleScoringPrototype() {
                       <div className="mb-2 text-sm font-black">League Game Type</div>
                       <div className="grid gap-2 sm:grid-cols-2">
                         <label className="flex items-start gap-2 rounded-xl border bg-white p-3 text-sm font-semibold">
-                          <input type="radio" name="league-game-mode" checked={leagueGameMode !== "exhibition"} onChange={() => { setLeagueGameMode("official"); setUseLeagueSchedule(true); }} />
+                          <input type="radio" name="league-game-mode" checked={leagueGameMode !== "exhibition"} disabled={setupIdentityLocked} onChange={() => { setLeagueGameMode("official"); setUseExhibitionLeagueTeams(false); setUseLeagueSchedule(true); }} />
                           <span><span className="block font-black">Official scheduled league game</span><span className="block text-xs font-normal text-slate-500">Requires a scheduled game and counts toward official stats and standings.</span></span>
                         </label>
                         <label className="flex items-start gap-2 rounded-xl border bg-white p-3 text-sm font-semibold">
-                          <input type="radio" name="league-game-mode" checked={leagueGameMode === "exhibition"} onChange={() => { setLeagueGameMode("exhibition"); setUseLeagueSchedule(false); setSelectedScheduledWeekId(""); setSelectedScheduledGameId(""); setGameSessionId(""); setAwayLeagueTeamId(""); setHomeLeagueTeamId(""); setAwayTeam("Away Team"); setHomeTeam("Home Team"); setTeamPlayers(emptyGameRosters); setBattingOrder(emptyGameRosters); setPitchingOrder(emptyGameRosters); setSubPlayers({ away: {}, home: {} }); setSubSlots({ away: {}, home: {} }); setExtraPitchers({ away: {}, home: {} }); setSelectedFieldId(""); setGameLocation(""); }} />
+                          <input type="radio" name="league-game-mode" checked={leagueGameMode === "exhibition"} disabled={setupIdentityLocked} onChange={() => { setLeagueGameMode("exhibition"); setUseExhibitionLeagueTeams(false); setUseLeagueSchedule(false); setSelectedScheduledWeekId(""); setSelectedScheduledGameId(""); setGameSessionId(""); setAwayLeagueTeamId(""); setHomeLeagueTeamId(""); setAwayTeam("Away Team"); setHomeTeam("Home Team"); setTeamPlayers(emptyGameRosters); setBattingOrder(emptyGameRosters); setPitchingOrder(emptyGameRosters); setSubPlayers({ away: {}, home: {} }); setSubSlots({ away: {}, home: {} }); setExtraPitchers({ away: {}, home: {} }); setSelectedFieldId(""); setGameLocation(""); }} />
                           <span><span className="block font-black">League exhibition game</span><span className="block text-xs font-normal text-slate-500">Use league players and rules, customize rosters, and save stats only under Exhibition.</span></span>
                         </label>
                       </div>
@@ -7313,10 +7792,39 @@ export default function WiffleScoringPrototype() {
                       {isLeagueExhibitionGame && <p className="mt-3 rounded-xl border border-purple-200 bg-purple-50 p-3 text-sm font-semibold text-purple-800">League Exhibition is on. This game will not affect official league stats or standings.</p>}
                     </div>
                   )}
+                  {isLeagueExhibitionGame && (
+                    <div className="lg:col-span-3 rounded-xl border bg-slate-50 p-3">
+                      <label className="flex items-center gap-2 text-sm font-semibold">
+                        <input
+                          type="checkbox"
+                          checked={useExhibitionLeagueTeams}
+                          disabled={setupIdentityLocked}
+                          onChange={(event) => {
+                            const checked = event.target.checked;
+                            setUseExhibitionLeagueTeams(checked);
+                            setAwayLeagueTeamId("");
+                            setHomeLeagueTeamId("");
+                            setTeamPlayers(checked ? defaultPlayers : emptyGameRosters);
+                            setBattingOrder(checked ? defaultPlayers : emptyGameRosters);
+                            setPitchingOrder(checked ? defaultPlayers : emptyGameRosters);
+                            setAwayTeam("Away Team");
+                            setHomeTeam("Home Team");
+                          }}
+                        />
+                        Use existing league teams
+                      </label>
+                      <p className="mt-1 text-xs text-slate-500">{useExhibitionLeagueTeams ? "Select teams from this league. This still saves as Exhibition." : "Type custom team names and build exhibition rosters manually."}</p>
+                    </div>
+                  )}
+                  {setupIdentityLocked && (
+                    <div className="lg:col-span-3 rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm font-semibold text-amber-900">
+                      Game type, teams, date, and time are locked while editing an active game. Field, rules, rosters, and orders can still be updated and saved to the game log.
+                    </div>
+                  )}
                   {!isCustomGame && !isLeagueExhibitionGame && setupCurrentSeason?.sessionsEnabled && (
                     <div>
                       <label className="text-xs font-semibold uppercase text-slate-500">Session</label>
-                      <select className="mt-1 w-full rounded-xl border px-3 py-2" value={gameSessionId || setupCurrentSeason.currentSessionId || setupSessionOptions[0]?.id || ""} onChange={(event) => { setGameSessionId(event.target.value); setAwayLeagueTeamId(""); setHomeLeagueTeamId(""); setAwayTeam("Away Team"); setHomeTeam("Home Team"); setTeamPlayers(defaultPlayers); setBattingOrder(defaultPlayers); setPitchingOrder(defaultPlayers); }}>
+                      <select className="mt-1 w-full rounded-xl border px-3 py-2" value={gameSessionId || setupCurrentSeason.currentSessionId || setupSessionOptions[0]?.id || ""} disabled={setupIdentityLocked} onChange={(event) => { setGameSessionId(event.target.value); setAwayLeagueTeamId(""); setHomeLeagueTeamId(""); setAwayTeam("Away Team"); setHomeTeam("Home Team"); setTeamPlayers(defaultPlayers); setBattingOrder(defaultPlayers); setPitchingOrder(defaultPlayers); }}>
                         {setupSessionOptions.map((session) => <option key={session.id} value={session.id}>{session.name}</option>)}
                       </select>
                       <p className="mt-1 text-xs text-slate-500">This is required when sessions are enabled for the selected season.</p>
@@ -7324,46 +7832,48 @@ export default function WiffleScoringPrototype() {
                   )}
                   <div>
                     <label className="text-xs font-semibold uppercase text-slate-500">Away Team</label>
-                    {(isCustomGame || isLeagueExhibitionGame) ? (
-                      <input className="mt-1 w-full rounded-xl border px-3 py-2" value={awayTeam} onChange={(event) => { setAwayTeam(event.target.value); if (isLeagueExhibitionGame) setAwayLeagueTeamId(""); }} placeholder="Away team name" />
-                    ) : (
+                    {setupUsesLeagueTeamSelect ? (
                       <select
                         className="mt-1 w-full rounded-xl border px-3 py-2"
                         value={awayLeagueTeamId}
+                        disabled={setupIdentityLocked}
                         onChange={(event) => applyLeagueTeamToGameSlot("away", event.target.value)}
                       >
                         <option value="">Select away team</option>
                         {(setupLeague?.teams || []).map((team) => <option key={team.id} value={team.id}>{team.name}</option>)}
                       </select>
+                    ) : (
+                      <input className="mt-1 w-full rounded-xl border px-3 py-2" value={awayTeam} disabled={setupIdentityLocked} onChange={(event) => { setAwayTeam(event.target.value); if (isLeagueExhibitionGame) setAwayLeagueTeamId(""); }} placeholder="Away team name" />
                     )}
                   </div>
                   <div>
                     <label className="text-xs font-semibold uppercase text-slate-500">Home Team</label>
-                    {(isCustomGame || isLeagueExhibitionGame) ? (
-                      <input className="mt-1 w-full rounded-xl border px-3 py-2" value={homeTeam} onChange={(event) => { setHomeTeam(event.target.value); if (isLeagueExhibitionGame) setHomeLeagueTeamId(""); }} placeholder="Home team name" />
-                    ) : (
+                    {setupUsesLeagueTeamSelect ? (
                       <select
                         className="mt-1 w-full rounded-xl border px-3 py-2"
                         value={homeLeagueTeamId}
+                        disabled={setupIdentityLocked}
                         onChange={(event) => applyLeagueTeamToGameSlot("home", event.target.value)}
                       >
                         <option value="">Select home team</option>
                         {(setupLeague?.teams || []).map((team) => <option key={team.id} value={team.id}>{team.name}</option>)}
                       </select>
+                    ) : (
+                      <input className="mt-1 w-full rounded-xl border px-3 py-2" value={homeTeam} disabled={setupIdentityLocked} onChange={(event) => { setHomeTeam(event.target.value); if (isLeagueExhibitionGame) setHomeLeagueTeamId(""); }} placeholder="Home team name" />
                     )}
                   </div>
                 </div>
                 {!isCustomGame && isOfficialLeagueGame && hasAnyUsableScheduledGamesForSetup && (
                   <div className="mb-4 rounded-xl border bg-slate-50 p-3">
                     <label className="flex items-center gap-2 text-sm font-semibold">
-                      <input type="checkbox" checked={useLeagueSchedule} onChange={(event) => { setUseLeagueSchedule(event.target.checked); if (!event.target.checked) { setSelectedScheduledWeekId(""); setSelectedScheduledGameId(""); } }} />
+                      <input type="checkbox" checked={useLeagueSchedule} disabled={setupIdentityLocked} onChange={(event) => { setUseLeagueSchedule(event.target.checked); if (!event.target.checked) { setSelectedScheduledWeekId(""); setSelectedScheduledGameId(""); } }} />
                       Use League Schedule
                     </label>
                     {useLeagueSchedule && (
                       <div className="mt-3 grid gap-3 md:grid-cols-2">
                         <div>
                           <label className="text-xs font-semibold uppercase text-slate-500">Scheduled Week</label>
-                          <select className="mt-1 w-full rounded-xl border px-3 py-2 text-sm font-semibold" value={selectedScheduledWeekId} onChange={(event) => { setSelectedScheduledWeekId(event.target.value); setSelectedScheduledGameId(""); }}>
+                          <select className="mt-1 w-full rounded-xl border px-3 py-2 text-sm font-semibold" value={selectedScheduledWeekId} disabled={setupIdentityLocked} onChange={(event) => { setSelectedScheduledWeekId(event.target.value); setSelectedScheduledGameId(""); }}>
                             <option value="">Select scheduled week</option>
                             {scheduledWeeksForSetup.map((week) => {
                               const field = setupLeague?.fields?.find((item) => item.id === week.fieldId)?.name || "No field";
@@ -7374,7 +7884,7 @@ export default function WiffleScoringPrototype() {
                         </div>
                         <div>
                           <label className="text-xs font-semibold uppercase text-slate-500">Scheduled Game</label>
-                          <select className="mt-1 w-full rounded-xl border px-3 py-2 text-sm font-semibold" value={selectedScheduledGameId} disabled={!selectedScheduledWeekId} onChange={(event) => applyScheduledGameToSetup(event.target.value)}>
+                          <select className="mt-1 w-full rounded-xl border px-3 py-2 text-sm font-semibold" value={selectedScheduledGameId} disabled={!selectedScheduledWeekId || setupIdentityLocked} onChange={(event) => applyScheduledGameToSetup(event.target.value)}>
                             <option value="">Select scheduled game</option>
                             {scheduledGamesForSetup.map((scheduledGame) => {
                               const away = setupLeague?.teams?.find((team) => team.id === scheduledGame.awayTeamId)?.name || "Away";
@@ -7399,27 +7909,24 @@ export default function WiffleScoringPrototype() {
                 <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
                   <div>
                     <label className="text-xs font-semibold uppercase text-slate-500">Date</label>
-                    <input type="date" className="mt-1 w-full rounded-xl border px-3 py-2" value={gameDate} onChange={(event) => setGameDate(event.target.value)} />
+                    <input type="date" className="mt-1 w-full rounded-xl border px-3 py-2" value={gameDate} disabled={setupIdentityLocked} onChange={(event) => setGameDate(event.target.value)} />
                   </div>
                   <div>
                     <label className="text-xs font-semibold uppercase text-slate-500">Time</label>
-                    <input type="time" className="mt-1 w-full rounded-xl border px-3 py-2" value={gameTime} onChange={(event) => setGameTime(event.target.value)} />
+                    <input type="time" className="mt-1 w-full rounded-xl border px-3 py-2" value={gameTime} disabled={setupIdentityLocked} onChange={(event) => setGameTime(event.target.value)} />
                   </div>
                   <div>
                     <label className="text-xs font-semibold uppercase text-slate-500">Field / Location</label>
-                    {isCustomGame ? (
-                      <input className="mt-1 w-full rounded-xl border px-3 py-2" value={gameLocation} onChange={(event) => setGameLocation(event.target.value)} placeholder="Optional field, park, or address" />
-                    ) : (
-                      <select className="mt-1 w-full rounded-xl border px-3 py-2" value={selectedFieldId} onChange={(event) => { if (event.target.value) applyFieldToGame(event.target.value); else { setSelectedFieldId(""); setGameLocation(""); } }}>
-                        <option value="">Select field</option>
-                        {setupFieldOptions.map((field) => <option key={field.id} value={field.id}>{field.name}</option>)}
-                      </select>
-                    )}
+                    <select className="mt-1 w-full rounded-xl border px-3 py-2" value={selectedFieldId} onChange={(event) => { if (event.target.value) applyFieldToGame(event.target.value); else { setSelectedFieldId(""); setGameLocation(""); } }}>
+                      <option value="">Select field</option>
+                      {setupFieldOptions.map((field) => <option key={`${field.sourceLeagueId || setupLeague?.id || "league"}-${field.id}`} value={field.id}>{isCustomGame && field.sourceLeagueName ? `${field.name} · ${field.sourceLeagueName}` : field.name}</option>)}
+                    </select>
+                    {isCustomGame && <p className="mt-1 text-xs text-slate-500">Optional. Custom games can use any created field, or leave this blank.</p>}
                   </div>
                 </div>
                 <div className="mt-4 flex flex-wrap justify-end gap-2">
                   {gameStarted && (
-                    <Button variant={setupEditingDuringGame ? "secondary" : "outline"} onClick={() => setSetupEditingDuringGame((value) => !value)}>
+                    <Button variant={setupEditingDuringGame ? "secondary" : "outline"} onClick={() => (setupEditingDuringGame ? setSetupEditingDuringGame(false) : beginSetupEditDuringGame())}>
                       {setupEditingDuringGame ? "View Setup Summary" : "Edit Teams/Rules"}
                     </Button>
                   )}
@@ -7433,6 +7940,7 @@ export default function WiffleScoringPrototype() {
                 {gameStarted && unsavedSetupChanges && <p className="mt-2 text-right text-xs font-bold text-amber-700">Save setup changes before resuming the game.</p>}
               </div>
             </Card>
+            )}
             {setupEditingLocked && (
               <Card>
                 <div className="p-5">
@@ -7441,7 +7949,7 @@ export default function WiffleScoringPrototype() {
                       <h2 className="text-xl font-bold">Game Setup Summary</h2>
                       <p className="text-sm text-slate-500">Game rules, rosters, batting order, and pitching order are locked while the game is active.</p>
                     </div>
-                    <Button variant="outline" onClick={() => setSetupEditingDuringGame(true)}>Edit Teams/Rules</Button>
+                    <Button variant="outline" onClick={beginSetupEditDuringGame}>Edit Teams/Rules</Button>
                   </div>
                   <div className="grid gap-4 lg:grid-cols-2">
                     <div className="rounded-2xl border bg-slate-50 p-4">
@@ -7492,9 +8000,19 @@ export default function WiffleScoringPrototype() {
             <>
             {gameStarted && setupEditingDuringGame && (
               <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm font-bold text-amber-900">
-                Editing active game setup. Save all changes before resuming the game.
+                <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                  <div>
+                    <div>Editing active game setup.</div>
+                    <div className="mt-1 text-xs font-semibold">Game setup options are hidden during active-game edits. Save all changes before resuming the game.</div>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    {unsavedSetupChanges && <Button variant="outline" onClick={saveSetupChanges}>Save Setup Changes</Button>}
+                    <Button variant="primary" onClick={resumeGameFromSetup} disabled={!setupCanResumeGame}>Resume Game</Button>
+                  </div>
+                </div>
               </div>
             )}
+            {(!gameStarted || !setupEditingDuringGame) && (
             <Card>
               <details className="group">
                 <summary className="flex cursor-pointer list-none items-center justify-between gap-3 p-5">
@@ -7665,6 +8183,7 @@ export default function WiffleScoringPrototype() {
                 </div>
               </details>
             </Card>
+            )}
 
             <Card>
               <div className="p-5">
@@ -7813,6 +8332,123 @@ export default function WiffleScoringPrototype() {
                 <p className="mt-3 text-xs text-slate-500">Rule: the final away pitcher is skipped if the home team is leading after the top of the final inning, because the bottom half is not played.</p>
               </div>
             </Card>
+
+            {gameStarted && setupEditingDuringGame && (
+              <Card>
+                <details className="group" open>
+                  <summary className="flex cursor-pointer list-none items-center justify-between gap-3 p-5">
+                    <div>
+                      <h2 className="text-xl font-bold">Game Rules</h2>
+                      <p className="text-sm text-slate-500">Power Plays, Whammys, Pudwhacker, run rule, and extra-inning ghost runners.</p>
+                      {unsavedGameRules && <p className="mt-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-sm font-bold text-amber-900">Unsaved game rule changes. Save Game Rules before resuming the game.</p>}
+                    </div>
+                    <span className="rounded-full bg-slate-900 px-3 py-1 text-xs font-bold uppercase text-white">Open</span>
+                  </summary>
+                  <div className="border-t p-5 pt-4">
+                    {unsavedGameRules && <div className="mb-4 flex justify-end"><Button variant="primary" onClick={saveSetupChanges}>Save Game Rules</Button></div>}
+                    {!isCustomGame && (
+                      <div className="mb-4 rounded-xl border bg-slate-50 p-3">
+                        <label className="flex items-center gap-2 text-sm font-semibold">
+                          <input type="checkbox" checked={useLeagueDefaultRules} onChange={(event) => handleUseLeagueDefaultRules(event.target.checked)} />
+                          Use league default game rules
+                        </label>
+                        <p className="mt-1 text-xs text-slate-500">Uncheck this to customize rules only for this game.</p>
+                      </div>
+                    )}
+                    <div className="mb-3 rounded-xl border bg-slate-50 p-3">
+                      <label className="text-xs font-semibold uppercase text-slate-500">Game Length</label>
+                      <div className="mt-2 grid gap-2 sm:grid-cols-[1fr_auto] sm:items-center">
+                        <span className="text-sm font-semibold text-slate-700">Innings per game</span>
+                        <input type="number" min="1" max="12" className="w-28 rounded-xl border px-3 py-2 text-sm font-semibold" value={gameInnings} disabled={gameRulesLocked} onChange={(event) => setGameInnings(Math.max(1, Number(event.target.value) || 1))} />
+                      </div>
+                    </div>
+                    <div className="grid gap-3 lg:grid-cols-3">
+                      <div className="rounded-xl border bg-slate-50 p-3">
+                        <label className="flex items-center gap-2 text-sm font-semibold">
+                          <input type="checkbox" checked={powerPlaysEnabled} disabled={gameRulesLocked} onChange={(event) => { setPowerPlaysEnabled(event.target.checked); if (!event.target.checked) { setSelectedModifier(null); setWhammysEnabled(false); } }} />
+                          Enable Power Plays
+                        </label>
+                        {powerPlaysEnabled && (
+                          <div className="mt-3 space-y-3">
+                            <RuleLimitEditor title="Power Play Limit" limitType={powerPlayLimitType} setLimitType={setPowerPlayLimitType} limitAmount={powerPlayLimitAmount} setLimitAmount={setPowerPlayLimitAmount} disabled={gameRulesLocked} />
+                            <label className="flex items-center gap-2 rounded-lg border bg-white p-3 text-sm font-semibold">
+                              <input type="checkbox" checked={whammysEnabled} disabled={gameRulesLocked} onChange={(event) => { setWhammysEnabled(event.target.checked); if (!event.target.checked && selectedModifier === "whammy") setSelectedModifier(null); }} />
+                              Enable Whammys
+                            </label>
+                          </div>
+                        )}
+                      </div>
+                      <div className="rounded-xl border bg-slate-50 p-3">
+                        <label className="flex items-center gap-2 text-sm font-semibold">
+                          <input type="checkbox" checked={pudwhackerEnabled} disabled={gameRulesLocked} onChange={(event) => { setPudwhackerEnabled(event.target.checked); if (!event.target.checked && selectedModifier === "pudwhacker") setSelectedModifier(null); }} />
+                          Enable Pudwhacker
+                        </label>
+                      </div>
+                      <div className="rounded-xl border bg-slate-50 p-3">
+                        <label className="flex items-center gap-2 text-sm font-semibold">
+                          <input type="checkbox" checked={runRuleEnabled} disabled={gameRulesLocked} onChange={(event) => setRunRuleEnabled(event.target.checked)} />
+                          Enable inning run rule
+                        </label>
+                        <div className="mt-3 grid gap-2 sm:grid-cols-[1fr_auto] sm:items-center">
+                          <label className="text-xs font-semibold uppercase text-slate-500">Runs per half-inning</label>
+                          <input type="number" min="1" className="w-28 rounded-xl border px-3 py-2 text-sm font-semibold" value={runRuleRuns} disabled={!runRuleEnabled || gameRulesLocked} onChange={(event) => setRunRuleRuns(Math.max(1, Number(event.target.value) || 1))} />
+                        </div>
+                        <label className="mt-3 flex items-center gap-2 text-sm font-semibold">
+                          <input type="checkbox" checked={runRuleBeforeFourthOnly} disabled={!runRuleEnabled || gameRulesLocked} onChange={(event) => setRunRuleBeforeFourthOnly(event.target.checked)} />
+                          {`Run rule only applies before the ${gameInnings}${getOrdinalSuffix(gameInnings)} inning`}
+                        </label>
+                        <label className="mt-3 flex items-center gap-2 text-sm font-semibold">
+                          <input type="checkbox" checked={walkRunRuleCountsAsHr} disabled={!runRuleEnabled || gameRulesLocked} onChange={(event) => setWalkRunRuleCountsAsHr(event.target.checked)} />
+                          Walk that triggers run rule counts as HR
+                        </label>
+                      </div>
+                    </div>
+                    <div className="mt-5 rounded-2xl border bg-white p-4">
+                      <div className="mb-3 flex items-center justify-between gap-2">
+                        <div>
+                          <h3 className="text-lg font-bold">Extra Inning Ghost Runners</h3>
+                          <p className="text-sm text-slate-500">Choose what bases are occupied to start extra innings.</p>
+                        </div>
+                        <Button variant="outline" onClick={addExtraRunnerRule} disabled={gameRulesLocked}>+ Add Rule</Button>
+                      </div>
+                      {extraRunnerRules.length === 0 ? (
+                        <p className="rounded-xl border bg-slate-50 p-3 text-sm text-slate-500">No extra-inning runner rules yet.</p>
+                      ) : (
+                        <div className="space-y-2">
+                          {extraRunnerRules.map((rule) => (
+                            <div key={rule.id} className="grid gap-2 rounded-xl border bg-slate-50 p-3 sm:grid-cols-[1fr_1.5fr_auto] sm:items-end">
+                              <div>
+                                <label className="text-xs font-semibold uppercase text-slate-500">Starting inning</label>
+                                <input type="number" min={getFirstExtraInning(gameInnings)} className="mt-1 w-full rounded-xl border px-3 py-2 text-sm font-semibold" value={rule.startInning} disabled={gameRulesLocked} onChange={(event) => updateExtraRunnerRule(rule.id, "startInning", event.target.value)} />
+                              </div>
+                              <div>
+                                <label className="text-xs font-semibold uppercase text-slate-500">Bases to start inning</label>
+                                <select className="mt-1 w-full rounded-xl border px-3 py-2 text-sm font-semibold" value={rule.bases} disabled={gameRulesLocked} onChange={(event) => updateExtraRunnerRule(rule.id, "bases", event.target.value)}>
+                                  {extraBaseOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+                                </select>
+                              </div>
+                              <div className="flex flex-col gap-2">
+                                <label className="flex items-center gap-2 rounded-lg border bg-white px-3 py-2 text-xs font-semibold text-slate-600">
+                                  <input type="checkbox" checked={Boolean(rule.sameRestOfGame)} disabled={gameRulesLocked} onChange={(event) => updateExtraRunnerRule(rule.id, "sameRestOfGame", event.target.checked)} />
+                                  Same rest of game
+                                </label>
+                                <Button variant="outline" onClick={() => removeExtraRunnerRule(rule.id)} disabled={gameRulesLocked}>Remove</Button>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                      <div className="mt-3 rounded-xl border bg-slate-50 p-3">
+                        <label className="flex items-center gap-2 text-sm font-semibold">
+                          <input type="checkbox" checked={ghostRunnersCountAsRbi} disabled={gameRulesLocked} onChange={(event) => setGhostRunnersCountAsRbi(event.target.checked)} />
+                          Ghost runners count as RBI
+                        </label>
+                      </div>
+                    </div>
+                  </div>
+                </details>
+              </Card>
+            )}
             </>
             )}
             </>
@@ -7836,6 +8472,18 @@ export default function WiffleScoringPrototype() {
                 <p className="mt-2 text-xs text-slate-500">Undo will reopen the game as live and remove the final play/out/event.</p>
               </div>
             )}
+            {scoringPaused && game.status !== "final" && (
+              <div className="rounded-2xl border-4 border-amber-400 bg-white p-4 text-center shadow-lg sm:rounded-3xl sm:p-6">
+                <div className="text-sm font-black uppercase tracking-[0.35em] text-amber-600">Paused</div>
+                <div className="mt-2 text-3xl font-black sm:text-4xl md:text-6xl">Game Paused</div>
+                <div className="mt-2 text-xl font-black sm:text-2xl md:text-3xl">{scoreDisplayAwayTeam} {scoreDisplayAwayScore} — {scoreDisplayHomeTeam} {scoreDisplayHomeScore}</div>
+                <p className="mx-auto mt-2 max-w-xl text-sm font-semibold text-slate-500">This game is saved in Previous Games and can be resumed when you are ready.</p>
+                <div className="mt-4 flex flex-wrap justify-center gap-2">
+                  <Button variant="primary" onClick={resumePausedGame}>Resume Game</Button>
+                  <Button variant="outline" onClick={() => goToPage("history")}>View Previous Games</Button>
+                </div>
+              </div>
+            )}
             <Card>
               <div className="p-3 sm:p-4">
                 <div className="grid w-full min-w-0 grid-cols-2 gap-2 lg:grid-cols-[1fr_auto_1fr] lg:items-center">
@@ -7846,7 +8494,7 @@ export default function WiffleScoringPrototype() {
                   <div className="order-3 col-span-2 grid min-w-0 grid-cols-3 gap-2 rounded-xl bg-slate-900 p-2 text-center text-white shadow-sm sm:rounded-2xl sm:p-3 lg:order-none lg:col-span-1 lg:min-w-80">
                     <div><div className="text-[10px] uppercase text-slate-300">Inning</div><div className="text-base font-black sm:text-lg">{game.half === "top" ? "Top" : "Bot"} {game.inning}</div></div>
                     <div><div className="text-[10px] uppercase text-slate-300">Outs</div><div className="text-base font-black sm:text-lg">{game.outs}</div></div>
-                    <div><div className="text-[10px] uppercase text-slate-300">Status</div><div className="text-base font-black uppercase sm:text-lg">{game.status}</div></div>
+                    <div><div className="text-[10px] uppercase text-slate-300">Status</div><div className="text-base font-black uppercase sm:text-lg">{displayedGameStatus}</div></div>
                   </div>
                   <div className="order-2 min-w-0 rounded-xl bg-slate-50 p-3 text-center shadow-sm sm:rounded-2xl sm:p-4 lg:order-none">
                     <div className="truncate text-xs font-semibold text-slate-500 sm:text-sm">{scoreDisplayHomeTeam}</div>
@@ -7858,7 +8506,7 @@ export default function WiffleScoringPrototype() {
 
             <div className="grid w-full min-w-0 gap-4 xl:grid-cols-[minmax(0,1.15fr)_minmax(0,0.85fr)]">
               <div className="min-w-0 space-y-4">
-                {game.status !== "final" && (
+                {game.status !== "final" && !scoringPaused && (
                 <Card>
                   <div className="p-4 sm:p-5">
                     <div className="mb-4 grid min-w-0 gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(0,0.75fr)] lg:items-start">
@@ -7935,17 +8583,6 @@ export default function WiffleScoringPrototype() {
                       <BaseDiamond bases={game.bases} />
                     </div>
 
-                    {game.status !== "final" && activeFieldRules.length > 0 && (
-                      <div className="mt-4 rounded-2xl border bg-amber-50 p-3">
-                        <div className="mb-2 text-sm font-bold text-amber-900">Field Rules{selectedField ? ` · ${selectedField.name}` : ""}</div>
-                        <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
-                          {activeFieldRules.map((rule) => (
-                            <Button key={rule.id} variant="outline" onClick={() => openFieldRuleConfirm(rule)}>{rule.name || "Field Rule"}</Button>
-                          ))}
-                        </div>
-                      </div>
-                    )}
-
                     {game.status !== "final" ? (
                       <div className="mt-4 space-y-3">
                         <label className="inline-flex items-center gap-2 rounded-xl border bg-slate-50 px-3 py-2 text-sm font-semibold text-slate-700">
@@ -7996,6 +8633,16 @@ export default function WiffleScoringPrototype() {
                           </div>
                         )}
                         {selectedModifier && !activeModifierInvalid && <p className="mt-2 text-xs font-semibold text-slate-600">Next play tagged as: {modifierLabel(selectedModifier)}</p>}
+                        {activeFieldRules.length > 0 && (
+                          <div className="mt-4 rounded-2xl border bg-amber-50 p-3">
+                            <div className="mb-2 text-sm font-bold text-amber-900">Field Rules{selectedField ? ` · ${selectedField.name}` : ""}</div>
+                            <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                              {activeFieldRules.map((rule) => (
+                                <Button key={rule.id} variant="outline" onClick={() => openFieldRuleConfirm(rule)}>{rule.name || "Field Rule"}</Button>
+                              ))}
+                            </div>
+                          </div>
+                        )}
                       </div>
                     ) : (
                       <div className="mt-4 rounded-2xl border bg-slate-50 p-4 text-sm font-semibold text-slate-500">
@@ -8055,7 +8702,8 @@ export default function WiffleScoringPrototype() {
                       <div className="grid gap-2 sm:grid-cols-3 lg:grid-cols-5">
                         <Button variant="outline" onClick={endHalfInning}>End Half</Button>
                         <Button variant="danger" onClick={undoLast}>↶ Undo</Button>
-                        <Button variant="outline" onClick={resetGame}>Reset</Button>
+                        <Button variant="secondary" onClick={pauseAndResumeLater}>Pause and Resume Later</Button>
+                        <Button variant="outline" onClick={() => setConfirmResetGameOpen(true)}>Reset</Button>
                         <Button variant="danger" onClick={() => setConfirmCancelGameOpen(true)}>Cancel Game</Button>
                         <Button variant="primary" onClick={finalizeGame} disabled={game.status === "final"}>🏆 Finalize</Button>
                       </div>
@@ -8086,10 +8734,6 @@ export default function WiffleScoringPrototype() {
                         </div>
                       </div>
                     )}
-
-                    <div className="mt-3 flex flex-wrap gap-2">
-                      <Button variant="outline" onClick={saveCurrentGame}>Save Game</Button>
-                    </div>
                   </div>
                 </Card>
                 )}
@@ -8128,6 +8772,7 @@ export default function WiffleScoringPrototype() {
                         {lastEvent.type === "end_half" && <p>Half-inning ended manually.</p>}
                         {lastEvent.type === "field_rule" && <p><strong>{lastEvent.ruleName}</strong>: {lastEvent.note}</p>}
                         {lastEvent.type === "rbi_adjustment" && <p><strong>{lastEvent.batter}</strong>: +{lastEvent.rbi} RBI. {lastEvent.note}</p>}
+                        {lastEvent.type === "game_status" && <p>{lastEvent.status === "paused" ? "Game paused." : "Game resumed."} {lastEvent.note}</p>}
                         {lastEvent.type === "finalize" && <p>Game finalized.</p>}
                         <p className="mt-2 text-xs text-slate-500">{lastEvent.createdAt}</p>
                       </button>
@@ -8153,6 +8798,158 @@ export default function WiffleScoringPrototype() {
                 />
               </div>
             </div>
+          </div>
+        )}
+
+        {activePage === "splits" && (
+          <div className="space-y-4">
+            <Card>
+              <div className="p-5">
+                <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                  <div>
+                    <h2 className="text-xl font-bold">Splits</h2>
+                    <p className="text-sm text-slate-500">Create custom hitting splits from saved plate appearances. Use Batter Side to see switch hitters from each side, or split by pitcher hand, team, modifier, inning, and more.</p>
+                  </div>
+                  <div className="rounded-xl border bg-slate-50 px-3 py-2 text-sm font-bold text-slate-700">
+                    {customSplitRows.length} split{customSplitRows.length === 1 ? "" : "s"} · {customSplitTotal.PA || 0} PA
+                  </div>
+                </div>
+
+                <div className="mt-4 grid gap-3 md:grid-cols-2 lg:grid-cols-4">
+                  <div>
+                    <label className="text-xs font-semibold uppercase text-slate-500">Scope</label>
+                    <select className="mt-1 w-full rounded-xl border px-3 py-2 text-sm font-semibold" value={splitsScope} onChange={(event) => { setSplitsScope(event.target.value); setSplitsPlayerFilter("all"); }}>
+                      <option value="current">Current Game</option>
+                      <option value="all">All Saved Games</option>
+                      <option value="league_season">League Season</option>
+                      <option value="league_career">League Career</option>
+                      <option value="exhibition">Exhibition</option>
+                    </select>
+                  </div>
+
+                  {(splitsScope === "league_season" || splitsScope === "league_career") && (
+                    <div>
+                      <label className="text-xs font-semibold uppercase text-slate-500">League</label>
+                      <select className="mt-1 w-full rounded-xl border px-3 py-2 text-sm font-semibold" value={splitsLeague?.id || ""} onChange={(event) => { setSplitsLeagueId(event.target.value); setSplitsPlayerFilter("all"); }}>
+                        {leagues.map((league) => <option key={`splits-league-${league.id}`} value={league.id}>{league.name}</option>)}
+                      </select>
+                    </div>
+                  )}
+
+                  {splitsScope === "league_season" && (
+                    <>
+                      <div>
+                        <label className="text-xs font-semibold uppercase text-slate-500">Season</label>
+                        <select className="mt-1 w-full rounded-xl border px-3 py-2 text-sm font-semibold" value={selectedSplitsSeasonYear} onChange={(event) => { setSplitsSeasonYear(Number(event.target.value)); setSplitsSessionId("all"); setSplitsPlayerFilter("all"); }}>
+                          {splitsSeasonYears.map((year) => <option key={`splits-year-${year}`} value={year}>{year}</option>)}
+                          {splitsSeasonYears.length === 0 && <option value={currentYearNumber()}>{currentYearNumber()}</option>}
+                        </select>
+                      </div>
+                      {splitsSessionOptions.length > 0 && (
+                        <div>
+                          <label className="text-xs font-semibold uppercase text-slate-500">Session</label>
+                          <select className="mt-1 w-full rounded-xl border px-3 py-2 text-sm font-semibold" value={selectedSplitsSessionId} onChange={(event) => { setSplitsSessionId(event.target.value); setSplitsPlayerFilter("all"); }}>
+                            <option value="all">Total Season</option>
+                            {splitsSessionOptions.map((session) => <option key={`splits-session-${session.id}`} value={session.id}>{session.name}</option>)}
+                          </select>
+                        </div>
+                      )}
+                    </>
+                  )}
+
+                  <div>
+                    <label className="text-xs font-semibold uppercase text-slate-500">Hitter</label>
+                    <select className="mt-1 w-full rounded-xl border px-3 py-2 text-sm font-semibold" value={selectedSplitsPlayerFilter} onChange={(event) => setSplitsPlayerFilter(event.target.value)}>
+                      <option value="all">All Hitters</option>
+                      {splitsPlayerOptions.map((player) => <option key={`splits-player-${player}`} value={player}>{player}</option>)}
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="text-xs font-semibold uppercase text-slate-500">Split By</label>
+                    <select className="mt-1 w-full rounded-xl border px-3 py-2 text-sm font-semibold" value={splitsGroupBy} onChange={(event) => setSplitsGroupBy(event.target.value)}>
+                      {customSplitGroupOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+                    </select>
+                  </div>
+
+                  <label className="flex items-center gap-2 rounded-xl border bg-slate-50 px-3 py-2 text-sm font-semibold text-slate-700 lg:mt-5">
+                    <input type="checkbox" checked={splitsIncludeSubs} onChange={(event) => setSplitsIncludeSubs(event.target.checked)} />
+                    Include subs
+                  </label>
+                </div>
+              </div>
+            </Card>
+
+            <Card>
+              <div className="p-5">
+                <div className="mb-3 flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+                  <h2 className="text-xl font-bold">Custom Hitting Splits</h2>
+                  <span className="text-xs font-black uppercase text-slate-500">{customSplitGroupOptions.find((option) => option.value === splitsGroupBy)?.label || "Split"}</span>
+                </div>
+                <div className="overflow-auto">
+                  <table className="w-full min-w-[52rem] text-left text-sm">
+                    <thead className="text-xs uppercase text-slate-500">
+                      <tr>
+                        <th className="py-2">Split</th>
+                        <th>PA</th>
+                        <th>AB</th>
+                        <th>H</th>
+                        <th>AVG</th>
+                        <th>OBP</th>
+                        <th>SLG</th>
+                        <th>OPS</th>
+                        <th>BB</th>
+                        <th>K</th>
+                        <th>HR</th>
+                        <th>RBI</th>
+                        <th>LOB</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {customSplitRows.map((row) => (
+                        <tr key={row.label} className="border-t">
+                          <td className="py-2 font-bold">{row.label}</td>
+                          <td>{row.PA || 0}</td>
+                          <td>{row.AB || 0}</td>
+                          <td>{row.H || 0}</td>
+                          <td>{average(row.H || 0, row.AB || 0)}</td>
+                          <td>{obp(row)}</td>
+                          <td>{slg(row)}</td>
+                          <td>{ops(row)}</td>
+                          <td>{row.BB || 0}</td>
+                          <td>{row.K || 0}</td>
+                          <td>{row.HR || 0}</td>
+                          <td>{row.RBI || 0}</td>
+                          <td>{row.LOB || 0}</td>
+                        </tr>
+                      ))}
+                      {customSplitRows.length > 0 && (
+                        <tr className="border-t bg-slate-50 font-black">
+                          <td className="py-2">Total</td>
+                          <td>{customSplitTotal.PA || 0}</td>
+                          <td>{customSplitTotal.AB || 0}</td>
+                          <td>{customSplitTotal.H || 0}</td>
+                          <td>{average(customSplitTotal.H || 0, customSplitTotal.AB || 0)}</td>
+                          <td>{obp(customSplitTotal)}</td>
+                          <td>{slg(customSplitTotal)}</td>
+                          <td>{ops(customSplitTotal)}</td>
+                          <td>{customSplitTotal.BB || 0}</td>
+                          <td>{customSplitTotal.K || 0}</td>
+                          <td>{customSplitTotal.HR || 0}</td>
+                          <td>{customSplitTotal.RBI || 0}</td>
+                          <td>{customSplitTotal.LOB || 0}</td>
+                        </tr>
+                      )}
+                      {customSplitRows.length === 0 && (
+                        <tr>
+                          <td className="py-4 text-slate-500" colSpan="13">No plate appearances match this split yet.</td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </Card>
           </div>
         )}
 
@@ -8416,7 +9213,7 @@ export default function WiffleScoringPrototype() {
                 <div className="flex flex-wrap gap-2">
                   <Button variant="primary" onClick={exportCsv}>Export Excel CSV</Button>
                   <Button variant="outline" onClick={printPdfReport}>Print / Save PDF</Button>
-                  <Button variant="outline" onClick={saveCurrentGame}>Save Current Game</Button>
+                  {game.status !== "final" && <Button variant="secondary" onClick={pauseAndResumeLater}>Pause and Resume Later</Button>}
                   <Button variant="secondary" onClick={startNewGame}>Start New Game</Button>
                 </div>
               </div>
@@ -8434,6 +9231,8 @@ export default function WiffleScoringPrototype() {
                       {event.type === "play" && <div><p>{event.batter} vs. {event.pitcher || "Pitcher not set"}: {event.result} | Runs {event.runs} | RBI {event.rbi} | Outs {event.outs}</p>{event.strikeoutType && <p className="text-slate-500">Strikeout: {event.strikeoutType === "looking" ? "Looking" : "Swinging"}</p>}{event.modifier && <p className="text-slate-500">Tag: {modifierLabel(event.modifier)}</p>}{event.scored && event.scored.length > 0 && <p className="text-slate-500">Scored: {event.scored.join(", ")}</p>}</div>}
                       {event.type === "score_adjustment" && <p>{event.team}: {event.runs > 0 ? "+" : ""}{event.runs} run | {event.note}</p>}
                       {event.type === "field_rule" && <p>{event.ruleName}: {event.note}</p>}
+                      {event.type === "setup_change" && <p>Setup change: {event.note}</p>}
+                      {event.type === "game_status" && <p>{event.status === "paused" ? "Game paused." : "Game resumed."} {event.note}</p>}
                       {event.type === "rbi_adjustment" && <p>{event.batter}: +{event.rbi} RBI | {event.note}</p>}
                       {event.note && event.type === "play" && <p className="text-slate-500">Note: {event.note}</p>}
                     </div>
@@ -9526,11 +10325,11 @@ export default function WiffleScoringPrototype() {
                   <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-black uppercase text-slate-500">{playerPageRecords.length} Players</span>
                 </div>
                 <div className="overflow-hidden rounded-2xl border bg-white">
-                  <div className="grid grid-cols-[1fr_7rem_1fr] gap-2 border-b bg-slate-50 px-3 py-2 text-xs font-black uppercase text-slate-500 md:grid-cols-[1fr_7rem_7rem_7rem_1.5fr]">
+                  <div className="hidden border-b bg-slate-50 px-3 py-2 text-xs font-black uppercase text-slate-500 md:grid md:grid-cols-[minmax(0,1.4fr)_5rem_6rem_6rem_minmax(0,1fr)] md:gap-2">
                     <div>Name</div>
                     <div>Height</div>
-                    <div className="hidden md:block">Throws</div>
-                    <div className="hidden md:block">Hits</div>
+                    <div>Throws</div>
+                    <div>Hits</div>
                     <div>Leagues</div>
                   </div>
                   <div className="divide-y">
@@ -9538,15 +10337,23 @@ export default function WiffleScoringPrototype() {
                       const heightLabel = player.heightFeet || player.heightInches ? `${player.heightFeet || 0}' ${player.heightInches || 0}\"` : "—";
                       const leagueNames = (player.leagueIds || []).map((leagueId) => leagues.find((league) => league.id === leagueId)?.name).filter(Boolean).join(", ") || "No leagues";
                       return (
-                        <button key={player.key || player.id || index} type="button" className="grid w-full grid-cols-[1fr_7rem_1fr] gap-2 px-3 py-3 text-left text-sm transition hover:bg-slate-50 md:grid-cols-[1fr_7rem_7rem_7rem_1.5fr]" onClick={() => { ensurePlayerDrafts(); setSelectedPlayerDraftKey(player.key); }}>
+                        <button key={player.key || player.id || index} type="button" className="block w-full px-3 py-3 text-left text-sm transition hover:bg-slate-50 md:grid md:grid-cols-[minmax(0,1.4fr)_5rem_6rem_6rem_minmax(0,1fr)] md:gap-2" onClick={() => { ensurePlayerDrafts(); setSelectedPlayerDraftKey(player.key); }}>
                           <div className="flex min-w-0 items-center gap-3 font-bold">
                             <PlayerAvatar playerName={player.name || `Player ${index + 1}`} profile={player} size="sm" />
-                            <span className="truncate">{player.name || `Player ${index + 1}`}</span>
+                            <div className="min-w-0 flex-1">
+                              <div className="break-words text-base font-black leading-tight text-slate-900 md:truncate md:text-sm md:font-bold">{player.name || `Player ${index + 1}`}</div>
+                              <div className="mt-1 flex min-w-0 flex-wrap items-center gap-1.5 text-[11px] font-bold text-slate-500 md:hidden">
+                                <span className="rounded-full bg-slate-100 px-2 py-0.5">{heightLabel}</span>
+                                <span className="rounded-full bg-slate-100 px-2 py-0.5">T: {handednessLabel(player.pitches || "R")}</span>
+                                <span className="rounded-full bg-slate-100 px-2 py-0.5">H: {handednessLabel(player.bats || "R")}</span>
+                                <span className="max-w-full truncate rounded-full bg-slate-100 px-2 py-0.5">{leagueNames}</span>
+                              </div>
+                            </div>
                           </div>
-                          <div className="self-center font-semibold text-slate-600">{heightLabel}</div>
+                          <div className="hidden self-center font-semibold text-slate-600 md:block">{heightLabel}</div>
                           <div className="hidden self-center font-semibold text-slate-600 md:block">{handednessLabel(player.pitches || "R")}</div>
                           <div className="hidden self-center font-semibold text-slate-600 md:block">{handednessLabel(player.bats || "R")}</div>
-                          <div className="self-center truncate text-xs font-semibold text-slate-500">{leagueNames}</div>
+                          <div className="hidden self-center truncate text-xs font-semibold text-slate-500 md:block">{leagueNames}</div>
                         </button>
                       );
                     })}
@@ -10304,6 +11111,22 @@ export default function WiffleScoringPrototype() {
           </div>
         )}
 
+        {confirmResetGameOpen && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4">
+            <div className="w-full max-w-md rounded-3xl bg-white p-5 shadow-xl">
+              <div className="text-xs font-black uppercase tracking-wide text-red-600">Reset Game</div>
+              <h2 className="mt-1 text-2xl font-black">Reset this game?</h2>
+              <p className="mt-2 rounded-xl border border-red-200 bg-red-50 p-3 text-sm font-semibold text-red-700">
+                This will erase all plays, score changes, events, and stats from the current game. The game setup will stay in place.
+              </p>
+              <div className="mt-5 flex flex-wrap justify-end gap-2">
+                <Button variant="outline" onClick={() => setConfirmResetGameOpen(false)}>Keep Game</Button>
+                <Button variant="danger" onClick={resetGame}>Yes, Reset Game</Button>
+              </div>
+            </div>
+          </div>
+        )}
+
         {pendingStrikeoutResult && (
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4">
             <div className="w-full max-w-md rounded-3xl bg-white p-5 shadow-xl">
@@ -10344,6 +11167,25 @@ export default function WiffleScoringPrototype() {
               <p className="mt-3 text-sm font-semibold text-slate-600">Press OK to start {pendingInningNotification.nextHalf === "top" ? "Top" : "Bottom"} {pendingInningNotification.nextInning}.</p>
               <div className="mt-5 flex justify-center">
                 <Button variant="primary" onClick={() => setPendingInningNotification(null)}>OK</Button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {pendingGameDelete && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4">
+            <div className="w-full max-w-md rounded-3xl bg-white p-5 shadow-xl">
+              <div className="text-xs font-black uppercase tracking-wide text-red-600">Erase Previous Game</div>
+              <h2 className="mt-1 text-2xl font-black">Erase this game?</h2>
+              <div className="mt-3 rounded-xl border bg-slate-50 p-3 text-sm font-semibold text-slate-700">
+                {pendingGameDelete.awayTeam} {pendingGameDelete.awayScore} - {pendingGameDelete.homeTeam} {pendingGameDelete.homeScore}
+              </div>
+              <p className="mt-3 rounded-xl border border-red-200 bg-red-50 p-3 text-sm font-semibold text-red-700">
+                Erasing this game will remove all record of it from Previous Games, stats, standings, leaderboards, and player totals. This cannot be undone.
+              </p>
+              <div className="mt-5 flex flex-wrap justify-end gap-2">
+                <Button variant="outline" onClick={() => setPendingGameDelete(null)}>Cancel</Button>
+                <Button variant="danger" onClick={confirmDeleteSavedGame}>Yes, Erase Game</Button>
               </div>
             </div>
           </div>
@@ -10409,7 +11251,7 @@ export default function WiffleScoringPrototype() {
                       <div className="flex flex-col gap-2 rounded-2xl bg-slate-100 px-4 py-3 text-center">
                         <div>
                           <div className="text-xs font-semibold uppercase text-slate-500">{savedGame.status === "final" ? "Winner" : "Status"}</div>
-                          <div className="text-lg font-black">{savedGame.status === "final" ? (savedGame.winner === "away" ? savedGame.awayTeam : savedGame.winner === "home" ? savedGame.homeTeam : "Tie") : "Saved Live"}</div>
+                          <div className="text-lg font-black">{savedGame.status === "final" ? (savedGame.winner === "away" ? savedGame.awayTeam : savedGame.winner === "home" ? savedGame.homeTeam : "Tie") : savedGame.status === "paused" ? "Paused" : "Saved Live"}</div>
                         </div>
                         <Button variant="primary" onClick={() => loadSavedGame(savedGame)}>{savedGame.status === "final" ? "View Game" : "Resume Game"}</Button>
                       </div>
@@ -10491,6 +11333,15 @@ export default function WiffleScoringPrototype() {
                                 {(!savedGame.pudwhackerSplits || savedGame.pudwhackerSplits.length === 0) && <tr><td className="py-3 text-slate-500" colSpan="12">No Pudwhacker stats.</td></tr>}
                               </tbody>
                             </table>
+                          </div>
+                        </div>
+                        <div className="border-t pt-4">
+                          <div className="flex flex-col gap-2 rounded-xl border border-red-200 bg-red-50 p-3 sm:flex-row sm:items-center sm:justify-between">
+                            <div>
+                              <div className="text-sm font-black text-red-800">Erase this saved game</div>
+                              <div className="text-xs font-semibold text-red-700">This removes the game from stats, standings, leaderboards, and player totals.</div>
+                            </div>
+                            <Button variant="danger" onClick={() => requestDeleteSavedGame(savedGame)}>Erase Game</Button>
                           </div>
                         </div>
                       </div>

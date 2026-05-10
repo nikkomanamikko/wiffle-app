@@ -9,6 +9,7 @@ const distDir = path.join(__dirname, "dist");
 const stateDir = process.env.WIFFLE_DATA_DIR ? path.resolve(process.env.WIFFLE_DATA_DIR) : path.join(__dirname, ".data");
 const stateFile = path.join(stateDir, "wiffle-state.json");
 const liveEventsFile = path.join(stateDir, "wiffle-live-events.json");
+const liveEventsIndexFile = path.join(stateDir, "wiffle-live-events-index.json");
 
 const contentTypes = {
   ".css": "text/css; charset=utf-8",
@@ -59,29 +60,44 @@ function writeSharedState(state) {
   fs.writeFileSync(stateFile, JSON.stringify(state, null, 2));
 }
 
-function readLiveEvents() {
-  if (!fs.existsSync(liveEventsFile)) return { events: [], updatedAt: "" };
-  return JSON.parse(fs.readFileSync(liveEventsFile, "utf8"));
+function liveEventsKey(gameId = "") {
+  const safeGameId = String(gameId || "main").replace(/[^a-z0-9-_]+/gi, "-").slice(0, 80) || "main";
+  return safeGameId === "main" ? liveEventsFile : path.join(stateDir, `wiffle-live-events-${safeGameId}.json`);
 }
 
-function writeLiveEvents(events, setupSnapshot = null, status = "") {
-  const nextLiveEvents = { events, setupSnapshot, status, updatedAt: new Date().toISOString() };
+function readJsonFile(filePath, fallbackValue) {
+  if (!fs.existsSync(filePath)) return fallbackValue;
+  return JSON.parse(fs.readFileSync(filePath, "utf8"));
+}
+
+function writeJsonFile(filePath, value) {
   fs.mkdirSync(stateDir, { recursive: true });
-  fs.writeFileSync(liveEventsFile, JSON.stringify(nextLiveEvents, null, 2));
-  return nextLiveEvents;
+  fs.writeFileSync(filePath, JSON.stringify(value, null, 2));
 }
 
 async function handleStateApi(request, response) {
-  const isLiveEventsRequest = (request.url || "").includes("liveEvents=1");
+  const url = new URL(request.url || "/", "http://localhost");
+  const isLiveEventsRequest = url.searchParams.get("liveEvents") === "1";
+  const liveGameId = url.searchParams.get("gameId") || "main";
+  const activeLiveEventsFile = liveEventsKey(liveGameId);
 
   if (isLiveEventsRequest) {
     if (request.method === "GET") {
-      sendJson(response, 200, readLiveEvents());
+      if (url.searchParams.get("list") === "1") {
+        sendJson(response, 200, readJsonFile(liveEventsIndexFile, { games: [] }));
+        return;
+      }
+      sendJson(response, 200, readJsonFile(activeLiveEventsFile, { id: liveGameId, events: [], updatedAt: "" }));
       return;
     }
 
     if (request.method === "DELETE") {
-      if (fs.existsSync(liveEventsFile)) fs.unlinkSync(liveEventsFile);
+      if (fs.existsSync(activeLiveEventsFile)) fs.unlinkSync(activeLiveEventsFile);
+      const index = readJsonFile(liveEventsIndexFile, { games: [] });
+      writeJsonFile(liveEventsIndexFile, {
+        games: (index.games || []).filter((game) => game.id !== liveGameId),
+        updatedAt: new Date().toISOString(),
+      });
       sendJson(response, 200, { ok: true, deleted: true });
       return;
     }
@@ -90,22 +106,26 @@ async function handleStateApi(request, response) {
       try {
         const parsed = JSON.parse((await readRequestBody(request)) || "null");
         const operation = parsed?.operation || "append";
-        const current = readLiveEvents();
+        const current = readJsonFile(activeLiveEventsFile, { id: liveGameId, events: [], updatedAt: "" });
         let events = Array.isArray(current.events) ? current.events : [];
         let setupSnapshot = current.setupSnapshot || null;
         let status = current.status || "";
+        let summary = current.summary || null;
         if (operation === "replace") {
           events = Array.isArray(parsed.events) ? parsed.events : [];
           setupSnapshot = parsed.setupSnapshot || setupSnapshot;
           status = parsed.status || "live";
+          summary = parsed.summary || summary;
         } else if (operation === "clear") {
           events = [];
           setupSnapshot = null;
           status = "cleared";
+          summary = null;
         } else if (operation === "cancel") {
           events = [];
           setupSnapshot = null;
           status = "cancelled";
+          summary = parsed.summary || summary;
         } else {
           const incomingEvents = Array.isArray(parsed?.events) ? parsed.events : parsed?.event ? [parsed.event] : [];
           const existingIds = new Set(events.map((event) => event?.id).filter(Boolean));
@@ -117,8 +137,26 @@ async function handleStateApi(request, response) {
           });
           setupSnapshot = parsed.setupSnapshot || setupSnapshot;
           status = parsed.status || status || "live";
+          summary = parsed.summary || summary;
         }
-        const nextLiveEvents = writeLiveEvents(events, setupSnapshot, status);
+        const nextLiveEvents = { id: liveGameId, events, setupSnapshot, status, summary, updatedAt: new Date().toISOString() };
+        writeJsonFile(activeLiveEventsFile, nextLiveEvents);
+        const index = readJsonFile(liveEventsIndexFile, { games: [] });
+        const label = parsed?.gameLabel || setupSnapshot?.gameLabel || `${setupSnapshot?.awayTeam || "Away"} vs ${setupSnapshot?.homeTeam || "Home"}`;
+        const nextSummary = {
+          id: liveGameId,
+          label,
+          awayTeam: setupSnapshot?.awayTeam || "",
+          homeTeam: setupSnapshot?.homeTeam || "",
+          status,
+          summary,
+          eventCount: events.length,
+          updatedAt: nextLiveEvents.updatedAt,
+        };
+        writeJsonFile(liveEventsIndexFile, {
+          games: [nextSummary, ...(index.games || []).filter((game) => game.id !== liveGameId)].slice(0, 24),
+          updatedAt: nextLiveEvents.updatedAt,
+        });
         sendJson(response, 200, { ok: true, eventCount: events.length, updatedAt: nextLiveEvents.updatedAt });
       } catch (error) {
         sendJson(response, 400, { ok: false, error: error?.message || "Invalid JSON." });

@@ -3,6 +3,12 @@ import { getStore } from "@netlify/blobs";
 const STORE_NAME = "wiffle-app";
 const STATE_KEY = "state";
 const LIVE_EVENTS_KEY = "live-events";
+const LIVE_EVENTS_INDEX_KEY = "live-events-index";
+
+function liveEventsKey(gameId = "") {
+  const safeGameId = String(gameId || "main").replace(/[^a-z0-9-_]+/gi, "-").slice(0, 80) || "main";
+  return safeGameId === "main" ? LIVE_EVENTS_KEY : `${LIVE_EVENTS_KEY}-${safeGameId}`;
+}
 
 function jsonResponse(status, value) {
   return Response.json(value, {
@@ -22,15 +28,23 @@ export default async function handler(request) {
   const store = getStore(STORE_NAME);
   const url = new URL(request.url);
   const isLiveEventsRequest = url.searchParams.get("liveEvents") === "1";
+  const liveGameId = url.searchParams.get("gameId") || "main";
 
   if (isLiveEventsRequest) {
+    if (url.searchParams.get("list") === "1") {
+      const index = await store.get(LIVE_EVENTS_INDEX_KEY, { type: "json", consistency: "strong" });
+      return jsonResponse(200, Array.isArray(index?.games) ? index : { games: [] });
+    }
+
     if (request.method === "GET") {
-      const liveEvents = await store.get(LIVE_EVENTS_KEY, { type: "json", consistency: "strong" });
-      return jsonResponse(200, liveEvents || { events: [], updatedAt: "" });
+      const liveEvents = await store.get(liveEventsKey(liveGameId), { type: "json", consistency: "strong" });
+      return jsonResponse(200, liveEvents || { id: liveGameId, events: [], updatedAt: "" });
     }
 
     if (request.method === "DELETE") {
-      await store.delete(LIVE_EVENTS_KEY);
+      await store.delete(liveEventsKey(liveGameId));
+      const index = await store.get(LIVE_EVENTS_INDEX_KEY, { type: "json", consistency: "strong" }) || { games: [] };
+      await store.setJSON(LIVE_EVENTS_INDEX_KEY, { games: (index.games || []).filter((game) => game.id !== liveGameId), updatedAt: new Date().toISOString() });
       return jsonResponse(200, { ok: true, deleted: true });
     }
 
@@ -38,23 +52,27 @@ export default async function handler(request) {
       try {
         const payload = await request.json();
         const operation = payload?.operation || "append";
-        const current = await store.get(LIVE_EVENTS_KEY, { type: "json", consistency: "strong" }) || { events: [], updatedAt: "" };
+        const current = await store.get(liveEventsKey(liveGameId), { type: "json", consistency: "strong" }) || { id: liveGameId, events: [], updatedAt: "" };
         let events = Array.isArray(current.events) ? current.events : [];
         let setupSnapshot = current.setupSnapshot || null;
         let status = current.status || "";
+        let summary = current.summary || null;
 
         if (operation === "replace") {
           events = Array.isArray(payload.events) ? payload.events : [];
           setupSnapshot = payload.setupSnapshot || setupSnapshot;
           status = payload.status || "live";
+          summary = payload.summary || summary;
         } else if (operation === "clear") {
           events = [];
           setupSnapshot = null;
           status = "cleared";
+          summary = null;
         } else if (operation === "cancel") {
           events = [];
           setupSnapshot = null;
           status = "cancelled";
+          summary = payload.summary || summary;
         } else {
           const incomingEvents = Array.isArray(payload.events) ? payload.events : payload.event ? [payload.event] : [];
           const existingIds = new Set(events.map((event) => event?.id).filter(Boolean));
@@ -66,10 +84,27 @@ export default async function handler(request) {
           });
           setupSnapshot = payload.setupSnapshot || setupSnapshot;
           status = payload.status || status || "live";
+          summary = payload.summary || summary;
         }
 
-        const nextLiveEvents = { events, setupSnapshot, status, updatedAt: new Date().toISOString() };
-        await store.setJSON(LIVE_EVENTS_KEY, nextLiveEvents);
+        const nextLiveEvents = { id: liveGameId, events, setupSnapshot, status, summary, updatedAt: new Date().toISOString() };
+        await store.setJSON(liveEventsKey(liveGameId), nextLiveEvents);
+        const index = await store.get(LIVE_EVENTS_INDEX_KEY, { type: "json", consistency: "strong" }) || { games: [] };
+        const label = payload?.gameLabel || setupSnapshot?.gameLabel || `${setupSnapshot?.awayTeam || "Away"} vs ${setupSnapshot?.homeTeam || "Home"}`;
+        const nextSummary = {
+          id: liveGameId,
+          label,
+          awayTeam: setupSnapshot?.awayTeam || "",
+          homeTeam: setupSnapshot?.homeTeam || "",
+          status,
+          summary,
+          eventCount: events.length,
+          updatedAt: nextLiveEvents.updatedAt,
+        };
+        await store.setJSON(LIVE_EVENTS_INDEX_KEY, {
+          games: [nextSummary, ...(index.games || []).filter((game) => game.id !== liveGameId)].slice(0, 24),
+          updatedAt: nextLiveEvents.updatedAt,
+        });
         return jsonResponse(200, { ok: true, eventCount: events.length, updatedAt: nextLiveEvents.updatedAt });
       } catch (error) {
         return jsonResponse(400, { ok: false, error: error?.message || "Invalid JSON." });

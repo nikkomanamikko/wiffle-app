@@ -42,6 +42,13 @@ export default async function handler(request) {
     }
 
     if (request.method === "DELETE") {
+      if (url.searchParams.get("all") === "1") {
+        const index = await store.get(LIVE_EVENTS_INDEX_KEY, { type: "json", consistency: "strong" }) || { games: [] };
+        await Promise.all((index.games || []).map((game) => store.delete(liveEventsKey(game.id))));
+        await store.delete(LIVE_EVENTS_KEY);
+        await store.setJSON(LIVE_EVENTS_INDEX_KEY, { games: [], updatedAt: new Date().toISOString() });
+        return jsonResponse(200, { ok: true, deleted: true });
+      }
       await store.delete(liveEventsKey(liveGameId));
       const index = await store.get(LIVE_EVENTS_INDEX_KEY, { type: "json", consistency: "strong" }) || { games: [] };
       await store.setJSON(LIVE_EVENTS_INDEX_KEY, { games: (index.games || []).filter((game) => game.id !== liveGameId), updatedAt: new Date().toISOString() });

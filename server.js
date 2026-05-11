@@ -92,6 +92,16 @@ async function handleStateApi(request, response) {
     }
 
     if (request.method === "DELETE") {
+      if (url.searchParams.get("all") === "1") {
+        if (fs.existsSync(liveEventsFile)) fs.unlinkSync(liveEventsFile);
+        (readJsonFile(liveEventsIndexFile, { games: [] }).games || []).forEach((game) => {
+          const gameFile = liveEventsKey(game.id);
+          if (fs.existsSync(gameFile)) fs.unlinkSync(gameFile);
+        });
+        writeJsonFile(liveEventsIndexFile, { games: [], updatedAt: new Date().toISOString() });
+        sendJson(response, 200, { ok: true, deleted: true });
+        return;
+      }
       if (fs.existsSync(activeLiveEventsFile)) fs.unlinkSync(activeLiveEventsFile);
       const index = readJsonFile(liveEventsIndexFile, { games: [] });
       writeJsonFile(liveEventsIndexFile, {

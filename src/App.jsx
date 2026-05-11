@@ -642,6 +642,7 @@ let queuedSharedStateSave = null;
 let sharedStateSaveInFlight = false;
 let sharedStateSaveRetryTimer = null;
 let liveEventsWriteInFlight = false;
+const liveEventsMemoryByGame = new Map();
 
 function liveEventsEndpoint(gameId = DEFAULT_LIVE_GAME_ID, extraParams = {}) {
   const params = new URLSearchParams({ liveEvents: "1" });
@@ -903,12 +904,76 @@ function liveEventsSignature(events = [], setupSnapshot = null, updatedAt = "", 
   return `${eventIds}::${setupSignature}::${status || ""}::${updatedAt || ""}`;
 }
 
+function rememberLiveEventState(gameId = DEFAULT_LIVE_GAME_ID, liveEventState = {}) {
+  const safeGameId = gameId || DEFAULT_LIVE_GAME_ID;
+  if (!liveEventState || typeof liveEventState !== "object") return null;
+  const nextState = {
+    id: safeGameId,
+    events: Array.isArray(liveEventState.events) ? liveEventState.events : [],
+    setupSnapshot: liveEventState.setupSnapshot || null,
+    status: liveEventState.status || "",
+    summary: liveEventState.summary || null,
+    gameLabel: liveEventState.gameLabel || "",
+    updatedAt: liveEventState.updatedAt || new Date().toISOString(),
+  };
+  liveEventsMemoryByGame.set(safeGameId, nextState);
+  return nextState;
+}
+
+function getRememberedLiveEventState(gameId = DEFAULT_LIVE_GAME_ID) {
+  return liveEventsMemoryByGame.get(gameId || DEFAULT_LIVE_GAME_ID) || null;
+}
+
 function writeLiveEvents(payload) {
   if (typeof window === "undefined") return;
   liveEventsWriteInFlight = true;
   const gameId = payload?.gameId || window.__WIFFLE_ACTIVE_LIVE_GAME_ID || DEFAULT_LIVE_GAME_ID;
   const setupSnapshot = payload?.operation === "clear" ? null : payload?.setupSnapshot || window.__WIFFLE_LIVE_SETUP_SNAPSHOT || null;
   const gameLabel = payload?.gameLabel || setupSnapshot?.gameLabel || `${setupSnapshot?.awayTeam || "Away"} vs ${setupSnapshot?.homeTeam || "Home"}`;
+  const rememberedState = getRememberedLiveEventState(gameId) || { id: gameId, events: [], setupSnapshot: null, status: "", summary: null };
+  let nextEvents = Array.isArray(rememberedState.events) ? rememberedState.events : [];
+  let nextStatus = rememberedState.status || "";
+  let nextSummary = rememberedState.summary || null;
+  let nextSetupSnapshot = rememberedState.setupSnapshot || null;
+
+  if (payload?.operation === "replace") {
+    nextEvents = Array.isArray(payload.events) ? payload.events : [];
+    nextStatus = payload.status || "live";
+    nextSummary = payload.summary || nextSummary;
+    nextSetupSnapshot = setupSnapshot || nextSetupSnapshot;
+  } else if (payload?.operation === "clear") {
+    nextEvents = [];
+    nextStatus = "cleared";
+    nextSummary = null;
+    nextSetupSnapshot = null;
+  } else if (payload?.operation === "cancel") {
+    nextEvents = [];
+    nextStatus = "cancelled";
+    nextSummary = payload.summary || nextSummary;
+    nextSetupSnapshot = null;
+  } else {
+    const incomingEvents = Array.isArray(payload?.events) ? payload.events : payload?.event ? [payload.event] : [];
+    const existingIds = new Set(nextEvents.map((event) => event?.id).filter(Boolean));
+    nextEvents = [...nextEvents];
+    incomingEvents.forEach((event) => {
+      if (!event || typeof event !== "object") return;
+      if (event.id && existingIds.has(event.id)) return;
+      nextEvents.push(event);
+      if (event.id) existingIds.add(event.id);
+    });
+    nextStatus = payload?.status || nextStatus || "live";
+    nextSummary = payload?.summary || nextSummary;
+    nextSetupSnapshot = setupSnapshot || nextSetupSnapshot;
+  }
+
+  rememberLiveEventState(gameId, {
+    events: nextEvents,
+    setupSnapshot: nextSetupSnapshot,
+    status: nextStatus,
+    summary: nextSummary,
+    gameLabel,
+  });
+
   window.fetch?.(liveEventsEndpoint(gameId), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -921,22 +986,42 @@ function writeLiveEvents(payload) {
   });
 }
 
-function appendLiveEvent(event, summary = null) {
+function appendLiveEvent(event, summary = null, gameId = "") {
   if (!event) return;
-  writeLiveEvents({ operation: "append", event, ...(summary ? { summary } : {}) });
+  writeLiveEvents({ operation: "append", event, ...(summary ? { summary } : {}), ...(gameId ? { gameId } : {}) });
 }
 
-function replaceLiveEvents(events = [], setupSnapshot = null, status = "live", summary = null) {
+function replaceLiveEvents(events = [], setupSnapshot = null, status = "live", summary = null, gameId = "") {
   const nextSummary = summary || makeLiveGameSummary(events, setupSnapshot || {}, status);
-  writeLiveEvents({ operation: "replace", status, events, summary: nextSummary, ...(setupSnapshot ? { setupSnapshot } : {}) });
+  writeLiveEvents({ operation: "replace", status, events, summary: nextSummary, ...(setupSnapshot ? { setupSnapshot } : {}), ...(gameId ? { gameId } : {}) });
 }
 
-function clearLiveEvents() {
-  writeLiveEvents({ operation: "clear", events: [] });
+function clearLiveEvents(gameId = "") {
+  writeLiveEvents({ operation: "clear", events: [], ...(gameId ? { gameId } : {}) });
 }
 
-function cancelLiveEvents() {
-  writeLiveEvents({ operation: "cancel", status: "cancelled", events: [] });
+function cancelLiveEvents(gameId = "") {
+  writeLiveEvents({ operation: "cancel", status: "cancelled", events: [], ...(gameId ? { gameId } : {}) });
+}
+
+function deleteLiveGame(gameId = "") {
+  if (typeof window === "undefined" || !gameId) return;
+  window.fetch?.(liveEventsEndpoint(gameId), {
+    method: "DELETE",
+    keepalive: true,
+  }).catch((error) => {
+    console.warn("Unable to delete live game.", error);
+  });
+}
+
+function deleteAllLiveGames() {
+  if (typeof window === "undefined") return;
+  window.fetch?.(liveEventsEndpoint(DEFAULT_LIVE_GAME_ID, { all: "1" }), {
+    method: "DELETE",
+    keepalive: true,
+  }).catch((error) => {
+    console.warn("Unable to clear live games.", error);
+  });
 }
 
 function makeDefaultSeasonRecord(year = currentYearNumber(), defaultAwards = makeDefaultAwards()) {
@@ -4472,6 +4557,10 @@ export default function WiffleScoringPrototype() {
     return safeGameId;
   }
 
+  function getActiveLiveGameId() {
+    return activeLiveGameIdRef.current || activeLiveGameId || DEFAULT_LIVE_GAME_ID;
+  }
+
   function updateLiveGameIndexFromState(gameId, liveEventState = {}) {
     const safeGameId = gameId || DEFAULT_LIVE_GAME_ID;
     const remoteEvents = Array.isArray(liveEventState?.events) ? liveEventState.events : [];
@@ -4525,6 +4614,13 @@ export default function WiffleScoringPrototype() {
   const scoringPaused = displayedGameStatus === "paused";
   const activeGameOptions = useMemo(() => {
     const optionsById = new Map();
+    const hasCurrentLocalGame = Boolean(gameStarted || activeSavedGameId || events.length > 0);
+    const savedLiveGameIds = new Set(
+      (previousGames || [])
+        .filter((savedGame) => savedGame.status === "live" || savedGame.status === "paused")
+        .map((savedGame) => savedGame.liveGameId || savedGame.id)
+        .filter(Boolean),
+    );
     (previousGames || [])
       .filter((savedGame) => savedGame.status === "live" || savedGame.status === "paused")
       .forEach((savedGame) => {
@@ -4537,18 +4633,24 @@ export default function WiffleScoringPrototype() {
           eventCount: savedGame.eventCount || 0,
           summary: makeLiveGameSummary(savedGame.events || [], savedGame.savedSetup || {}, savedGame.status),
         });
-      });
+    });
     (liveGamesIndex || []).forEach((liveGame) => {
       if (!liveGame?.id) return;
+      const isCurrentLocalGame = liveGame.id === activeLiveGameId && hasCurrentLocalGame;
+      if (!savedLiveGameIds.has(liveGame.id) && !isCurrentLocalGame) return;
       const savedOption = optionsById.get(liveGame.id);
       optionsById.set(liveGame.id, {
-        ...liveGame,
         ...(savedOption || {}),
+        ...liveGame,
+        label: liveGame.label || savedOption?.label || "Live Game",
+        summary: liveGame.summary || savedOption?.summary || null,
+        status: liveGame.status || savedOption?.status || "live",
+        eventCount: liveGame.eventCount ?? savedOption?.eventCount ?? 0,
         updatedAt: liveGame.updatedAt || savedOption?.updatedAt || "",
       });
     });
     const selectedGameId = activeLiveGameId || DEFAULT_LIVE_GAME_ID;
-    if (selectedGameId && (gameStarted || activeSavedGameId || events.length > 0)) {
+    if (selectedGameId && hasCurrentLocalGame) {
       const currentOption = optionsById.get(selectedGameId) || {};
       optionsById.set(selectedGameId, {
         ...currentOption,
@@ -4562,6 +4664,13 @@ export default function WiffleScoringPrototype() {
     }
     return [...optionsById.values()].sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")) || String(a.label || "").localeCompare(String(b.label || "")));
   }, [previousGames, liveGamesIndex, activeLiveGameId, gameStarted, activeSavedGameId, events, awayTeam, homeTeam, gamePaused, extraRunnerRules, battingOrder, ghostRunnersCountAsRbi, gameInnings]);
+  useEffect(() => {
+    const hasSavedLiveGames = (previousGames || []).some((savedGame) => savedGame.status === "live" || savedGame.status === "paused");
+    const hasCurrentLocalGame = Boolean(gameStarted || activeSavedGameId || events.length > 0);
+    if (hasSavedLiveGames || hasCurrentLocalGame || liveGamesIndex.length === 0) return;
+    setLiveGamesIndex([]);
+    deleteAllLiveGames();
+  }, [previousGames, gameStarted, activeSavedGameId, events.length, liveGamesIndex.length]);
   const allTestsPassed = testResults.every((item) => item.pass);
   const powerPlayUsed = !powerPlaysEnabled || isPowerPlayLimitReached(events, battingTeam, defensiveTeam, game.inning, game.half, powerPlayLimitType, powerPlayLimitAmount);
   const whammyUsed = !powerPlaysEnabled || !whammysEnabled || isWhammyUnavailable(events, battingTeam, defensiveTeam, game.inning, game.half);
@@ -5200,8 +5309,14 @@ export default function WiffleScoringPrototype() {
         const response = await fetch(liveEventsEndpoint(requestedGameId), { cache: "no-store" });
         if (!response.ok) return;
         if ((activeLiveGameIdRef.current || DEFAULT_LIVE_GAME_ID) !== requestedGameId) return;
-        const liveEventState = await response.json();
+        const rawLiveEventState = await response.json();
         if ((activeLiveGameIdRef.current || DEFAULT_LIVE_GAME_ID) !== requestedGameId) return;
+        const rememberedLiveEventState = getRememberedLiveEventState(requestedGameId);
+        const rememberedEventCount = Array.isArray(rememberedLiveEventState?.events) ? rememberedLiveEventState.events.length : 0;
+        const remoteEventCount = Array.isArray(rawLiveEventState?.events) ? rawLiveEventState.events.length : 0;
+        const liveEventState = rememberedEventCount > remoteEventCount
+          ? { ...rawLiveEventState, ...rememberedLiveEventState, updatedAt: rememberedLiveEventState.updatedAt || rawLiveEventState?.updatedAt || "" }
+          : rememberLiveEventState(requestedGameId, rawLiveEventState) || rawLiveEventState;
         const remoteEvents = Array.isArray(liveEventState?.events) ? liveEventState.events : [];
         const liveStatus = liveEventState?.status || "";
         const hasRemoteLiveGame = Boolean(liveStatus || remoteEvents.length > 0 || liveEventState?.setupSnapshot);
@@ -5209,10 +5324,10 @@ export default function WiffleScoringPrototype() {
         const matchingSavedGame = (previousGames || []).find((savedGame) => (savedGame.liveGameId || savedGame.id) === requestedGameId);
         const remoteSignature = liveEventsSignature(remoteEvents, liveEventState?.setupSnapshot || null, liveEventState?.updatedAt || "", liveStatus);
         if (remoteSignature === lastLiveEventsSignatureRef.current) return;
-        lastLiveEventsSignatureRef.current = remoteSignature;
         if (!hasRemoteLiveGame) return;
         if (liveStatus === "cancelled") {
           if ((activeLiveGameIdRef.current || DEFAULT_LIVE_GAME_ID) !== requestedGameId) return;
+          lastLiveEventsSignatureRef.current = remoteSignature;
           setEvents([]);
           setArchivedFinalEventId(null);
           setActiveSavedGameId(null);
@@ -5232,15 +5347,18 @@ export default function WiffleScoringPrototype() {
           setActivePage("setup");
           return;
         }
-        if ((liveStatus === "started" || liveStatus === "paused") && !hasPendingSharedSave()) {
+        const isActiveLiveStatus = liveStatus === "started" || liveStatus === "paused" || liveStatus === "live";
+        if (isActiveLiveStatus) {
           if ((activeLiveGameIdRef.current || DEFAULT_LIVE_GAME_ID) !== requestedGameId) return;
           if (!gameStarted) setGameStarted(true);
           setGamePaused(liveStatus === "paused");
           if (!setupEditingDuringGameRef.current) setSetupEditingDuringGame(false);
         }
-        if ((liveStatus === "started" || liveStatus === "paused") && liveEventState?.setupSnapshot && !hasPendingSharedSave() && !isRemoteSyncPaused()) {
+        if (isActiveLiveStatus) {
           if ((activeLiveGameIdRef.current || DEFAULT_LIVE_GAME_ID) !== requestedGameId) return;
-          applyPersistedState(liveEventState.setupSnapshot, { includeSessionState: false });
+          if (liveEventState?.setupSnapshot && !isRemoteSyncPaused()) {
+            applyPersistedState(liveEventState.setupSnapshot, { includeSessionState: false });
+          }
           setEvents(remoteEvents);
           setArchivedFinalEventId(null);
           setActiveSavedGameId(matchingSavedGame?.id || null);
@@ -5255,6 +5373,7 @@ export default function WiffleScoringPrototype() {
           setConfirmCancelGameOpen(false);
           setConfirmResetGameOpen(false);
           if (!gameStarted) setActivePage("score");
+          lastLiveEventsSignatureRef.current = remoteSignature;
           return;
         }
       } catch (error) {
@@ -5399,7 +5518,7 @@ export default function WiffleScoringPrototype() {
     const setupSnapshot = { ...liveGameSetupSnapshot, savedSetupSignature: currentSetupSignature, setupSignature: currentSetupSignature };
     if (setupChangeEvent) setEvents(nextEvents);
     setSavedSetupSignature(currentSetupSignature);
-    if (gameStarted || nextEvents.length > 0) replaceLiveEvents(nextEvents, setupSnapshot, status);
+    if (gameStarted || nextEvents.length > 0) replaceLiveEvents(nextEvents, setupSnapshot, status, null, getActiveLiveGameId());
   }
 
   function beginSetupEditDuringGame() {
@@ -5412,7 +5531,7 @@ export default function WiffleScoringPrototype() {
     if (pauseEvent) setEvents(nextEvents);
     setGamePaused(true);
     setSetupEditingDuringGame(true);
-    if (gameStarted || nextEvents.length > 0) replaceLiveEvents(nextEvents, liveGameSetupSnapshot, "paused");
+    if (gameStarted || nextEvents.length > 0) replaceLiveEvents(nextEvents, liveGameSetupSnapshot, "paused", null, getActiveLiveGameId());
   }
 
   function resumePausedGame() {
@@ -5421,7 +5540,7 @@ export default function WiffleScoringPrototype() {
     setEvents(nextEvents);
     setGamePaused(false);
     setSetupEditingDuringGame(false);
-    replaceLiveEvents(nextEvents, liveGameSetupSnapshot, "started");
+    replaceLiveEvents(nextEvents, liveGameSetupSnapshot, "started", null, getActiveLiveGameId());
     setActivePage("score");
   }
 
@@ -8468,7 +8587,7 @@ export default function WiffleScoringPrototype() {
 
     const nextEvents = [...events, event];
     setEvents(nextEvents);
-    appendLiveEvent(event, makeLiveGameSummary(nextEvents, liveGameSetupSnapshot, "started"));
+    appendLiveEvent(event, makeLiveGameSummary(nextEvents, liveGameSetupSnapshot, "started"), getActiveLiveGameId());
     if (event.endHalf || game.outs + (event.outs || 0) >= 3) {
       maybeShowEndOfInningNotification(nextEvents, game, game.inning, game.half);
     }
@@ -8493,7 +8612,7 @@ export default function WiffleScoringPrototype() {
     const event = { id: newId(), type: "score_adjustment", team, inning: game.inning, half: game.half, runs: amount, note: note || (amount > 0 ? "Bonus run" : "Run removed"), createdAt: new Date().toLocaleTimeString() };
     const nextEventsForSummary = [...eventsRef.current, event];
     setEvents((prev) => [...prev, event]);
-    appendLiveEvent(event, makeLiveGameSummary(nextEventsForSummary, liveGameSetupSnapshot, "started"));
+    appendLiveEvent(event, makeLiveGameSummary(nextEventsForSummary, liveGameSetupSnapshot, "started"), getActiveLiveGameId());
     setNote("");
   }
 
@@ -8501,7 +8620,7 @@ export default function WiffleScoringPrototype() {
     const event = { id: newId(), type: "field_rule", ruleName: rule.name, actions: getFieldRuleActions(rule), team: battingTeam, inning: game.inning, half: game.half, batter: currentBatter, note: noteText || `${rule.name}: ${fieldRuleActionSummary(rule)}`, createdAt: new Date().toLocaleTimeString() };
     const nextEventsForSummary = [...eventsRef.current, event];
     setEvents((prev) => [...prev, event]);
-    appendLiveEvent(event, makeLiveGameSummary(nextEventsForSummary, liveGameSetupSnapshot, "started"));
+    appendLiveEvent(event, makeLiveGameSummary(nextEventsForSummary, liveGameSetupSnapshot, "started"), getActiveLiveGameId());
   }
 
   function applyFieldRule(rule) {
@@ -8526,7 +8645,7 @@ export default function WiffleScoringPrototype() {
         const event = { id: newId(), type: "rbi_adjustment", team: battingTeam, inning: game.inning, half: game.half, batter: currentBatter, rbi: runs, note: `${rule.name || "Field Rule"}: ${runs} bonus RBI`, createdAt: new Date().toLocaleTimeString() };
         const nextEventsForSummary = [...eventsRef.current, event];
         setEvents((prev) => [...prev, event]);
-        appendLiveEvent(event, makeLiveGameSummary(nextEventsForSummary, liveGameSetupSnapshot, "started"));
+        appendLiveEvent(event, makeLiveGameSummary(nextEventsForSummary, liveGameSetupSnapshot, "started"), getActiveLiveGameId());
       }
       noteParts.push(`${runs > 0 ? "+" : ""}${runs} bonus run for batting team${rule.countBonusRunsAsRbi ? " with RBI" : " with no RBI"}`);
     }
@@ -8551,7 +8670,7 @@ export default function WiffleScoringPrototype() {
     setEvents((prev) => {
       if (prev.length === 0) return prev;
       const nextEvents = prev.slice(0, -1);
-      replaceLiveEvents(nextEvents);
+      replaceLiveEvents(nextEvents, liveGameSetupSnapshot, gamePaused ? "paused" : "started", null, getActiveLiveGameId());
       if (activeSavedGameId) {
         const snapshot = makeGameArchiveEntry(nextEvents, activeSavedGameId);
         setPreviousGames((previous) => previous.map((savedGame) => (savedGame.id === activeSavedGameId ? snapshot : savedGame)));
@@ -8592,7 +8711,7 @@ export default function WiffleScoringPrototype() {
 
   function resetGame() {
     setEvents([]);
-    replaceLiveEvents([], liveGameSetupSnapshot, "started");
+    replaceLiveEvents([], liveGameSetupSnapshot, "started", null, getActiveLiveGameId());
     setArchivedFinalEventId(null);
     setActiveSavedGameId(null);
     setManualRuns(0);
@@ -8610,7 +8729,7 @@ export default function WiffleScoringPrototype() {
 
   function cancelCurrentGame() {
     setEvents([]);
-    cancelLiveEvents();
+    cancelLiveEvents(getActiveLiveGameId());
     setArchivedFinalEventId(null);
     setActiveSavedGameId(null);
     setManualRuns(0);
@@ -8720,11 +8839,26 @@ export default function WiffleScoringPrototype() {
   function confirmDeleteSavedGame() {
     if (!pendingGameDelete?.id) return;
     markNextSharedStateSaveAuthoritative();
+    const deletedGameId = pendingGameDelete.liveGameId || pendingGameDelete.id;
+    if (deletedGameId) {
+      deleteLiveGame(deletedGameId);
+      setLiveGamesIndex((prev) => (prev || []).filter((liveGame) => liveGame.id !== deletedGameId));
+    }
     setPreviousGames((prev) => (prev || []).filter((savedGame) => savedGame.id !== pendingGameDelete.id));
     if (expandedGameId === pendingGameDelete.id) setExpandedGameId(null);
     if (activeSavedGameId === pendingGameDelete.id) {
       setActiveSavedGameId(null);
       setArchivedFinalEventId(null);
+    }
+    if (deletedGameId && (activeLiveGameIdRef.current || DEFAULT_LIVE_GAME_ID) === deletedGameId) {
+      pinActiveLiveGameId(DEFAULT_LIVE_GAME_ID);
+      setActiveSavedGameId(null);
+      setArchivedFinalEventId(null);
+      setGameStarted(false);
+      setGamePaused(false);
+      setSetupEditingDuringGame(false);
+      setEvents([]);
+      setActivePage("setup");
     }
     setPendingGameDelete(null);
   }
@@ -8744,7 +8878,7 @@ export default function WiffleScoringPrototype() {
     setEvents(nextEvents);
     setGamePaused(true);
     setSetupEditingDuringGame(false);
-    replaceLiveEvents(nextEvents, liveGameSetupSnapshot, "paused");
+    replaceLiveEvents(nextEvents, liveGameSetupSnapshot, "paused", null, getActiveLiveGameId());
     setActivePage("score");
     return snapshot;
   }
@@ -8792,7 +8926,7 @@ export default function WiffleScoringPrototype() {
     setExtraPitchers(setup.extraPitchers || { away: {}, home: {} });
     setEvents(savedGame.events || []);
     if (shouldBroadcastLiveEvents) {
-      replaceLiveEvents(savedGame.events || [], { ...setup, gameLabel: `${setup.awayTeam || savedGame.awayTeam || "Away"} vs ${setup.homeTeam || savedGame.homeTeam || "Home"}` }, savedGame.status === "paused" ? "paused" : "started");
+      replaceLiveEvents(savedGame.events || [], { ...setup, gameLabel: `${setup.awayTeam || savedGame.awayTeam || "Away"} vs ${setup.homeTeam || savedGame.homeTeam || "Home"}` }, savedGame.status === "paused" ? "paused" : "started", null, liveGameId);
     }
     setActiveSavedGameId(savedGame.id);
     setGameStarted(true);
@@ -8862,7 +8996,7 @@ export default function WiffleScoringPrototype() {
     setEvents([]);
     setActiveSavedGameId(nextLiveGameId);
     setArchivedFinalEventId(null);
-    replaceLiveEvents([], liveGameSetupSnapshot, "started");
+    replaceLiveEvents([], liveGameSetupSnapshot, "started", null, nextLiveGameId);
     setGameStarted(true);
     setGamePaused(false);
     setSetupEditingDuringGame(false);
@@ -8889,8 +9023,14 @@ export default function WiffleScoringPrototype() {
         return;
       }
       if ((activeLiveGameIdRef.current || DEFAULT_LIVE_GAME_ID) !== safeGameId) return;
-      const liveEventState = await response.json();
+      const rawLiveEventState = await response.json();
       if ((activeLiveGameIdRef.current || DEFAULT_LIVE_GAME_ID) !== safeGameId) return;
+      const rememberedLiveEventState = getRememberedLiveEventState(safeGameId);
+      const rememberedEventCount = Array.isArray(rememberedLiveEventState?.events) ? rememberedLiveEventState.events.length : 0;
+      const remoteEventCount = Array.isArray(rawLiveEventState?.events) ? rawLiveEventState.events.length : 0;
+      const liveEventState = rememberedEventCount > remoteEventCount
+        ? { ...rawLiveEventState, ...rememberedLiveEventState, updatedAt: rememberedLiveEventState.updatedAt || rawLiveEventState?.updatedAt || "" }
+        : rememberLiveEventState(safeGameId, rawLiveEventState) || rawLiveEventState;
       const hasRemoteLiveGame = Boolean(liveEventState?.status || liveEventState?.setupSnapshot || (Array.isArray(liveEventState?.events) && liveEventState.events.length > 0));
       if (!hasRemoteLiveGame) {
         if (localSavedGame) loadSavedGame(localSavedGame, { broadcast: false });
@@ -8899,7 +9039,7 @@ export default function WiffleScoringPrototype() {
       updateLiveGameIndexFromState(safeGameId, liveEventState);
       if (liveEventState?.setupSnapshot) applyPersistedState(liveEventState.setupSnapshot, { includeSessionState: false });
       setEvents(Array.isArray(liveEventState?.events) ? liveEventState.events : []);
-      setGameStarted(liveEventState?.status === "started" || liveEventState?.status === "paused");
+      setGameStarted(liveEventState?.status === "started" || liveEventState?.status === "paused" || liveEventState?.status === "live");
       setGamePaused(liveEventState?.status === "paused");
       setSetupEditingDuringGame(false);
       setActiveSavedGameId(localSavedGame?.id || safeGameId);
@@ -8928,7 +9068,7 @@ export default function WiffleScoringPrototype() {
     const event = { id: newId(), type: "end_half", inning: game.inning, half: game.half, createdAt: new Date().toLocaleTimeString() };
     const nextEvents = [...events, event];
     setEvents(nextEvents);
-    appendLiveEvent(event, makeLiveGameSummary(nextEvents, liveGameSetupSnapshot, "started"));
+    appendLiveEvent(event, makeLiveGameSummary(nextEvents, liveGameSetupSnapshot, "started"), getActiveLiveGameId());
     maybeShowEndOfInningNotification(nextEvents, game, game.inning, game.half);
   }
 
@@ -8937,7 +9077,7 @@ export default function WiffleScoringPrototype() {
     const event = { id: newId(), type: "finalize", inning: game.inning, half: game.half, createdAt: new Date().toLocaleTimeString() };
     const nextEvents = [...eventsRef.current, event];
     setEvents((prev) => [...prev, event]);
-    appendLiveEvent(event, makeLiveGameSummary(nextEvents, liveGameSetupSnapshot, "final"));
+    appendLiveEvent(event, makeLiveGameSummary(nextEvents, liveGameSetupSnapshot, "final"), getActiveLiveGameId());
   }
 
   function exportCsv() {

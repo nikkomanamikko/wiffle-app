@@ -122,7 +122,8 @@ async function handleStateApi(request, response) {
         let status = current.status || "";
         let summary = current.summary || null;
         if (operation === "replace") {
-          events = Array.isArray(parsed.events) ? parsed.events : [];
+          const incomingEvents = Array.isArray(parsed.events) ? parsed.events : [];
+          events = !parsed.allowShorter && incomingEvents.length < events.length ? events : incomingEvents;
           setupSnapshot = parsed.setupSnapshot || setupSnapshot;
           status = parsed.status || "live";
           summary = parsed.summary || summary;

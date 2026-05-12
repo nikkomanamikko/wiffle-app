@@ -924,6 +924,15 @@ function getRememberedLiveEventState(gameId = DEFAULT_LIVE_GAME_ID) {
   return liveEventsMemoryByGame.get(gameId || DEFAULT_LIVE_GAME_ID) || null;
 }
 
+function shouldPreferRememberedLiveEventState(rememberedState = null, remoteState = null) {
+  const rememberedEventCount = Array.isArray(rememberedState?.events) ? rememberedState.events.length : 0;
+  const remoteEventCount = Array.isArray(remoteState?.events) ? remoteState.events.length : 0;
+  if (rememberedEventCount <= remoteEventCount) return false;
+  const rememberedUpdatedAt = rememberedState?.updatedAt ? new Date(rememberedState.updatedAt).getTime() : 0;
+  const remoteUpdatedAt = remoteState?.updatedAt ? new Date(remoteState.updatedAt).getTime() : 0;
+  return !remoteUpdatedAt || rememberedUpdatedAt >= remoteUpdatedAt;
+}
+
 function writeLiveEvents(payload) {
   if (typeof window === "undefined") return;
   liveEventsWriteInFlight = true;
@@ -937,7 +946,8 @@ function writeLiveEvents(payload) {
   let nextSetupSnapshot = rememberedState.setupSnapshot || null;
 
   if (payload?.operation === "replace") {
-    nextEvents = Array.isArray(payload.events) ? payload.events : [];
+    const incomingEvents = Array.isArray(payload.events) ? payload.events : [];
+    nextEvents = !payload.allowShorter && incomingEvents.length < nextEvents.length ? nextEvents : incomingEvents;
     nextStatus = payload.status || "live";
     nextSummary = payload.summary || nextSummary;
     nextSetupSnapshot = setupSnapshot || nextSetupSnapshot;
@@ -991,9 +1001,9 @@ function appendLiveEvent(event, summary = null, gameId = "") {
   writeLiveEvents({ operation: "append", event, ...(summary ? { summary } : {}), ...(gameId ? { gameId } : {}) });
 }
 
-function replaceLiveEvents(events = [], setupSnapshot = null, status = "live", summary = null, gameId = "") {
+function replaceLiveEvents(events = [], setupSnapshot = null, status = "live", summary = null, gameId = "", options = {}) {
   const nextSummary = summary || makeLiveGameSummary(events, setupSnapshot || {}, status);
-  writeLiveEvents({ operation: "replace", status, events, summary: nextSummary, ...(setupSnapshot ? { setupSnapshot } : {}), ...(gameId ? { gameId } : {}) });
+  writeLiveEvents({ operation: "replace", status, events, summary: nextSummary, ...(options.allowShorter ? { allowShorter: true } : {}), ...(setupSnapshot ? { setupSnapshot } : {}), ...(gameId ? { gameId } : {}) });
 }
 
 function clearLiveEvents(gameId = "") {
@@ -3909,12 +3919,12 @@ function BattingStatsTable({ stats, compact = false, summaryLabel = "League Avg 
   const colSpan = currentGameView ? 9 : showGP ? 19 : 18;
   return (
     <div className="overflow-x-auto rounded-xl border bg-white">
-      <table className={`${currentGameView ? "min-w-[760px]" : "min-w-[1240px]"} table-fixed text-left text-sm`}>
+      <table className={`${currentGameView ? "min-w-[430px] text-xs sm:text-sm" : "min-w-[1120px] text-sm"} table-fixed text-left`}>
         <thead className="bg-slate-50 text-xs uppercase text-slate-500">
           <tr>
-            <th className="sticky left-0 z-10 w-44 bg-slate-50 px-3 py-2">Player</th>
+            <th className={`sticky left-0 z-10 bg-slate-50 py-2 ${currentGameView ? "w-24 px-1.5 sm:w-36 sm:px-2" : "w-28 px-2 sm:w-40 sm:px-3"}`}>Player</th>
             {currentGameView ? (
-              <><th className="w-14 px-3 py-2">AB</th><th className="w-14 px-3 py-2">R</th><th className="w-14 px-3 py-2">H</th><th className="w-14 px-3 py-2">RBI</th><th className="w-14 px-3 py-2">HR</th><th className="w-14 px-3 py-2">BB</th><th className="w-14 px-3 py-2">K</th><th className="w-14 px-3 py-2">LOB</th></>
+              <><th className="w-10 px-1 py-2 text-center">AB</th><th className="w-10 px-1 py-2 text-center">R</th><th className="w-10 px-1 py-2 text-center">H</th><th className="w-11 px-1 py-2 text-center">RBI</th><th className="w-10 px-1 py-2 text-center">HR</th><th className="w-10 px-1 py-2 text-center">BB</th><th className="w-9 px-1 py-2 text-center">K</th><th className="w-11 px-1 py-2 text-center">LOB</th></>
             ) : (
               <>{showGP && <th className="w-14 px-3 py-2">GP</th>}<th className="w-14 px-3 py-2">PA</th><th className="w-14 px-3 py-2">AB</th><th className="w-16 px-3 py-2">Runs</th><th className="w-14 px-3 py-2">RBI</th><th className="w-14 px-3 py-2">Hits</th><th className="w-14 px-3 py-2">2B</th><th className="w-14 px-3 py-2">3B</th><th className="w-14 px-3 py-2">HR</th><th className="w-14 px-3 py-2">BB</th><th className="w-14 px-3 py-2">SO</th><th className="w-14 px-3 py-2">LOB</th><th className="w-16 px-3 py-2">AVG</th><th className="w-16 px-3 py-2">OBP</th><th className="w-16 px-3 py-2">SLG</th><th className="w-16 px-3 py-2">OPS</th><th className="w-20 px-3 py-2">HR-PA</th><th className="w-20 px-3 py-2">SO-PA</th></>
             )}
@@ -3925,9 +3935,9 @@ function BattingStatsTable({ stats, compact = false, summaryLabel = "League Avg 
             const gamesPlayed = stat.GP || (Object.values(stat || {}).some((value) => Number(value) > 0) ? 1 : 0);
             return (
               <tr key={player} className="border-t">
-                <td className="sticky left-0 z-10 bg-white px-3 py-2 font-medium">{player}</td>
+                <td className={`sticky left-0 z-10 truncate bg-white py-2 font-medium ${currentGameView ? "px-1.5 sm:px-2" : "px-2 sm:px-3"}`} title={player}>{player}</td>
                 {currentGameView ? (
-                  <><td className="px-3 py-2">{stat.AB || 0}</td><td className="px-3 py-2">{stat.R || 0}</td><td className="px-3 py-2">{stat.H || 0}</td><td className="px-3 py-2">{stat.RBI || 0}</td><td className="px-3 py-2">{stat.HR || 0}</td><td className="px-3 py-2">{stat.BB || 0}</td><td className="px-3 py-2">{stat.K || 0}</td><td className="px-3 py-2">{stat.LOB || 0}</td></>
+                  <><td className="px-1 py-2 text-center">{stat.AB || 0}</td><td className="px-1 py-2 text-center">{stat.R || 0}</td><td className="px-1 py-2 text-center">{stat.H || 0}</td><td className="px-1 py-2 text-center">{stat.RBI || 0}</td><td className="px-1 py-2 text-center">{stat.HR || 0}</td><td className="px-1 py-2 text-center">{stat.BB || 0}</td><td className="px-1 py-2 text-center">{stat.K || 0}</td><td className="px-1 py-2 text-center">{stat.LOB || 0}</td></>
                 ) : (
                   <>{showGP && <td className="px-3 py-2">{gamesPlayed}</td>}<td className="px-3 py-2">{stat.PA || 0}</td><td className="px-3 py-2">{stat.AB || 0}</td><td className="px-3 py-2">{stat.R || 0}</td><td className="px-3 py-2">{stat.RBI || 0}</td><td className="px-3 py-2">{stat.H || 0}</td><td className="px-3 py-2">{stat.D2 || 0}</td><td className="px-3 py-2">{stat.D3 || 0}</td><td className="px-3 py-2">{stat.HR || 0}</td><td className="px-3 py-2">{stat.BB || 0}</td><td className="px-3 py-2">{stat.K || 0}</td><td className="px-3 py-2">{stat.LOB || 0}</td><td className="px-3 py-2">{average(stat.H || 0, stat.AB || 0)}</td><td className="px-3 py-2">{obp(stat)}</td><td className="px-3 py-2">{slg(stat)}</td><td className="px-3 py-2">{ops(stat)}</td><td className="px-3 py-2">{hrPerPa(stat)}</td><td className="px-3 py-2">{soPerPa(stat)}</td></>
                 )}
@@ -3936,9 +3946,9 @@ function BattingStatsTable({ stats, compact = false, summaryLabel = "League Avg 
           })}
           {showAverageRow && (
             <tr className="border-t-2 bg-slate-100 font-black">
-              <td className="sticky left-0 z-10 bg-slate-100 px-3 py-2">{summaryLabel}</td>
+              <td className={`sticky left-0 z-10 truncate bg-slate-100 py-2 ${currentGameView ? "px-1.5 sm:px-2" : "px-2 sm:px-3"}`} title={summaryLabel}>{summaryLabel}</td>
               {currentGameView ? (
-                <><td className="px-3 py-2">{averageRow.AB}</td><td className="px-3 py-2">{averageRow.R}</td><td className="px-3 py-2">{averageRow.H}</td><td className="px-3 py-2">{averageRow.RBI}</td><td className="px-3 py-2">{averageRow.HR}</td><td className="px-3 py-2">{averageRow.BB}</td><td className="px-3 py-2">{averageRow.K}</td><td className="px-3 py-2">{averageRow.LOB}</td></>
+                <><td className="px-1 py-2 text-center">{averageRow.AB}</td><td className="px-1 py-2 text-center">{averageRow.R}</td><td className="px-1 py-2 text-center">{averageRow.H}</td><td className="px-1 py-2 text-center">{averageRow.RBI}</td><td className="px-1 py-2 text-center">{averageRow.HR}</td><td className="px-1 py-2 text-center">{averageRow.BB}</td><td className="px-1 py-2 text-center">{averageRow.K}</td><td className="px-1 py-2 text-center">{averageRow.LOB}</td></>
               ) : (
                 <>{showGP && <td className="px-3 py-2">{averageRow.GP}</td>}<td className="px-3 py-2">{averageRow.PA}</td><td className="px-3 py-2">{averageRow.AB}</td><td className="px-3 py-2">{averageRow.R}</td><td className="px-3 py-2">{averageRow.RBI}</td><td className="px-3 py-2">{averageRow.H}</td><td className="px-3 py-2">{averageRow.D2}</td><td className="px-3 py-2">{averageRow.D3}</td><td className="px-3 py-2">{averageRow.HR}</td><td className="px-3 py-2">{averageRow.BB}</td><td className="px-3 py-2">{averageRow.K}</td><td className="px-3 py-2">{averageRow.LOB}</td><td className="px-3 py-2">{average(averageRow.H, averageRow.AB)}</td><td className="px-3 py-2">{obp(averageRow)}</td><td className="px-3 py-2">{slg(averageRow)}</td><td className="px-3 py-2">{ops(averageRow)}</td><td className="px-3 py-2">{hrPerPa(averageRow)}</td><td className="px-3 py-2">{soPerPa(averageRow)}</td></>
               )}
@@ -3952,18 +3962,22 @@ function BattingStatsTable({ stats, compact = false, summaryLabel = "League Avg 
   );
 }
 
-function PitchingStatsTable({ stats, compact = false, summaryLabel = "League Avg / Total", showGP = true }) {
+function PitchingStatsTable({ stats, compact = false, summaryLabel = "League Avg / Total", showGP = true, currentGameView = false }) {
   const rows = pitchingRowsFromStats(stats);
   const displayRows = compact ? rows.slice(0, 4) : rows;
   const averageRow = aggregatePitchingStats(stats);
   const showAverageRow = rows.length > 0;
   return (
     <div className="overflow-x-auto rounded-xl border bg-white">
-      <table className="min-w-[860px] table-fixed text-left text-sm">
+      <table className={`${currentGameView ? "min-w-[360px] text-xs sm:text-sm" : "min-w-[760px] text-sm"} table-fixed text-left`}>
         <thead className="bg-slate-50 text-xs uppercase text-slate-500">
           <tr>
-            <th className="sticky left-0 z-10 w-44 bg-slate-50 px-3 py-2">Pitcher</th>
-            {showGP && <th className="w-14 px-3 py-2">GP</th>}<th className="w-14 px-3 py-2">AB</th><th className="w-16 px-3 py-2">IP</th><th className="w-14 px-3 py-2">HA</th><th className="w-14 px-3 py-2">BB</th><th className="w-14 px-3 py-2">K</th><th className="w-16 px-3 py-2">HRA</th><th className="w-14 px-3 py-2">R</th><th className="w-16 px-3 py-2">UER</th><th className="w-14 px-3 py-2">ER</th><th className="w-16 px-3 py-2">ERA</th><th className="w-16 px-3 py-2">WHIP</th><th className="w-16 px-3 py-2">K:BB</th><th className="w-16 px-3 py-2">LOB%</th>
+            <th className={`sticky left-0 z-10 bg-slate-50 py-2 ${currentGameView ? "w-24 px-1.5 sm:w-36 sm:px-2" : "w-28 px-2 sm:w-40 sm:px-3"}`}>Pitcher</th>
+            {currentGameView ? (
+              <><th className="w-12 px-1 py-2 text-center">IP</th><th className="w-9 px-1 py-2 text-center">R</th><th className="w-9 px-1 py-2 text-center">H</th><th className="w-10 px-1 py-2 text-center">BB</th><th className="w-9 px-1 py-2 text-center">K</th><th className="w-10 px-1 py-2 text-center">HR</th></>
+            ) : (
+              <>{showGP && <th className="w-14 px-3 py-2">GP</th>}<th className="w-14 px-3 py-2">AB</th><th className="w-16 px-3 py-2">IP</th><th className="w-14 px-3 py-2">HA</th><th className="w-14 px-3 py-2">BB</th><th className="w-14 px-3 py-2">K</th><th className="w-16 px-3 py-2">HRA</th><th className="w-14 px-3 py-2">R</th><th className="w-16 px-3 py-2">UER</th><th className="w-14 px-3 py-2">ER</th><th className="w-16 px-3 py-2">ERA</th><th className="w-16 px-3 py-2">WHIP</th><th className="w-16 px-3 py-2">K:BB</th><th className="w-16 px-3 py-2">LOB%</th></>
+            )}
           </tr>
         </thead>
         <tbody>
@@ -3971,47 +3985,57 @@ function PitchingStatsTable({ stats, compact = false, summaryLabel = "League Avg
             const gamesPlayed = stat.GP || (Object.values(stat || {}).some((value) => Number(value) > 0) ? 1 : 0);
             return (
               <tr key={player} className="border-t">
-                <td className="sticky left-0 z-10 bg-white px-3 py-2 font-medium">{player}</td>
-                {showGP && <td className="px-3 py-2">{gamesPlayed}</td>}
-                <td className="px-3 py-2">{stat.AB || 0}</td>
-                <td className="px-3 py-2">{formatInningsPitched(stat.OUTS || 0)}</td>
-                <td className="px-3 py-2">{stat.H || 0}</td>
-                <td className="px-3 py-2">{stat.BB || 0}</td>
-                <td className="px-3 py-2">{stat.K || 0}</td>
-                <td className="px-3 py-2">{stat.HR || 0}</td>
-                <td className="px-3 py-2">{stat.R || 0}</td>
-                <td className="px-3 py-2">{stat.UER || 0}</td>
-                <td className="px-3 py-2">{stat.ER ?? stat.R ?? 0}</td>
-                <td className="px-3 py-2">{era(stat)}</td>
-                <td className="px-3 py-2">{whip(stat)}</td>
-                <td className="px-3 py-2">{kToBb(stat)}</td>
-                <td className="px-3 py-2">{pitcherLobPercent(stat)}</td>
+                <td className={`sticky left-0 z-10 truncate bg-white py-2 font-medium ${currentGameView ? "px-1.5 sm:px-2" : "px-2 sm:px-3"}`} title={player}>{player}</td>
+                {currentGameView ? (
+                  <><td className="px-1 py-2 text-center">{formatInningsPitched(stat.OUTS || 0)}</td><td className="px-1 py-2 text-center">{stat.R || 0}</td><td className="px-1 py-2 text-center">{stat.H || 0}</td><td className="px-1 py-2 text-center">{stat.BB || 0}</td><td className="px-1 py-2 text-center">{stat.K || 0}</td><td className="px-1 py-2 text-center">{stat.HR || 0}</td></>
+                ) : (
+                  <>{showGP && <td className="px-3 py-2">{gamesPlayed}</td>}<td className="px-3 py-2">{stat.AB || 0}</td><td className="px-3 py-2">{formatInningsPitched(stat.OUTS || 0)}</td><td className="px-3 py-2">{stat.H || 0}</td><td className="px-3 py-2">{stat.BB || 0}</td><td className="px-3 py-2">{stat.K || 0}</td><td className="px-3 py-2">{stat.HR || 0}</td><td className="px-3 py-2">{stat.R || 0}</td><td className="px-3 py-2">{stat.UER || 0}</td><td className="px-3 py-2">{stat.ER ?? stat.R ?? 0}</td><td className="px-3 py-2">{era(stat)}</td><td className="px-3 py-2">{whip(stat)}</td><td className="px-3 py-2">{kToBb(stat)}</td><td className="px-3 py-2">{pitcherLobPercent(stat)}</td></>
+                )}
               </tr>
             );
           })}
           {showAverageRow && (
             <tr className="border-t-2 bg-slate-100 font-black">
-              <td className="sticky left-0 z-10 bg-slate-100 px-3 py-2">{summaryLabel}</td>
-              {showGP && <td className="px-3 py-2">{averageRow.GP}</td>}
-              <td className="px-3 py-2">{averageRow.AB}</td>
-              <td className="px-3 py-2">{formatInningsPitched(averageRow.OUTS || 0)}</td>
-              <td className="px-3 py-2">{averageRow.H}</td>
-              <td className="px-3 py-2">{averageRow.BB}</td>
-              <td className="px-3 py-2">{averageRow.K}</td>
-              <td className="px-3 py-2">{averageRow.HR}</td>
-              <td className="px-3 py-2">{averageRow.R}</td>
-              <td className="px-3 py-2">{averageRow.UER}</td>
-              <td className="px-3 py-2">{averageRow.ER}</td>
-              <td className="px-3 py-2">{era(averageRow)}</td>
-              <td className="px-3 py-2">{whip(averageRow)}</td>
-              <td className="px-3 py-2">{kToBb(averageRow)}</td>
-              <td className="px-3 py-2">{pitcherLobPercent(averageRow)}</td>
+              <td className={`sticky left-0 z-10 truncate bg-slate-100 py-2 ${currentGameView ? "px-1.5 sm:px-2" : "px-2 sm:px-3"}`} title={summaryLabel}>{summaryLabel}</td>
+              {currentGameView ? (
+                <><td className="px-1 py-2 text-center">{formatInningsPitched(averageRow.OUTS || 0)}</td><td className="px-1 py-2 text-center">{averageRow.R}</td><td className="px-1 py-2 text-center">{averageRow.H}</td><td className="px-1 py-2 text-center">{averageRow.BB}</td><td className="px-1 py-2 text-center">{averageRow.K}</td><td className="px-1 py-2 text-center">{averageRow.HR}</td></>
+              ) : (
+                <>{showGP && <td className="px-3 py-2">{averageRow.GP}</td>}<td className="px-3 py-2">{averageRow.AB}</td><td className="px-3 py-2">{formatInningsPitched(averageRow.OUTS || 0)}</td><td className="px-3 py-2">{averageRow.H}</td><td className="px-3 py-2">{averageRow.BB}</td><td className="px-3 py-2">{averageRow.K}</td><td className="px-3 py-2">{averageRow.HR}</td><td className="px-3 py-2">{averageRow.R}</td><td className="px-3 py-2">{averageRow.UER}</td><td className="px-3 py-2">{averageRow.ER}</td><td className="px-3 py-2">{era(averageRow)}</td><td className="px-3 py-2">{whip(averageRow)}</td><td className="px-3 py-2">{kToBb(averageRow)}</td><td className="px-3 py-2">{pitcherLobPercent(averageRow)}</td></>
+              )}
             </tr>
           )}
-          {rows.length === 0 && <tr><td className="px-3 py-3 text-slate-500" colSpan="15">No pitching stats.</td></tr>}
+          {rows.length === 0 && <tr><td className="px-3 py-3 text-slate-500" colSpan={currentGameView ? 7 : 15}>No pitching stats.</td></tr>}
         </tbody>
       </table>
       {compact && rows.length > displayRows.length && <p className="p-3 text-xs text-slate-500">Showing first {displayRows.length} of {rows.length} pitchers.</p>}
+    </div>
+  );
+}
+
+function TeamStatSummaryCards({ teams = [] }) {
+  return (
+    <div className="grid gap-2 sm:grid-cols-2">
+      {teams.map(({ name, battingStats = {}, pitchingStats = {} }) => {
+        const battingTotal = aggregateBattingStats(battingStats);
+        const pitchingTotal = aggregatePitchingStats(pitchingStats);
+        return (
+          <div key={name} className="rounded-xl border bg-slate-50 p-3">
+            <div className="truncate text-sm font-black">{name}</div>
+            <div className="mt-2 grid grid-cols-2 gap-2 text-xs">
+              <div className="rounded-lg bg-white p-2">
+                <div className="font-black uppercase text-slate-500">Hitting</div>
+                <div className="mt-1 font-semibold">{battingTotal.H || 0}-{battingTotal.AB || 0} · {average(battingTotal.H || 0, battingTotal.AB || 0)}</div>
+                <div className="text-slate-500">{battingTotal.R || 0} R · {battingTotal.RBI || 0} RBI · {battingTotal.HR || 0} HR</div>
+              </div>
+              <div className="rounded-lg bg-white p-2">
+                <div className="font-black uppercase text-slate-500">Pitching</div>
+                <div className="mt-1 font-semibold">{formatInningsPitched(pitchingTotal.OUTS || 0)} IP · {pitchingTotal.R || 0} R</div>
+                <div className="text-slate-500">{pitchingTotal.H || 0} H · {pitchingTotal.BB || 0} BB · {pitchingTotal.K || 0} K</div>
+              </div>
+            </div>
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -4021,8 +4045,6 @@ function TeamStatsSection({ awayTeam, homeTeam, awayPlayers, homePlayers, battin
   const homeBattingStats = statsForPlayers(battingStats, homePlayers);
   const awayPitchingStats = statsForPlayers(pitchingStats, awayPlayers);
   const homePitchingStats = statsForPlayers(pitchingStats, homePlayers);
-  const combinedBattingStats = { ...awayBattingStats, ...homeBattingStats };
-  const combinedPitchingStats = { ...awayPitchingStats, ...homePitchingStats };
 
   return (
     <div className="space-y-4">
@@ -4032,11 +4054,11 @@ function TeamStatsSection({ awayTeam, homeTeam, awayPlayers, homePlayers, battin
           <div className="w-full max-w-full space-y-4 overflow-hidden">
             <div>
               <h3 className="mb-2 text-sm font-black uppercase text-slate-500">{awayTeam} Hitting</h3>
-              <BattingStatsTable stats={awayBattingStats} compact={compact} subIndex={subIndex} summaryLabel="Team Avg / Total" showGP={showGP} currentGameView={currentGameView} />
+              <BattingStatsTable stats={awayBattingStats} compact={compact} subIndex={subIndex} summaryLabel="Team Total" showGP={showGP} currentGameView={currentGameView} />
             </div>
             <div>
               <h3 className="mb-2 text-sm font-black uppercase text-slate-500">{homeTeam} Hitting</h3>
-              <BattingStatsTable stats={homeBattingStats} compact={compact} subIndex={subIndex} summaryLabel="Team Avg / Total" showGP={showGP} currentGameView={currentGameView} />
+              <BattingStatsTable stats={homeBattingStats} compact={compact} subIndex={subIndex} summaryLabel="Team Total" showGP={showGP} currentGameView={currentGameView} />
             </div>
           </div>
         </div>
@@ -4047,11 +4069,11 @@ function TeamStatsSection({ awayTeam, homeTeam, awayPlayers, homePlayers, battin
           <div className="space-y-4">
             <div>
               <h3 className="mb-2 text-sm font-black uppercase text-slate-500">{awayTeam} Pitching</h3>
-              <PitchingStatsTable stats={awayPitchingStats} compact={compact} subIndex={subIndex} summaryLabel="Team Avg / Total" showGP={showGP} />
+              <PitchingStatsTable stats={awayPitchingStats} compact={compact} subIndex={subIndex} summaryLabel="Team Total" showGP={showGP} currentGameView={currentGameView} />
             </div>
             <div>
               <h3 className="mb-2 text-sm font-black uppercase text-slate-500">{homeTeam} Pitching</h3>
-              <PitchingStatsTable stats={homePitchingStats} compact={compact} subIndex={subIndex} summaryLabel="Team Avg / Total" showGP={showGP} />
+              <PitchingStatsTable stats={homePitchingStats} compact={compact} subIndex={subIndex} summaryLabel="Team Total" showGP={showGP} currentGameView={currentGameView} />
             </div>
           </div>
         </div>
@@ -4180,48 +4202,67 @@ function LeadersSection({ battingStats, pitchingStats, legacyPoints = {}, subCou
   );
 }
 
-function LivePlayerStatsPanel({ battingTeamName, defensiveTeamName, currentBatter, currentPitcher, currentBatterStats, currentPitcherStats, battingTeamPlayers, defensiveTeamPlayers, battingStats, pitchingStats, subIndex = {}, currentBatterProfile = null, currentPitcherProfile = null }) {
-  const battingTeamStats = statsForPlayers(battingStats, battingTeamPlayers);
-  const defensivePitchingStats = statsForPlayers(pitchingStats, defensiveTeamPlayers);
+function LivePlayerStatsPanel({ awayTeamName, homeTeamName, currentBatter, currentPitcher, currentBatterStats, currentPitcherStats, awayPlayers, homePlayers, battingStats, pitchingStats, subIndex = {}, currentBatterProfile = null, currentPitcherProfile = null }) {
+  const awayBattingStats = statsForPlayers(battingStats, awayPlayers);
+  const homeBattingStats = statsForPlayers(battingStats, homePlayers);
+  const awayPitchingStats = statsForPlayers(pitchingStats, awayPlayers);
+  const homePitchingStats = statsForPlayers(pitchingStats, homePlayers);
 
   return (
     <Card>
-      <div className="p-5">
-        <h2 className="mb-3 text-xl font-bold">Player Stats</h2>
-        <div className="grid gap-2 sm:grid-cols-2">
-          <div className="rounded-xl border bg-slate-50 p-3">
-            <div className="flex items-center gap-3">
-              <PlayerAvatar playerName={currentBatter} profile={currentBatterProfile} />
-              <div>
-                <div className="text-xs font-semibold uppercase text-slate-500">Current Batter</div>
-                <div className="mt-1 text-sm font-black">{currentBatter}</div>
-                <div className="mt-1 text-xs text-slate-600">{formatBattingLine(currentBatterStats)}</div>
+      <details className="group">
+        <summary className="flex cursor-pointer list-none items-center justify-between gap-3 p-5">
+          <div>
+            <h2 className="text-xl font-bold">Player Stats</h2>
+            <p className="text-sm text-slate-500">Current matchup and team hitting/pitching totals.</p>
+          </div>
+          <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-bold uppercase text-slate-500 group-open:hidden">Open</span>
+          <span className="hidden rounded-full bg-slate-900 px-3 py-1 text-xs font-bold uppercase text-white group-open:inline-block">Close</span>
+        </summary>
+        <div className="border-t p-5 pt-4">
+          <div className="grid gap-2 sm:grid-cols-2">
+            <div className="rounded-xl border bg-slate-50 p-3">
+              <div className="flex items-center gap-3">
+                <PlayerAvatar playerName={currentBatter} profile={currentBatterProfile} />
+                <div>
+                  <div className="text-xs font-semibold uppercase text-slate-500">Current Batter</div>
+                  <div className="mt-1 text-sm font-black">{currentBatter}</div>
+                  <div className="mt-1 text-xs text-slate-600">{formatBattingLine(currentBatterStats)}</div>
+                </div>
+              </div>
+            </div>
+            <div className="rounded-xl border bg-slate-50 p-3">
+              <div className="flex items-center gap-3">
+                <PlayerAvatar playerName={currentPitcher} profile={currentPitcherProfile} />
+                <div>
+                  <div className="text-xs font-semibold uppercase text-slate-500">Current Pitcher</div>
+                  <div className="mt-1 text-sm font-black">{currentPitcher}</div>
+                  <div className="mt-1 text-xs text-slate-600">{formatPitchingLine(currentPitcherStats)}</div>
+                </div>
               </div>
             </div>
           </div>
-          <div className="rounded-xl border bg-slate-50 p-3">
-            <div className="flex items-center gap-3">
-              <PlayerAvatar playerName={currentPitcher} profile={currentPitcherProfile} />
-              <div>
-                <div className="text-xs font-semibold uppercase text-slate-500">Current Pitcher</div>
-                <div className="mt-1 text-sm font-black">{currentPitcher}</div>
-                <div className="mt-1 text-xs text-slate-600">{formatPitchingLine(currentPitcherStats)}</div>
-              </div>
-            </div>
-          </div>
-        </div>
 
-        <div className="mt-4 space-y-4">
-          <div>
-            <h3 className="mb-2 text-sm font-black uppercase text-slate-500">{battingTeamName} Hitting</h3>
-            <BattingStatsTable stats={battingTeamStats} compact subIndex={subIndex} showGP={false} currentGameView />
-          </div>
-          <div>
-            <h3 className="mb-2 text-sm font-black uppercase text-slate-500">{defensiveTeamName} Pitching</h3>
-            <PitchingStatsTable stats={defensivePitchingStats} compact subIndex={subIndex} showGP={false} />
+          <div className="mt-4 space-y-4">
+            <div>
+              <h3 className="mb-2 text-sm font-black uppercase text-slate-500">{awayTeamName} Hitting</h3>
+              <BattingStatsTable stats={awayBattingStats} compact subIndex={subIndex} summaryLabel="Team Total" showGP={false} currentGameView />
+            </div>
+            <div>
+              <h3 className="mb-2 text-sm font-black uppercase text-slate-500">{awayTeamName} Pitching</h3>
+              <PitchingStatsTable stats={awayPitchingStats} compact subIndex={subIndex} summaryLabel="Team Total" showGP={false} currentGameView />
+            </div>
+            <div>
+              <h3 className="mb-2 text-sm font-black uppercase text-slate-500">{homeTeamName} Hitting</h3>
+              <BattingStatsTable stats={homeBattingStats} compact subIndex={subIndex} summaryLabel="Team Total" showGP={false} currentGameView />
+            </div>
+            <div>
+              <h3 className="mb-2 text-sm font-black uppercase text-slate-500">{homeTeamName} Pitching</h3>
+              <PitchingStatsTable stats={homePitchingStats} compact subIndex={subIndex} summaryLabel="Team Total" showGP={false} currentGameView />
+            </div>
           </div>
         </div>
-      </div>
+      </details>
     </Card>
   );
 }
@@ -4420,6 +4461,7 @@ export default function WiffleScoringPrototype() {
   const [activeSavedGameId, setActiveSavedGameId] = useState(null);
   const [activeLiveGameId, setActiveLiveGameId] = useState(DEFAULT_LIVE_GAME_ID);
   const [liveGamesIndex, setLiveGamesIndex] = useState([]);
+  const [scoreboardFrozen, setScoreboardFrozen] = useState(true);
   const [repeatBatter, setRepeatBatter] = useState(false);
   const [endHalf, setEndHalf] = useState(false);
   const [manualMode, setManualMode] = useState(false);
@@ -4637,7 +4679,8 @@ export default function WiffleScoringPrototype() {
     (liveGamesIndex || []).forEach((liveGame) => {
       if (!liveGame?.id) return;
       const isCurrentLocalGame = liveGame.id === activeLiveGameId && hasCurrentLocalGame;
-      if (!savedLiveGameIds.has(liveGame.id) && !isCurrentLocalGame) return;
+      const isServerLiveGame = liveGame.status === "started" || liveGame.status === "paused" || liveGame.status === "live" || liveGame.status === "final";
+      if (!savedLiveGameIds.has(liveGame.id) && !isCurrentLocalGame && !isServerLiveGame) return;
       const savedOption = optionsById.get(liveGame.id);
       optionsById.set(liveGame.id, {
         ...(savedOption || {}),
@@ -4664,6 +4707,7 @@ export default function WiffleScoringPrototype() {
     }
     return [...optionsById.values()].sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")) || String(a.label || "").localeCompare(String(b.label || "")));
   }, [previousGames, liveGamesIndex, activeLiveGameId, gameStarted, activeSavedGameId, events, awayTeam, homeTeam, gamePaused, extraRunnerRules, battingOrder, ghostRunnersCountAsRbi, gameInnings]);
+  const canOpenScorePage = Boolean(gameStarted || events.length > 0 || activeSavedGameId || activeGameOptions.length > 0);
   useEffect(() => {
     const hasSavedLiveGames = (previousGames || []).some((savedGame) => savedGame.status === "live" || savedGame.status === "paused");
     const hasCurrentLocalGame = Boolean(gameStarted || activeSavedGameId || events.length > 0);
@@ -5312,9 +5356,7 @@ export default function WiffleScoringPrototype() {
         const rawLiveEventState = await response.json();
         if ((activeLiveGameIdRef.current || DEFAULT_LIVE_GAME_ID) !== requestedGameId) return;
         const rememberedLiveEventState = getRememberedLiveEventState(requestedGameId);
-        const rememberedEventCount = Array.isArray(rememberedLiveEventState?.events) ? rememberedLiveEventState.events.length : 0;
-        const remoteEventCount = Array.isArray(rawLiveEventState?.events) ? rawLiveEventState.events.length : 0;
-        const liveEventState = rememberedEventCount > remoteEventCount
+        const liveEventState = shouldPreferRememberedLiveEventState(rememberedLiveEventState, rawLiveEventState)
           ? { ...rawLiveEventState, ...rememberedLiveEventState, updatedAt: rememberedLiveEventState.updatedAt || rawLiveEventState?.updatedAt || "" }
           : rememberLiveEventState(requestedGameId, rawLiveEventState) || rawLiveEventState;
         const remoteEvents = Array.isArray(liveEventState?.events) ? liveEventState.events : [];
@@ -5347,16 +5389,16 @@ export default function WiffleScoringPrototype() {
           setActivePage("setup");
           return;
         }
-        const isActiveLiveStatus = liveStatus === "started" || liveStatus === "paused" || liveStatus === "live";
-        if (isActiveLiveStatus) {
+        const isViewableLiveStatus = liveStatus === "started" || liveStatus === "paused" || liveStatus === "live" || liveStatus === "final";
+        if (isViewableLiveStatus) {
           if ((activeLiveGameIdRef.current || DEFAULT_LIVE_GAME_ID) !== requestedGameId) return;
           if (!gameStarted) setGameStarted(true);
           setGamePaused(liveStatus === "paused");
           if (!setupEditingDuringGameRef.current) setSetupEditingDuringGame(false);
         }
-        if (isActiveLiveStatus) {
+        if (isViewableLiveStatus) {
           if ((activeLiveGameIdRef.current || DEFAULT_LIVE_GAME_ID) !== requestedGameId) return;
-          if (liveEventState?.setupSnapshot && !isRemoteSyncPaused()) {
+          if (liveEventState?.setupSnapshot && !setupEditingDuringGameRef.current) {
             applyPersistedState(liveEventState.setupSnapshot, { includeSessionState: false });
           }
           setEvents(remoteEvents);
@@ -8585,9 +8627,9 @@ export default function WiffleScoringPrototype() {
       createdAt: new Date().toLocaleTimeString(),
     };
 
-    const nextEvents = [...events, event];
+    const nextEvents = [...eventsRef.current, event];
     setEvents(nextEvents);
-    appendLiveEvent(event, makeLiveGameSummary(nextEvents, liveGameSetupSnapshot, "started"), getActiveLiveGameId());
+    replaceLiveEvents(nextEvents, liveGameSetupSnapshot, "started", null, getActiveLiveGameId());
     if (event.endHalf || game.outs + (event.outs || 0) >= 3) {
       maybeShowEndOfInningNotification(nextEvents, game, game.inning, game.half);
     }
@@ -8611,16 +8653,16 @@ export default function WiffleScoringPrototype() {
     if (game.status === "final" || scoringPaused) return;
     const event = { id: newId(), type: "score_adjustment", team, inning: game.inning, half: game.half, runs: amount, note: note || (amount > 0 ? "Bonus run" : "Run removed"), createdAt: new Date().toLocaleTimeString() };
     const nextEventsForSummary = [...eventsRef.current, event];
-    setEvents((prev) => [...prev, event]);
-    appendLiveEvent(event, makeLiveGameSummary(nextEventsForSummary, liveGameSetupSnapshot, "started"), getActiveLiveGameId());
+    setEvents(nextEventsForSummary);
+    replaceLiveEvents(nextEventsForSummary, liveGameSetupSnapshot, "started", null, getActiveLiveGameId());
     setNote("");
   }
 
   function addFieldRuleNote(rule, noteText) {
     const event = { id: newId(), type: "field_rule", ruleName: rule.name, actions: getFieldRuleActions(rule), team: battingTeam, inning: game.inning, half: game.half, batter: currentBatter, note: noteText || `${rule.name}: ${fieldRuleActionSummary(rule)}`, createdAt: new Date().toLocaleTimeString() };
     const nextEventsForSummary = [...eventsRef.current, event];
-    setEvents((prev) => [...prev, event]);
-    appendLiveEvent(event, makeLiveGameSummary(nextEventsForSummary, liveGameSetupSnapshot, "started"), getActiveLiveGameId());
+    setEvents(nextEventsForSummary);
+    replaceLiveEvents(nextEventsForSummary, liveGameSetupSnapshot, "started", null, getActiveLiveGameId());
   }
 
   function applyFieldRule(rule) {
@@ -8644,8 +8686,8 @@ export default function WiffleScoringPrototype() {
       if (rule.countBonusRunsAsRbi) {
         const event = { id: newId(), type: "rbi_adjustment", team: battingTeam, inning: game.inning, half: game.half, batter: currentBatter, rbi: runs, note: `${rule.name || "Field Rule"}: ${runs} bonus RBI`, createdAt: new Date().toLocaleTimeString() };
         const nextEventsForSummary = [...eventsRef.current, event];
-        setEvents((prev) => [...prev, event]);
-        appendLiveEvent(event, makeLiveGameSummary(nextEventsForSummary, liveGameSetupSnapshot, "started"), getActiveLiveGameId());
+        setEvents(nextEventsForSummary);
+        replaceLiveEvents(nextEventsForSummary, liveGameSetupSnapshot, "started", null, getActiveLiveGameId());
       }
       noteParts.push(`${runs > 0 ? "+" : ""}${runs} bonus run for batting team${rule.countBonusRunsAsRbi ? " with RBI" : " with no RBI"}`);
     }
@@ -8670,7 +8712,7 @@ export default function WiffleScoringPrototype() {
     setEvents((prev) => {
       if (prev.length === 0) return prev;
       const nextEvents = prev.slice(0, -1);
-      replaceLiveEvents(nextEvents, liveGameSetupSnapshot, gamePaused ? "paused" : "started", null, getActiveLiveGameId());
+      replaceLiveEvents(nextEvents, liveGameSetupSnapshot, gamePaused ? "paused" : "started", null, getActiveLiveGameId(), { allowShorter: true });
       if (activeSavedGameId) {
         const snapshot = makeGameArchiveEntry(nextEvents, activeSavedGameId);
         setPreviousGames((previous) => previous.map((savedGame) => (savedGame.id === activeSavedGameId ? snapshot : savedGame)));
@@ -8711,7 +8753,7 @@ export default function WiffleScoringPrototype() {
 
   function resetGame() {
     setEvents([]);
-    replaceLiveEvents([], liveGameSetupSnapshot, "started", null, getActiveLiveGameId());
+    replaceLiveEvents([], liveGameSetupSnapshot, "started", null, getActiveLiveGameId(), { allowShorter: true });
     setArchivedFinalEventId(null);
     setActiveSavedGameId(null);
     setManualRuns(0);
@@ -9006,7 +9048,18 @@ export default function WiffleScoringPrototype() {
   function goToScorePage() {
     if ((activePage === "league" || activePage === "rules") && !confirmLeagueDraftExit()) return;
     setSetupAttempted(true);
-    if (gameStarted || events.length > 0 || activeSavedGameId || game.status === "final") setActivePage("score");
+    if (gameStarted || events.length > 0 || activeSavedGameId || game.status === "final") {
+      setActivePage("score");
+      return;
+    }
+    if (activeGameOptions.length > 0) {
+      const selectedLiveGame = activeGameOptions.find((liveGame) => liveGame.id === (activeLiveGameId || DEFAULT_LIVE_GAME_ID)) || activeGameOptions[0];
+      if (selectedLiveGame?.id) {
+        switchLiveGame(selectedLiveGame.id);
+        setActivePage("score");
+        return;
+      }
+    }
     else goToPage("setup");
   }
 
@@ -9026,9 +9079,7 @@ export default function WiffleScoringPrototype() {
       const rawLiveEventState = await response.json();
       if ((activeLiveGameIdRef.current || DEFAULT_LIVE_GAME_ID) !== safeGameId) return;
       const rememberedLiveEventState = getRememberedLiveEventState(safeGameId);
-      const rememberedEventCount = Array.isArray(rememberedLiveEventState?.events) ? rememberedLiveEventState.events.length : 0;
-      const remoteEventCount = Array.isArray(rawLiveEventState?.events) ? rawLiveEventState.events.length : 0;
-      const liveEventState = rememberedEventCount > remoteEventCount
+      const liveEventState = shouldPreferRememberedLiveEventState(rememberedLiveEventState, rawLiveEventState)
         ? { ...rawLiveEventState, ...rememberedLiveEventState, updatedAt: rememberedLiveEventState.updatedAt || rawLiveEventState?.updatedAt || "" }
         : rememberLiveEventState(safeGameId, rawLiveEventState) || rawLiveEventState;
       const hasRemoteLiveGame = Boolean(liveEventState?.status || liveEventState?.setupSnapshot || (Array.isArray(liveEventState?.events) && liveEventState.events.length > 0));
@@ -9039,7 +9090,7 @@ export default function WiffleScoringPrototype() {
       updateLiveGameIndexFromState(safeGameId, liveEventState);
       if (liveEventState?.setupSnapshot) applyPersistedState(liveEventState.setupSnapshot, { includeSessionState: false });
       setEvents(Array.isArray(liveEventState?.events) ? liveEventState.events : []);
-      setGameStarted(liveEventState?.status === "started" || liveEventState?.status === "paused" || liveEventState?.status === "live");
+      setGameStarted(liveEventState?.status === "started" || liveEventState?.status === "paused" || liveEventState?.status === "live" || liveEventState?.status === "final");
       setGamePaused(liveEventState?.status === "paused");
       setSetupEditingDuringGame(false);
       setActiveSavedGameId(localSavedGame?.id || safeGameId);
@@ -9066,9 +9117,9 @@ export default function WiffleScoringPrototype() {
   function endHalfInning() {
     if (game.status === "final" || scoringPaused) return;
     const event = { id: newId(), type: "end_half", inning: game.inning, half: game.half, createdAt: new Date().toLocaleTimeString() };
-    const nextEvents = [...events, event];
+    const nextEvents = [...eventsRef.current, event];
     setEvents(nextEvents);
-    appendLiveEvent(event, makeLiveGameSummary(nextEvents, liveGameSetupSnapshot, "started"), getActiveLiveGameId());
+    replaceLiveEvents(nextEvents, liveGameSetupSnapshot, "started", null, getActiveLiveGameId());
     maybeShowEndOfInningNotification(nextEvents, game, game.inning, game.half);
   }
 
@@ -9076,8 +9127,8 @@ export default function WiffleScoringPrototype() {
     if (game.status === "final" || scoringPaused) return;
     const event = { id: newId(), type: "finalize", inning: game.inning, half: game.half, createdAt: new Date().toLocaleTimeString() };
     const nextEvents = [...eventsRef.current, event];
-    setEvents((prev) => [...prev, event]);
-    appendLiveEvent(event, makeLiveGameSummary(nextEvents, liveGameSetupSnapshot, "final"), getActiveLiveGameId());
+    setEvents(nextEvents);
+    replaceLiveEvents(nextEvents, liveGameSetupSnapshot, "final", null, getActiveLiveGameId());
   }
 
   function exportCsv() {
@@ -9179,7 +9230,7 @@ export default function WiffleScoringPrototype() {
                 <p className="hidden text-sm text-slate-500 sm:block">Live scoring, line score, named baserunners, pitching order, and starter stats.</p>
               </div>
               <div className="mobile-nav flex w-full max-w-full items-center gap-2 overflow-x-auto pb-1 sm:flex-wrap sm:overflow-visible sm:pb-0">
-                <Button variant={activePage === "score" ? "primary" : "outline"} onClick={goToScorePage} disabled={!gameStarted && events.length === 0 && !activeSavedGameId}>Score Game</Button>
+                <Button variant={activePage === "score" ? "primary" : "outline"} onClick={goToScorePage} disabled={!canOpenScorePage}>Score Game</Button>
                 <Button variant={activePage === "setup" ? "primary" : "outline"} onClick={() => goToPage("setup")}>Setup</Button>
                 <Button variant={activePage === "league" ? "primary" : "outline"} onClick={() => goToPage("league")}>League</Button>
                 <Button variant={activePage === "players" ? "primary" : "outline"} onClick={() => goToPage("players")}>Players</Button>
@@ -9195,7 +9246,7 @@ export default function WiffleScoringPrototype() {
                 <Button variant={activePage === "rules" ? "primary" : "outline"} onClick={() => goToPage("rules")}>Rule Book</Button>
                 <span className="shrink-0 rounded-full bg-slate-900 px-3 py-1 text-xs font-bold uppercase text-white">{displayedGameStatus}</span>
               </div>
-              {!gameStarted && events.length === 0 && !activeSavedGameId && (
+              {!canOpenScorePage && (
                 <div className="mt-3 rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
                   <div className="font-bold">Score Game is locked until Start Game is selected.</div>
                   <div className="mt-1">{setupComplete ? "Go to Setup and click Start Game." : `Missing: ${setupErrors.join(" ")}`}</div>
@@ -9997,8 +10048,13 @@ export default function WiffleScoringPrototype() {
           </div>
         )}
 
-        {activePage === "score" && gameStarted && (
+        {activePage === "score" && canOpenScorePage && (
           <div className="space-y-4">
+            {!gameStarted && activeGameOptions.length > 0 && (
+              <div className="rounded-2xl border border-blue-200 bg-blue-50 p-4 text-sm font-semibold text-blue-900">
+                Loading selected live game...
+              </div>
+            )}
             {game.status === "final" && (
               <div className="animate-pulse rounded-2xl border-4 border-slate-900 bg-white p-4 text-center shadow-lg sm:rounded-3xl sm:p-6">
                 <div className="text-sm font-black uppercase tracking-[0.35em] text-slate-500">Final</div>
@@ -10025,25 +10081,37 @@ export default function WiffleScoringPrototype() {
                 </div>
               </div>
             )}
-            <Card>
-              <div className="p-3 sm:p-4">
-                <div className="grid w-full min-w-0 grid-cols-2 gap-2 lg:grid-cols-[1fr_auto_1fr] lg:items-center">
-                  <div className="order-1 min-w-0 rounded-xl bg-slate-50 p-3 text-center shadow-sm sm:rounded-2xl sm:p-4 lg:order-none">
-                    <div className="truncate text-xs font-semibold text-slate-500 sm:text-sm">{scoreDisplayAwayTeam}</div>
-                    <div className="text-4xl font-black tracking-tight sm:text-5xl md:text-6xl">{scoreDisplayAwayScore}</div>
+            <div className={scoreboardFrozen ? "sticky top-0 z-30 -mx-1 rounded-b-2xl bg-slate-100/95 px-1 pb-2 pt-1 backdrop-blur sm:top-2 sm:rounded-2xl" : ""}>
+              <Card>
+                <div className="p-3 sm:p-4">
+                  <div className="mb-2 flex items-center justify-between gap-2">
+                    <div className="text-xs font-black uppercase tracking-wide text-slate-500">Scoreboard</div>
+                    <button
+                      type="button"
+                      className="rounded-full px-2.5 py-1 text-[10px] font-bold uppercase text-slate-400 transition hover:bg-slate-100 hover:text-slate-600"
+                      onClick={() => setScoreboardFrozen((value) => !value)}
+                    >
+                      {scoreboardFrozen ? "Unfreeze" : "Freeze"}
+                    </button>
                   </div>
-                  <div className="order-3 col-span-2 grid min-w-0 grid-cols-3 gap-2 rounded-xl bg-slate-900 p-2 text-center text-white shadow-sm sm:rounded-2xl sm:p-3 lg:order-none lg:col-span-1 lg:min-w-80">
-                    <div><div className="text-[10px] uppercase text-slate-300">Inning</div><div className="text-base font-black sm:text-lg">{game.half === "top" ? "Top" : "Bot"} {game.inning}</div></div>
-                    <div><div className="text-[10px] uppercase text-slate-300">Outs</div><div className="text-base font-black sm:text-lg">{game.outs}</div></div>
-                    <div><div className="text-[10px] uppercase text-slate-300">Status</div><div className="text-base font-black uppercase sm:text-lg">{displayedGameStatus}</div></div>
-                  </div>
-                  <div className="order-2 min-w-0 rounded-xl bg-slate-50 p-3 text-center shadow-sm sm:rounded-2xl sm:p-4 lg:order-none">
-                    <div className="truncate text-xs font-semibold text-slate-500 sm:text-sm">{scoreDisplayHomeTeam}</div>
-                    <div className="text-4xl font-black tracking-tight sm:text-5xl md:text-6xl">{scoreDisplayHomeScore}</div>
+                  <div className="grid w-full min-w-0 grid-cols-2 gap-2 lg:grid-cols-[1fr_auto_1fr] lg:items-center">
+                    <div className="order-1 min-w-0 rounded-xl bg-slate-50 p-3 text-center shadow-sm sm:rounded-2xl sm:p-4 lg:order-none">
+                      <div className="truncate text-xs font-semibold text-slate-500 sm:text-sm">{scoreDisplayAwayTeam}</div>
+                      <div className="text-4xl font-black tracking-tight sm:text-5xl md:text-6xl">{scoreDisplayAwayScore}</div>
+                    </div>
+                    <div className="order-3 col-span-2 grid min-w-0 grid-cols-3 gap-2 rounded-xl bg-slate-900 p-2 text-center text-white shadow-sm sm:rounded-2xl sm:p-3 lg:order-none lg:col-span-1 lg:min-w-80">
+                      <div><div className="text-[10px] uppercase text-slate-300">Inning</div><div className="text-base font-black sm:text-lg">{game.half === "top" ? "Top" : "Bot"} {game.inning}</div></div>
+                      <div><div className="text-[10px] uppercase text-slate-300">Outs</div><div className="text-base font-black sm:text-lg">{game.outs}</div></div>
+                      <div><div className="text-[10px] uppercase text-slate-300">Status</div><div className="text-base font-black uppercase sm:text-lg">{displayedGameStatus}</div></div>
+                    </div>
+                    <div className="order-2 min-w-0 rounded-xl bg-slate-50 p-3 text-center shadow-sm sm:rounded-2xl sm:p-4 lg:order-none">
+                      <div className="truncate text-xs font-semibold text-slate-500 sm:text-sm">{scoreDisplayHomeTeam}</div>
+                      <div className="text-4xl font-black tracking-tight sm:text-5xl md:text-6xl">{scoreDisplayHomeScore}</div>
+                    </div>
                   </div>
                 </div>
-              </div>
-            </Card>
+              </Card>
+            </div>
 
             <div className="grid w-full min-w-0 gap-4 xl:grid-cols-[minmax(0,1.15fr)_minmax(0,0.85fr)]">
               <div className="min-w-0 space-y-4">
@@ -10200,7 +10268,7 @@ export default function WiffleScoringPrototype() {
                       <summary className="flex cursor-pointer list-none items-center justify-between gap-3 p-4">
                         <div>
                           <h2 className="text-lg font-bold">Manual Scoring Controls</h2>
-                          <p className="text-xs text-slate-500">Open for manual overrides, score adjustments, notes, undo, reset, and final game actions.</p>
+                          <p className="text-xs text-slate-500">Use for unusual plays, manual run/RBI overrides, score corrections, and notes.</p>
                         </div>
                         <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-bold uppercase text-slate-500 group-open:hidden">Open</span>
                         <span className="hidden rounded-full bg-slate-900 px-3 py-1 text-xs font-bold uppercase text-white group-open:inline-block">Close</span>
@@ -10235,20 +10303,26 @@ export default function WiffleScoringPrototype() {
                       </div>
                     </details>
 
-                    <div className="mt-4 rounded-2xl border bg-white p-4">
-                      <div className="mb-3">
-                        <h2 className="text-lg font-bold">Game Controls</h2>
-                        <p className="text-xs text-slate-500">Use these during live scoring without opening Manual Scoring Controls.</p>
+                    <details className="group mt-4 rounded-2xl border bg-white">
+                      <summary className="flex cursor-pointer list-none items-center justify-between gap-3 p-4">
+                        <div>
+                          <h2 className="text-lg font-bold">Game Controls</h2>
+                          <p className="text-xs text-slate-500">End half, undo, pause, reset, cancel, or finalize.</p>
+                        </div>
+                        <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-bold uppercase text-slate-500 group-open:hidden">Open</span>
+                        <span className="hidden rounded-full bg-slate-900 px-3 py-1 text-xs font-bold uppercase text-white group-open:inline-block">Close</span>
+                      </summary>
+                      <div className="border-t p-4 pt-4">
+                        <div className="grid gap-2 sm:grid-cols-3 lg:grid-cols-5">
+                          <Button variant="outline" onClick={endHalfInning}>End Half</Button>
+                          <Button variant="danger" onClick={undoLast}>↶ Undo</Button>
+                          <Button variant="secondary" onClick={pauseAndResumeLater}>Pause and Resume Later</Button>
+                          <Button variant="outline" onClick={() => setConfirmResetGameOpen(true)}>Reset</Button>
+                          <Button variant="danger" onClick={() => setConfirmCancelGameOpen(true)}>Cancel Game</Button>
+                          <Button variant="primary" onClick={finalizeGame} disabled={game.status === "final"}>🏆 Finalize</Button>
+                        </div>
                       </div>
-                      <div className="grid gap-2 sm:grid-cols-3 lg:grid-cols-5">
-                        <Button variant="outline" onClick={endHalfInning}>End Half</Button>
-                        <Button variant="danger" onClick={undoLast}>↶ Undo</Button>
-                        <Button variant="secondary" onClick={pauseAndResumeLater}>Pause and Resume Later</Button>
-                        <Button variant="outline" onClick={() => setConfirmResetGameOpen(true)}>Reset</Button>
-                        <Button variant="danger" onClick={() => setConfirmCancelGameOpen(true)}>Cancel Game</Button>
-                        <Button variant="primary" onClick={finalizeGame} disabled={game.status === "final"}>🏆 Finalize</Button>
-                      </div>
-                    </div>
+                    </details>
                     </>
                     )}
                     {pendingFieldRule && (
@@ -10322,16 +10396,16 @@ export default function WiffleScoringPrototype() {
                 </Card>
 
                 <LivePlayerStatsPanel
-                  battingTeamName={battingTeamName}
-                  defensiveTeamName={defensiveTeamName}
+                  awayTeamName={awayTeam}
+                  homeTeamName={homeTeam}
                   currentBatter={currentBatter}
                   currentPitcher={currentPitcher}
                   currentBatterStats={currentBatterStats}
                   currentPitcherStats={currentPitcherStats}
                   currentBatterProfile={currentBatterProfile}
                   currentPitcherProfile={currentPitcherProfile}
-                  battingTeamPlayers={teamPlayers[battingTeam]}
-                  defensiveTeamPlayers={teamPlayers[defensiveTeam]}
+                  awayPlayers={teamPlayers.away}
+                  homePlayers={teamPlayers.home}
                   battingStats={game.stats}
                   pitchingStats={game.pitchingStats}
                   subIndex={currentSubIndex}

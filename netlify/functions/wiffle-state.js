@@ -66,7 +66,8 @@ export default async function handler(request) {
         let summary = current.summary || null;
 
         if (operation === "replace") {
-          events = Array.isArray(payload.events) ? payload.events : [];
+          const incomingEvents = Array.isArray(payload.events) ? payload.events : [];
+          events = !payload.allowShorter && incomingEvents.length < events.length ? events : incomingEvents;
           setupSnapshot = payload.setupSnapshot || setupSnapshot;
           status = payload.status || "live";
           summary = payload.summary || summary;

@@ -2597,7 +2597,7 @@ function soPerPa(stat = {}) {
 
 function era(stat = {}, inningsPerGame = GAME_INNINGS) {
   const outs = safeNumber(stat.OUTS);
-  if (!outs) return "0.00";
+  if (!outs) return safeNumber(stat.ER ?? stat.R) > 0 ? "INF" : "0.00";
   const regulationOuts = Math.max(1, Number(inningsPerGame) || GAME_INNINGS) * 3;
   return ((safeNumber(stat.ER ?? stat.R) * regulationOuts) / outs).toFixed(2);
 }
@@ -3505,6 +3505,16 @@ function runSelfTests() {
     );
   });
 
+  test("Pitcher outs and ERA update from recorded outs", () => {
+    const state = calculateState([
+      { type: "play", team: "away", inning: 1, half: "top", batter: "Away Player 1", pitcher: "Home Player 1", result: "Out", runs: 0, rbi: 0, outs: 1, atBat: 1, hit: 0, walk: 0, strikeout: 0, homeRun: 0, basesAfter: emptyBases(), scored: [] },
+      { type: "play", team: "away", inning: 1, half: "top", batter: "Away Player 2", pitcher: "Home Player 1", result: "Single", runs: 1, rbi: 1, outs: 0, atBat: 1, hit: 1, walk: 0, strikeout: 0, homeRun: 0, earnedRuns: 1, basesAfter: { first: "Away Player 2", second: null, third: null }, scored: ["Away Player 1"] },
+    ]);
+    expectEqual(state.pitchingStats["Home Player 1"].OUTS, 1, "Pitcher should receive one recorded out");
+    expectEqual(formatInningsPitched(state.pitchingStats["Home Player 1"].OUTS), "0.1", "One out should display as 0.1 IP");
+    expectEqual(era({ OUTS: 0, ER: 1 }), "INF", "ERA should be infinite when earned runs score before any outs");
+  });
+
   return tests;
 }
 
@@ -3579,6 +3589,36 @@ function BaseDiamond({ bases }) {
       <div className="absolute bottom-4 left-1/2 -translate-x-1/2 text-center sm:bottom-5">
         <div className="mx-auto h-8 w-8 rotate-45 rounded-md border-2 border-slate-400 bg-white sm:h-10 sm:w-10" />
         <div className="mt-2 text-xs font-bold uppercase text-slate-500">Home</div>
+      </div>
+    </div>
+  );
+}
+
+function MiniBaseDiamond({ bases, onSelectRunner }) {
+  function MiniBase({ baseName, runner, positionClass }) {
+    const isOccupied = Boolean(runner);
+    return (
+      <div className={`absolute ${positionClass}`}>
+        <button
+          type="button"
+          className={`h-5 w-5 rotate-45 rounded border transition ${isOccupied ? "border-white bg-white shadow-sm hover:scale-110 focus:outline-none focus:ring-2 focus:ring-white" : "cursor-default border-slate-500 bg-slate-800"}`}
+          disabled={!isOccupied}
+          aria-label={isOccupied ? `${runner} on ${baseName}` : `${baseName} empty`}
+          title={isOccupied ? `${runner} on ${baseName}` : `${baseName} empty`}
+          onClick={() => isOccupied && onSelectRunner?.({ baseName, runner })}
+        />
+      </div>
+    );
+  }
+
+  return (
+    <div className="mx-auto mt-2 h-20 w-28 rounded-xl border border-white/10 bg-white/5">
+      <div className="relative h-full w-full">
+        <div className="absolute left-1/2 top-1/2 h-10 w-10 -translate-x-1/2 -translate-y-1/2 rotate-45 border border-dashed border-slate-500" />
+        <MiniBase baseName="first base" runner={bases.first} positionClass="left-[calc(50%+22px)] top-[calc(50%-10px)]" />
+        <MiniBase baseName="second base" runner={bases.second} positionClass="left-1/2 top-[calc(50%-32px)] -translate-x-1/2" />
+        <MiniBase baseName="third base" runner={bases.third} positionClass="left-[calc(50%-42px)] top-[calc(50%-10px)]" />
+        <div className="absolute bottom-2 left-1/2 h-4 w-4 -translate-x-1/2 rotate-45 rounded border border-slate-500 bg-slate-800" />
       </div>
     </div>
   );
@@ -3969,12 +4009,12 @@ function PitchingStatsTable({ stats, compact = false, summaryLabel = "League Avg
   const showAverageRow = rows.length > 0;
   return (
     <div className="overflow-x-auto rounded-xl border bg-white">
-      <table className={`${currentGameView ? "min-w-[360px] text-xs sm:text-sm" : "min-w-[760px] text-sm"} table-fixed text-left`}>
+      <table className={`${currentGameView ? "min-w-[410px] text-xs sm:text-sm" : "min-w-[760px] text-sm"} table-fixed text-left`}>
         <thead className="bg-slate-50 text-xs uppercase text-slate-500">
           <tr>
             <th className={`sticky left-0 z-10 bg-slate-50 py-2 ${currentGameView ? "w-24 px-1.5 sm:w-36 sm:px-2" : "w-28 px-2 sm:w-40 sm:px-3"}`}>Pitcher</th>
             {currentGameView ? (
-              <><th className="w-12 px-1 py-2 text-center">IP</th><th className="w-9 px-1 py-2 text-center">R</th><th className="w-9 px-1 py-2 text-center">H</th><th className="w-10 px-1 py-2 text-center">BB</th><th className="w-9 px-1 py-2 text-center">K</th><th className="w-10 px-1 py-2 text-center">HR</th></>
+              <><th className="w-12 px-1 py-2 text-center">IP</th><th className="w-9 px-1 py-2 text-center">R</th><th className="w-9 px-1 py-2 text-center">H</th><th className="w-10 px-1 py-2 text-center">BB</th><th className="w-9 px-1 py-2 text-center">K</th><th className="w-10 px-1 py-2 text-center">HR</th><th className="w-12 px-1 py-2 text-center">ERA</th></>
             ) : (
               <>{showGP && <th className="w-14 px-3 py-2">GP</th>}<th className="w-14 px-3 py-2">AB</th><th className="w-16 px-3 py-2">IP</th><th className="w-14 px-3 py-2">HA</th><th className="w-14 px-3 py-2">BB</th><th className="w-14 px-3 py-2">K</th><th className="w-16 px-3 py-2">HRA</th><th className="w-14 px-3 py-2">R</th><th className="w-16 px-3 py-2">UER</th><th className="w-14 px-3 py-2">ER</th><th className="w-16 px-3 py-2">ERA</th><th className="w-16 px-3 py-2">WHIP</th><th className="w-16 px-3 py-2">K:BB</th><th className="w-16 px-3 py-2">LOB%</th></>
             )}
@@ -3987,7 +4027,7 @@ function PitchingStatsTable({ stats, compact = false, summaryLabel = "League Avg
               <tr key={player} className="border-t">
                 <td className={`sticky left-0 z-10 truncate bg-white py-2 font-medium ${currentGameView ? "px-1.5 sm:px-2" : "px-2 sm:px-3"}`} title={player}>{player}</td>
                 {currentGameView ? (
-                  <><td className="px-1 py-2 text-center">{formatInningsPitched(stat.OUTS || 0)}</td><td className="px-1 py-2 text-center">{stat.R || 0}</td><td className="px-1 py-2 text-center">{stat.H || 0}</td><td className="px-1 py-2 text-center">{stat.BB || 0}</td><td className="px-1 py-2 text-center">{stat.K || 0}</td><td className="px-1 py-2 text-center">{stat.HR || 0}</td></>
+                  <><td className="px-1 py-2 text-center">{formatInningsPitched(stat.OUTS || 0)}</td><td className="px-1 py-2 text-center">{stat.R || 0}</td><td className="px-1 py-2 text-center">{stat.H || 0}</td><td className="px-1 py-2 text-center">{stat.BB || 0}</td><td className="px-1 py-2 text-center">{stat.K || 0}</td><td className="px-1 py-2 text-center">{stat.HR || 0}</td><td className="px-1 py-2 text-center">{era(stat)}</td></>
                 ) : (
                   <>{showGP && <td className="px-3 py-2">{gamesPlayed}</td>}<td className="px-3 py-2">{stat.AB || 0}</td><td className="px-3 py-2">{formatInningsPitched(stat.OUTS || 0)}</td><td className="px-3 py-2">{stat.H || 0}</td><td className="px-3 py-2">{stat.BB || 0}</td><td className="px-3 py-2">{stat.K || 0}</td><td className="px-3 py-2">{stat.HR || 0}</td><td className="px-3 py-2">{stat.R || 0}</td><td className="px-3 py-2">{stat.UER || 0}</td><td className="px-3 py-2">{stat.ER ?? stat.R ?? 0}</td><td className="px-3 py-2">{era(stat)}</td><td className="px-3 py-2">{whip(stat)}</td><td className="px-3 py-2">{kToBb(stat)}</td><td className="px-3 py-2">{pitcherLobPercent(stat)}</td></>
                 )}
@@ -3998,13 +4038,13 @@ function PitchingStatsTable({ stats, compact = false, summaryLabel = "League Avg
             <tr className="border-t-2 bg-slate-100 font-black">
               <td className={`sticky left-0 z-10 truncate bg-slate-100 py-2 ${currentGameView ? "px-1.5 sm:px-2" : "px-2 sm:px-3"}`} title={summaryLabel}>{summaryLabel}</td>
               {currentGameView ? (
-                <><td className="px-1 py-2 text-center">{formatInningsPitched(averageRow.OUTS || 0)}</td><td className="px-1 py-2 text-center">{averageRow.R}</td><td className="px-1 py-2 text-center">{averageRow.H}</td><td className="px-1 py-2 text-center">{averageRow.BB}</td><td className="px-1 py-2 text-center">{averageRow.K}</td><td className="px-1 py-2 text-center">{averageRow.HR}</td></>
+                <><td className="px-1 py-2 text-center">{formatInningsPitched(averageRow.OUTS || 0)}</td><td className="px-1 py-2 text-center">{averageRow.R}</td><td className="px-1 py-2 text-center">{averageRow.H}</td><td className="px-1 py-2 text-center">{averageRow.BB}</td><td className="px-1 py-2 text-center">{averageRow.K}</td><td className="px-1 py-2 text-center">{averageRow.HR}</td><td className="px-1 py-2 text-center">{era(averageRow)}</td></>
               ) : (
                 <>{showGP && <td className="px-3 py-2">{averageRow.GP}</td>}<td className="px-3 py-2">{averageRow.AB}</td><td className="px-3 py-2">{formatInningsPitched(averageRow.OUTS || 0)}</td><td className="px-3 py-2">{averageRow.H}</td><td className="px-3 py-2">{averageRow.BB}</td><td className="px-3 py-2">{averageRow.K}</td><td className="px-3 py-2">{averageRow.HR}</td><td className="px-3 py-2">{averageRow.R}</td><td className="px-3 py-2">{averageRow.UER}</td><td className="px-3 py-2">{averageRow.ER}</td><td className="px-3 py-2">{era(averageRow)}</td><td className="px-3 py-2">{whip(averageRow)}</td><td className="px-3 py-2">{kToBb(averageRow)}</td><td className="px-3 py-2">{pitcherLobPercent(averageRow)}</td></>
               )}
             </tr>
           )}
-          {rows.length === 0 && <tr><td className="px-3 py-3 text-slate-500" colSpan={currentGameView ? 7 : 15}>No pitching stats.</td></tr>}
+          {rows.length === 0 && <tr><td className="px-3 py-3 text-slate-500" colSpan={currentGameView ? 8 : 15}>No pitching stats.</td></tr>}
         </tbody>
       </table>
       {compact && rows.length > displayRows.length && <p className="p-3 text-xs text-slate-500">Showing first {displayRows.length} of {rows.length} pitchers.</p>}
@@ -4462,6 +4502,7 @@ export default function WiffleScoringPrototype() {
   const [activeLiveGameId, setActiveLiveGameId] = useState(DEFAULT_LIVE_GAME_ID);
   const [liveGamesIndex, setLiveGamesIndex] = useState([]);
   const [scoreboardFrozen, setScoreboardFrozen] = useState(true);
+  const [selectedBaseRunner, setSelectedBaseRunner] = useState(null);
   const [repeatBatter, setRepeatBatter] = useState(false);
   const [endHalf, setEndHalf] = useState(false);
   const [manualMode, setManualMode] = useState(false);
@@ -4641,6 +4682,8 @@ export default function WiffleScoringPrototype() {
   const currentBattingOrder = cleanRoster(battingOrder[battingTeam]);
   const batterIndex = battingTeam === "away" ? game.awayBatterIndex : game.homeBatterIndex;
   const currentBatter = currentBattingOrder[batterIndex % currentBattingOrder.length];
+  const onDeckHitter = currentBattingOrder[(batterIndex + 1) % currentBattingOrder.length];
+  const inTheHoleHitter = currentBattingOrder[(batterIndex + 2) % currentBattingOrder.length];
   const lastEvent = events[events.length - 1];
   const latestGameStatusEvent = [...events].reverse().find((event) => event.type === "game_status") || null;
   const syncedGameStatus = latestGameStatusEvent?.status || "";
@@ -8536,6 +8579,12 @@ export default function WiffleScoringPrototype() {
 
     const advancedToNextHalf = nextGame.inning !== completedInning || nextGame.half !== completedHalf;
     if (!advancedToNextHalf) return;
+    const endingEvent = [...(nextEvents || [])].reverse().find((event) => event.inning === completedInning && event.half === completedHalf);
+    const completedHalfRuns = (nextEvents || []).reduce((total, event) => {
+      if (event.inning !== completedInning || event.half !== completedHalf) return total;
+      if (event.type !== "play" && event.type !== "score_adjustment") return total;
+      return total + (Number(event.runs) || 0);
+    }, 0);
 
     setPendingInningNotification({
       inning: completedInning,
@@ -8546,6 +8595,10 @@ export default function WiffleScoringPrototype() {
       homeTeam,
       awayScore: nextGame.awayScore,
       homeScore: nextGame.homeScore,
+      runRuleApplied: Boolean(endingEvent?.runRuleApplied),
+      runRuleRuns: endingEvent?.runRuleApplied ? runRuleRuns : null,
+      completedHalfRuns,
+      runRuleWalkHr: Boolean(endingEvent?.runRuleWalkHr),
     });
   }
 
@@ -10099,10 +10152,49 @@ export default function WiffleScoringPrototype() {
                       <div className="truncate text-xs font-semibold text-slate-500 sm:text-sm">{scoreDisplayAwayTeam}</div>
                       <div className="text-4xl font-black tracking-tight sm:text-5xl md:text-6xl">{scoreDisplayAwayScore}</div>
                     </div>
-                    <div className="order-3 col-span-2 grid min-w-0 grid-cols-3 gap-2 rounded-xl bg-slate-900 p-2 text-center text-white shadow-sm sm:rounded-2xl sm:p-3 lg:order-none lg:col-span-1 lg:min-w-80">
-                      <div><div className="text-[10px] uppercase text-slate-300">Inning</div><div className="text-base font-black sm:text-lg">{game.half === "top" ? "Top" : "Bot"} {game.inning}</div></div>
-                      <div><div className="text-[10px] uppercase text-slate-300">Outs</div><div className="text-base font-black sm:text-lg">{game.outs}</div></div>
-                      <div><div className="text-[10px] uppercase text-slate-300">Status</div><div className="text-base font-black uppercase sm:text-lg">{displayedGameStatus}</div></div>
+                    <div className="order-3 col-span-2 min-w-0 rounded-xl bg-slate-900 p-2 text-center text-white shadow-sm sm:rounded-2xl sm:p-3 lg:order-none lg:col-span-1 lg:min-w-80">
+                      <div className="grid grid-cols-3 gap-2">
+                        <div><div className="text-[10px] uppercase text-slate-300">Inning</div><div className="text-base font-black sm:text-lg">{game.half === "top" ? "Top" : "Bot"} {game.inning}</div></div>
+                        <div><div className="text-[10px] uppercase text-slate-300">Outs</div><div className="text-base font-black sm:text-lg">{game.outs}</div></div>
+                        <div><div className="text-[10px] uppercase text-slate-300">Status</div><div className="text-base font-black uppercase sm:text-lg">{displayedGameStatus}</div></div>
+                      </div>
+                      <div className="mt-2 grid grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-2">
+                        <div className="min-w-0 text-right">
+                          <div className="text-[9px] font-black uppercase text-slate-400">Batter</div>
+                          <div className="truncate text-xs font-black sm:text-sm" title={currentBatter}>{currentBatter}</div>
+                          {batterBatsBoth && game.status !== "final" ? (
+                            <select
+                              className="mt-1 max-w-full rounded-md border border-white/10 bg-slate-800 px-1 py-0.5 text-[10px] font-black text-white"
+                              value={selectedBatterSide}
+                              onChange={(event) => setSelectedBatterSide(event.target.value)}
+                              aria-label="Batter hitting side"
+                            >
+                              <option value="R">Hits R</option>
+                              <option value="L">Hits L</option>
+                            </select>
+                          ) : (
+                            <div className="mt-0.5 text-[10px] font-bold text-slate-400">Hits {handednessLabel(batterSideForPlay)}</div>
+                          )}
+                        </div>
+                        <MiniBaseDiamond bases={game.bases} onSelectRunner={setSelectedBaseRunner} />
+                        <div className="min-w-0 text-left">
+                          <div className="text-[9px] font-black uppercase text-slate-400">Pitcher</div>
+                          <div className="truncate text-xs font-black sm:text-sm" title={currentPitcher}>{currentPitcher}</div>
+                          {pitcherThrowsBoth && game.status !== "final" ? (
+                            <select
+                              className="mt-1 max-w-full rounded-md border border-white/10 bg-slate-800 px-1 py-0.5 text-[10px] font-black text-white"
+                              value={selectedPitcherSide}
+                              onChange={(event) => setSelectedPitcherSide(event.target.value)}
+                              aria-label="Pitcher throwing side"
+                            >
+                              <option value="R">Throws R</option>
+                              <option value="L">Throws L</option>
+                            </select>
+                          ) : (
+                            <div className="mt-0.5 text-[10px] font-bold text-slate-400">Throws {handednessLabel(pitcherSideForPlay)}</div>
+                          )}
+                        </div>
+                      </div>
                     </div>
                     <div className="order-2 min-w-0 rounded-xl bg-slate-50 p-3 text-center shadow-sm sm:rounded-2xl sm:p-4 lg:order-none">
                       <div className="truncate text-xs font-semibold text-slate-500 sm:text-sm">{scoreDisplayHomeTeam}</div>
@@ -10118,7 +10210,7 @@ export default function WiffleScoringPrototype() {
                 {game.status !== "final" && !scoringPaused && (
                 <Card>
                   <div className="p-4 sm:p-5">
-                    <div className="mb-4 grid min-w-0 gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(0,0.75fr)] lg:items-start">
+                    <div className="mb-4 min-w-0">
                       <div className="min-w-0">
                         <div className="text-xs font-semibold uppercase text-slate-500">Current Matchup</div>
                         <div className="mt-2 grid grid-cols-[auto_1fr] items-center gap-3 sm:flex sm:flex-wrap sm:gap-4">
@@ -10134,28 +10226,10 @@ export default function WiffleScoringPrototype() {
                             </div>
                           </div>
                         </div>
-                        <div className="mt-2 text-xs text-slate-500 sm:text-sm">Batter #{(batterIndex % currentBattingOrder.length) + 1} · {battingTeamName} batting · {defensiveTeamName} pitching</div>
-                        <div className="mt-2 flex flex-wrap items-center gap-2 text-xs font-semibold text-slate-600">
-                          <span className="rounded-full bg-slate-100 px-3 py-1">Bats: {handednessLabel(currentBatterProfile?.bats || "R")}</span>
-                          <span className="rounded-full bg-slate-100 px-3 py-1">Pitcher throws: {handednessLabel(currentPitcherProfile?.pitches || "R")}</span>
-                          {batterBatsBoth && game.status !== "final" && (
-                            <label className="flex items-center gap-2 rounded-full border bg-white px-3 py-1">
-                              Batter using
-                              <select className="rounded-lg border px-2 py-1 text-xs" value={selectedBatterSide} onChange={(event) => setSelectedBatterSide(event.target.value)}>
-                                <option value="R">Right</option>
-                                <option value="L">Left</option>
-                              </select>
-                            </label>
-                          )}
-                          {pitcherThrowsBoth && game.status !== "final" && (
-                            <label className="flex items-center gap-2 rounded-full border bg-white px-3 py-1">
-                              Pitcher using
-                              <select className="rounded-lg border px-2 py-1 text-xs" value={selectedPitcherSide} onChange={(event) => setSelectedPitcherSide(event.target.value)}>
-                                <option value="R">Right</option>
-                                <option value="L">Left</option>
-                              </select>
-                            </label>
-                          )}
+                        <div className="mt-2 text-xs font-semibold text-slate-500 sm:text-sm">
+                          <span className="font-black uppercase tracking-wide">On Deck:</span> <span title={onDeckHitter}>{onDeckHitter}</span>
+                          <span className="mx-2 text-slate-300">|</span>
+                          <span className="font-black uppercase tracking-wide">In The Hole:</span> <span title={inTheHoleHitter}>{inTheHoleHitter}</span>
                         </div>
 
 
@@ -10189,7 +10263,6 @@ export default function WiffleScoringPrototype() {
                           </div>
                         )}
                       </div>
-                      <BaseDiamond bases={game.bases} />
                     </div>
 
                     {game.status !== "final" ? (
@@ -13922,9 +13995,34 @@ export default function WiffleScoringPrototype() {
                   </div>
                 </div>
               </div>
+              {pendingInningNotification.runRuleApplied && (
+                <div className="mt-3 rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm font-black text-amber-900">
+                  <p>
+                    Run rule ended the inning
+                    {pendingInningNotification.runRuleRuns ? ` after the batting team reached the ${pendingInningNotification.runRuleRuns}-run limit` : ""}.
+                  </p>
+                  {pendingInningNotification.completedHalfRuns > pendingInningNotification.runRuleRuns && (
+                    <p className="mt-1">The scoring play brought the half-inning total to {pendingInningNotification.completedHalfRuns} run(s).</p>
+                  )}
+                  {pendingInningNotification.runRuleWalkHr && <p className="mt-1">The walk was counted as a home run.</p>}
+                </div>
+              )}
               <p className="mt-3 text-sm font-semibold text-slate-600">Press OK to start {pendingInningNotification.nextHalf === "top" ? "Top" : "Bottom"} {pendingInningNotification.nextInning}.</p>
               <div className="mt-5 flex justify-center">
                 <Button variant="primary" onClick={() => setPendingInningNotification(null)}>OK</Button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {selectedBaseRunner && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 p-4">
+            <div className="w-full max-w-xs rounded-3xl bg-white p-5 text-center shadow-xl">
+              <div className="text-xs font-black uppercase tracking-wide text-slate-500">{selectedBaseRunner.baseName}</div>
+              <h2 className="mt-1 text-2xl font-black">{selectedBaseRunner.runner}</h2>
+              <p className="mt-2 text-sm font-semibold text-slate-500">Current runner on base.</p>
+              <div className="mt-5 flex justify-center">
+                <Button variant="primary" onClick={() => setSelectedBaseRunner(null)}>OK</Button>
               </div>
             </div>
           </div>

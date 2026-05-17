@@ -117,6 +117,10 @@ async function handleStateApi(request, response) {
         const parsed = JSON.parse((await readRequestBody(request)) || "null");
         const operation = parsed?.operation || "append";
         const current = readJsonFile(activeLiveEventsFile, { id: liveGameId, events: [], updatedAt: "" });
+        if (current.status === "cancelled" && operation !== "cancel") {
+          sendJson(response, 200, { ok: true, ignored: true, status: "cancelled", updatedAt: current.updatedAt || "" });
+          return;
+        }
         let events = Array.isArray(current.events) ? current.events : [];
         let setupSnapshot = current.setupSnapshot || null;
         let status = current.status || "";
@@ -165,7 +169,9 @@ async function handleStateApi(request, response) {
           updatedAt: nextLiveEvents.updatedAt,
         };
         writeJsonFile(liveEventsIndexFile, {
-          games: [nextSummary, ...(index.games || []).filter((game) => game.id !== liveGameId)].slice(0, 24),
+          games: status === "cancelled"
+            ? (index.games || []).filter((game) => game.id !== liveGameId)
+            : [nextSummary, ...(index.games || []).filter((game) => game.id !== liveGameId)].slice(0, 24),
           updatedAt: nextLiveEvents.updatedAt,
         });
         sendJson(response, 200, { ok: true, eventCount: events.length, updatedAt: nextLiveEvents.updatedAt });

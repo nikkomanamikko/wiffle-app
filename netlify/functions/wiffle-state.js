@@ -60,6 +60,9 @@ export default async function handler(request) {
         const payload = await request.json();
         const operation = payload?.operation || "append";
         const current = await store.get(liveEventsKey(liveGameId), { type: "json", consistency: "strong" }) || { id: liveGameId, events: [], updatedAt: "" };
+        if (current.status === "cancelled" && operation !== "cancel") {
+          return jsonResponse(200, { ok: true, ignored: true, status: "cancelled", updatedAt: current.updatedAt || "" });
+        }
         let events = Array.isArray(current.events) ? current.events : [];
         let setupSnapshot = current.setupSnapshot || null;
         let status = current.status || "";
@@ -110,7 +113,9 @@ export default async function handler(request) {
           updatedAt: nextLiveEvents.updatedAt,
         };
         await store.setJSON(LIVE_EVENTS_INDEX_KEY, {
-          games: [nextSummary, ...(index.games || []).filter((game) => game.id !== liveGameId)].slice(0, 24),
+          games: status === "cancelled"
+            ? (index.games || []).filter((game) => game.id !== liveGameId)
+            : [nextSummary, ...(index.games || []).filter((game) => game.id !== liveGameId)].slice(0, 24),
           updatedAt: nextLiveEvents.updatedAt,
         });
         return jsonResponse(200, { ok: true, eventCount: events.length, updatedAt: nextLiveEvents.updatedAt });

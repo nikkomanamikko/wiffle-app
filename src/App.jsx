@@ -367,6 +367,7 @@ function makeDefaultTournament(name = "New Tournament") {
   return {
     id: newId(),
     name,
+    leagueIds: [],
     type: "custom",
     status: "setup",
     bracketCount: 1,
@@ -377,6 +378,10 @@ function makeDefaultTournament(name = "New Tournament") {
     settingsSaved: false,
     participants: [],
     teamSetupSaved: false,
+    loserBracketEnabled: false,
+    loserLaneOffset: 0,
+    loserBracketLanes: [],
+    customRounds: ["Round 1"],
     championshipMatchupId: "",
     simulationMode: false,
     matchups: [],
@@ -385,7 +390,7 @@ function makeDefaultTournament(name = "New Tournament") {
 }
 
 function makeDefaultTournamentParticipant(teamId = "", seed = "", bracket = 1) {
-  return { id: newId(), teamId, seed, bracket };
+  return { id: newId(), teamId, seed, bracket, bye: false };
 }
 
 function makeDefaultTournamentMatchup(matchupNumber = 1) {
@@ -415,6 +420,7 @@ function makeDefaultTournamentMatchup(matchupNumber = 1) {
     championshipResetRequired: false,
     eliminatedTeamIds: [],
     generatedGameNumber: "",
+    loserLaneId: "",
     layoutX: "",
     layoutY: "",
     notes: "",
@@ -436,14 +442,21 @@ function sortTournamentParticipants(participants = []) {
   return [...(participants || [])].sort((a, b) => (Number(a.bracket) || 1) - (Number(b.bracket) || 1) || (Number(a.seed) || 999) - (Number(b.seed) || 999));
 }
 
-function getTournamentParticipant(league, tournament, teamId = "") {
+function getTournamentTeamOptionsFromLeagues(leagues = [], tournament = {}, fallbackLeague = {}) {
+  const leagueIds = tournament?.leagueIds?.length ? tournament.leagueIds : [fallbackLeague?.id].filter(Boolean);
+  return (leagues || [])
+    .filter((league) => leagueIds.includes(league.id))
+    .flatMap((league) => (league.teams || []).map((team) => ({ ...team, sourceLeagueId: league.id, sourceLeagueName: league.name || "League" })));
+}
+
+function getTournamentParticipant(league, tournament, teamId = "", leagues = []) {
   const participant = (tournament?.participants || []).find((item) => item.teamId === teamId);
-  const team = (league?.teams || []).find((item) => item.id === teamId);
+  const team = getTournamentTeamOptionsFromLeagues(leagues, tournament, league).find((item) => item.id === teamId) || (league?.teams || []).find((item) => item.id === teamId);
   return { participant, team };
 }
 
-function tournamentTeamLabel(league, tournament, teamId = "", fallback = "Team TBD") {
-  const { participant, team } = getTournamentParticipant(league, tournament, teamId);
+function tournamentTeamLabel(league, tournament, teamId = "", fallback = "Team TBD", leagues = []) {
+  const { participant, team } = getTournamentParticipant(league, tournament, teamId, leagues);
   if (!team) return fallback;
   return participant?.seed ? `#${participant.seed} ${team.name}` : team.name;
 }
@@ -463,11 +476,11 @@ function getTournamentMatchupSide(matchup = {}, side = "one") {
   };
 }
 
-function getTournamentSideLabel(league, tournament, matchup = {}, side = "one") {
+function getTournamentSideLabel(league, tournament, matchup = {}, side = "one", leagues = []) {
   const slot = getTournamentMatchupSide(matchup, side);
   if (slot.placeholder) return slot.placeholder;
   return slot.teamId
-    ? tournamentTeamLabel(league, tournament, slot.teamId, tournamentSeedLabel(slot.seed))
+    ? tournamentTeamLabel(league, tournament, slot.teamId, tournamentSeedLabel(slot.seed), leagues)
     : tournamentSeedLabel(slot.seed);
 }
 
@@ -518,11 +531,36 @@ function getTournamentRoundColumnLabel(round = "") {
   return `Round ${getTournamentRoundNumber(round)}`;
 }
 
+function getTournamentLoserLanes(tournament = {}) {
+  const lanes = Array.isArray(tournament.loserBracketLanes) ? tournament.loserBracketLanes : [];
+  if (lanes.length > 0) {
+    return lanes.map((lane, index) => ({
+      id: lane.id || `loser-lane-${index + 1}`,
+      name: lane.name || `Loser's Bracket ${index + 1}`,
+      offset: Number(lane.offset) || 0,
+    }));
+  }
+  if (!tournament.loserBracketEnabled) return [];
+  return [{
+    id: "loser-lane-1",
+    name: "Loser's Bracket 1",
+    offset: Number(tournament.loserLaneOffset) || 0,
+  }];
+}
+
+function getTournamentMatchupLoserLaneId(matchup = {}, tournament = {}) {
+  const text = String(`${matchup.round || ""} ${matchup.name || ""}`).toLowerCase();
+  if (!text.includes("loser") && !matchup.loserLaneId) return "";
+  const lanes = getTournamentLoserLanes(tournament);
+  return matchup.loserLaneId || lanes[0]?.id || "loser-lane-1";
+}
+
 function getTournamentMatchupPathLabel(matchup = {}, tournament = {}) {
   const text = String(matchup.round || matchup.name || "").toLowerCase();
+  if (tournament?.championshipMatchupId === matchup.id || text.includes("championship")) return "";
   if (text.includes("loser")) return "Loser's Bracket";
-  if (text.includes("winner")) return "Winner's Bracket";
   if (text.includes("bracket winners")) return "Bracket Winners";
+  if (text.includes("winner")) return "Winner's Bracket";
   if (tournament?.type === "round_robin") return "";
   return `Bracket ${Math.max(1, Number(matchup.bracket) || 1)}`;
 }
@@ -533,16 +571,26 @@ function getTournamentWinnerPlaceholder(matchup = {}) {
   return matchup.name ? `W ${matchup.name}` : "";
 }
 
+function getTournamentMatchupDisplayName(matchup = {}, fallbackIndex = 0) {
+  const gameNumber = Number(matchup.generatedGameNumber);
+  if (Number.isFinite(gameNumber) && gameNumber > 0) return `Game ${gameNumber}`;
+  return `Game ${fallbackIndex + 1}`;
+}
+
 function getWinnerBracketSideIndex(matchup = {}) {
   const match = String(matchup.name || "").match(/bracket\s+\d+-(\d+)/i);
   return Number(match?.[1]) || 0;
 }
 
-function getTournamentRoundColumns(matchups = []) {
+function getTournamentRoundColumns(matchups = [], customRounds = []) {
+  const groupsWithCustomRounds = (customRounds || []).reduce((groups, round) => {
+    const cleanRound = String(round || "").trim();
+    return cleanRound ? { ...groups, [getTournamentRoundColumnLabel(cleanRound)]: [] } : groups;
+  }, {});
   return Object.entries((matchups || []).reduce((groups, matchup) => {
     const round = getTournamentRoundColumnLabel(matchup.round || "Round 1");
     return { ...groups, [round]: [...(groups[round] || []), matchup] };
-  }, {}))
+  }, groupsWithCustomRounds))
     .sort((a, b) => getTournamentRoundNumber(a[0]) - getTournamentRoundNumber(b[0]))
     .map(([round, roundMatchups], index, columns) => {
       const previousCount = columns[index - 1]?.[1]?.length || roundMatchups.length;
@@ -552,8 +600,11 @@ function getTournamentRoundColumns(matchups = []) {
     });
 }
 
-function getTournamentRoundOptions(matchups = [], currentRound = "") {
-  const rounds = [...new Set((matchups || []).map((matchup) => String(matchup.round || "").trim()).filter(Boolean))];
+function getTournamentRoundOptions(matchups = [], currentRound = "", customRounds = []) {
+  const rounds = [...new Set([
+    ...(customRounds || []).map((round) => String(round || "").trim()).filter(Boolean),
+    ...(matchups || []).map((matchup) => String(matchup.round || "").trim()).filter(Boolean),
+  ])];
   const current = String(currentRound || "").trim();
   if (current && !rounds.includes(current)) rounds.push(current);
   const roundNumbers = rounds.map((round) => Number(round.match(/round\s+(\d+)/i)?.[1])).filter(Number.isFinite);
@@ -691,14 +742,24 @@ function buildSeedLadderWinnerMatchups(tournament = {}, bracket = 1, participant
 
 function buildSingleEliminationBracketMatchups(bracket = 1, participants = [], startNumber = 1) {
   const ordered = sortTournamentParticipants(participants);
+  const byeSources = ordered
+    .filter((participant) => participant.bye)
+    .map((participant) => ({
+      id: `bye-${bracket}-${participant.seed || newId()}`,
+      isByeSource: true,
+      participant,
+      bracket: Number(bracket) || 1,
+      name: `Bracket ${bracket} Seed ${participant.seed} Bye`,
+    }));
+  const playingParticipants = ordered.filter((participant) => !participant.bye);
   const matchups = [];
   const links = {};
-  let currentSources = [];
-  const firstRoundMatchupCount = Math.ceil(ordered.length / 2);
+  let currentSources = [...byeSources];
+  const firstRoundMatchupCount = Math.ceil(playingParticipants.length / 2);
 
   for (let index = 0; index < firstRoundMatchupCount; index += 1) {
-    const highSeed = ordered[index];
-    const lowSeed = ordered[ordered.length - 1 - index];
+    const highSeed = playingParticipants[index];
+    const lowSeed = playingParticipants[playingParticipants.length - 1 - index];
     const hasBye = !lowSeed || highSeed?.id === lowSeed?.id;
     const matchup = {
       ...makeDefaultTournamentMatchup(startNumber + matchups.length),
@@ -733,12 +794,18 @@ function buildSingleEliminationBracketMatchups(bracket = 1, participants = [], s
         round: `Round ${roundNumber}`,
         bracket: Number(bracket) || 1,
         generatedGameNumber: startNumber + matchups.length,
-        teamOnePlaceholder: getTournamentWinnerPlaceholder(sourceOne),
-        teamTwoPlaceholder: getTournamentWinnerPlaceholder(sourceTwo),
+        teamOneId: sourceOne.isByeSource ? sourceOne.participant?.teamId || "" : "",
+        teamTwoId: sourceTwo.isByeSource ? sourceTwo.participant?.teamId || "" : "",
+        teamOneSeed: sourceOne.isByeSource ? sourceOne.participant?.seed || "" : "",
+        teamTwoSeed: sourceTwo.isByeSource ? sourceTwo.participant?.seed || "" : "",
+        teamOneSourceBracket: Number(bracket) || 1,
+        teamTwoSourceBracket: Number(bracket) || 1,
+        teamOnePlaceholder: sourceOne.isByeSource ? "" : getTournamentWinnerPlaceholder(sourceOne),
+        teamTwoPlaceholder: sourceTwo.isByeSource ? "" : getTournamentWinnerPlaceholder(sourceTwo),
         isFinalBracketGame: currentSources.length <= 2,
       };
-      links[sourceOne.id] = matchup.id;
-      links[sourceTwo.id] = matchup.id;
+      if (!sourceOne.isByeSource) links[sourceOne.id] = matchup.id;
+      if (!sourceTwo.isByeSource) links[sourceTwo.id] = matchup.id;
       matchups.push(matchup);
       nextSources.push(matchup);
     }
@@ -787,7 +854,7 @@ function buildBracketWinnerFinals(terminalMatchups = [], startNumber = 1, startR
   }
 
   return {
-    matchups,
+    matchups: matchups.map((matchup) => ({ ...matchup, nextMatchupId: links[matchup.id] || matchup.nextMatchupId || "" })),
     links,
     championshipMatchup: currentSources[0] || null,
   };
@@ -5352,6 +5419,7 @@ export default function WiffleScoringPrototype() {
   const tournamentCanvasPinchRef = useRef(null);
   const tournamentCanvasScrollRef = useRef(null);
   const tournamentCanvasPanRef = useRef(null);
+  const tournamentCanvasExportRef = useRef(null);
   const [tournamentCanvasFullscreen, setTournamentCanvasFullscreen] = useState(false);
   const [matchupStatScopeIndex, setMatchupStatScopeIndex] = useState(0);
   const [matchupStatCountdown, setMatchupStatCountdown] = useState(8);
@@ -5372,6 +5440,10 @@ export default function WiffleScoringPrototype() {
   const [openScheduleWeekId, setOpenScheduleWeekId] = useState("");
   const [openScheduleGameByWeek, setOpenScheduleGameByWeek] = useState({});
   const [selectedTournamentId, setSelectedTournamentId] = useState("");
+  const [tournamentLeagueFilter, setTournamentLeagueFilter] = useState("all");
+  const [pendingTournamentByes, setPendingTournamentByes] = useState(null);
+  const [pendingTournamentRoundDelete, setPendingTournamentRoundDelete] = useState(null);
+  const [pendingTournamentGameNumber, setPendingTournamentGameNumber] = useState(null);
   const [tournamentImportDate, setTournamentImportDate] = useState(todayInputValue());
   const [openTournamentTeamsId, setOpenTournamentTeamsId] = useState("");
   const [yearPicker, setYearPicker] = useState(null);
@@ -5649,7 +5721,21 @@ export default function WiffleScoringPrototype() {
   const leagueSettingsLocked = activePage === "league" && selectedLeagueRealDraftInProgress;
   const selectedCurrentSeason = selectedLeagueSeasons.find((season) => Number(season.year) === Number(selectedLeague?.currentSeasonYear)) || selectedLeagueSeasons[0] || normalizeSeasonRecord(makeDefaultSeasonRecord(currentYearNumber()));
   const selectedLeagueTournaments = selectedLeague?.tournaments || [];
-  const selectedTournament = selectedLeagueTournaments.find((tournament) => tournament.id === selectedTournamentId) || selectedLeagueTournaments[0] || null;
+  const selectedTournament = selectedLeagueTournaments.find((tournament) => tournament.id === selectedTournamentId) || null;
+  const allLeagueTournaments = leagues
+    .flatMap((league) => (league.tournaments || []).map((tournament) => ({
+      ...tournament,
+      sourceLeagueId: league.id,
+      sourceLeagueName: league.name || "Untitled League",
+      sourceLeagueLogoUrl: league.logoUrl || "",
+    })))
+    .sort((a, b) => String(a.sourceLeagueName || "").localeCompare(String(b.sourceLeagueName || "")) || String(a.name || "").localeCompare(String(b.name || "")));
+  const visibleTournamentList = allLeagueTournaments.filter((tournament) => tournamentLeagueFilter === "all" || tournament.sourceLeagueId === tournamentLeagueFilter);
+  const selectedTournamentLeagueIds = selectedTournament?.leagueIds?.length ? selectedTournament.leagueIds : [selectedLeague?.id].filter(Boolean);
+  const selectedTournamentTeamOptions = leagues
+    .filter((league) => selectedTournamentLeagueIds.includes(league.id))
+    .flatMap((league) => (league.teams || []).map((team) => ({ ...team, sourceLeagueId: league.id, sourceLeagueName: league.name || "League" })))
+    .sort((a, b) => String(a.sourceLeagueName || "").localeCompare(String(b.sourceLeagueName || "")) || String(a.name || "").localeCompare(String(b.name || "")));
   const selectedCurrentSession = selectedCurrentSeason.sessions.find((session) => session.id === selectedCurrentSeason.currentSessionId) || selectedCurrentSeason.sessions[0] || null;
   const activeDraftSessionId = selectedCurrentSeason.sessionsEnabled ? (draftSessionId || selectedCurrentSession?.id || selectedCurrentSeason.sessions[0]?.id || "") : (selectedCurrentSession?.id || selectedCurrentSeason.sessions[0]?.id || "default-session");
   const activeDraftSession = selectedCurrentSeason.sessions.find((session) => session.id === activeDraftSessionId) || selectedCurrentSession || selectedCurrentSeason.sessions[0] || null;
@@ -8687,7 +8773,7 @@ export default function WiffleScoringPrototype() {
   }
 
   function createTournament() {
-    const tournament = makeDefaultTournament(`Tournament ${(selectedLeagueTournaments || []).length + 1}`);
+    const tournament = { ...makeDefaultTournament(`Tournament ${(selectedLeagueTournaments || []).length + 1}`), leagueIds: [selectedLeague?.id].filter(Boolean) };
     updateSelectedLeagueRecord((league) => ({
       ...league,
       tournaments: [tournament, ...(league.tournaments || [])],
@@ -8775,6 +8861,50 @@ export default function WiffleScoringPrototype() {
       if (!shouldContinue) return;
     }
     updateTournament(tournamentId, "type", value);
+  }
+
+  function toggleTournamentLeague(tournamentId, leagueId, isSelected) {
+    updateSelectedLeagueRecord((league) => ({
+      ...league,
+      tournaments: (league.tournaments || []).map((tournament) => {
+        if (tournament.id !== tournamentId) return tournament;
+        const currentLeagueIds = tournament.leagueIds?.length ? tournament.leagueIds : [selectedLeague?.id].filter(Boolean);
+        const leagueIds = isSelected
+          ? [...new Set([...currentLeagueIds, leagueId])]
+          : currentLeagueIds.filter((id) => id !== leagueId);
+        return { ...tournament, leagueIds: leagueIds.length ? leagueIds : [selectedLeague?.id].filter(Boolean), settingsSaved: false };
+      }),
+    }));
+  }
+
+  function openTournamentByeEditor(tournamentId) {
+    const tournament = selectedLeagueTournaments.find((item) => item.id === tournamentId);
+    if (!tournament) return;
+    setPendingTournamentByes({
+      tournamentId,
+      byes: Object.fromEntries((tournament.participants || []).map((participant) => [`${Math.max(1, Number(participant.bracket) || 1)}-${participant.seed}`, Boolean(participant.bye)])),
+    });
+  }
+
+  function saveTournamentByes() {
+    if (!pendingTournamentByes?.tournamentId) return;
+    updateSelectedLeagueRecord((league) => ({
+      ...league,
+      tournaments: (league.tournaments || []).map((tournament) => {
+        if (tournament.id !== pendingTournamentByes.tournamentId) return tournament;
+        return {
+          ...tournament,
+          participants: (tournament.participants || []).map((participant) => ({
+            ...participant,
+            bye: Boolean(pendingTournamentByes.byes?.[`${Math.max(1, Number(participant.bracket) || 1)}-${participant.seed}`]),
+          })),
+          matchups: [],
+          championshipMatchupId: "",
+          simulationMode: false,
+        };
+      }),
+    }));
+    setPendingTournamentByes(null);
   }
 
   function addTournamentParticipant(tournamentId) {
@@ -9064,6 +9194,10 @@ export default function WiffleScoringPrototype() {
       ...league,
       tournaments: (league.tournaments || []).map((tournament) => {
         if (tournament.id !== tournamentId) return tournament;
+        if (tournament.type === "custom") {
+          window.alert?.("Custom tournaments do not auto-create rounds. Add matchups manually, then drag them into the round column or loser bracket lane you want.");
+          return tournament;
+        }
         if (tournament.championshipMatchupId) {
           window.alert?.("A championship matchup is already selected. Remove the championship selection before adding more rounds.");
           return tournament;
@@ -9154,7 +9288,19 @@ export default function WiffleScoringPrototype() {
 
   function addTournamentMatchup(tournamentId) {
     const tournament = selectedLeagueTournaments.find((item) => item.id === tournamentId);
-    const nextMatchup = makeDefaultTournamentMatchup((tournament?.matchups || []).length + 1);
+    const existingMatchups = tournament?.matchups || [];
+    const customRounds = tournament?.type === "custom" ? tournament.customRounds || ["Round 1"] : [];
+    const roundColumns = getTournamentRoundColumns(existingMatchups, customRounds);
+    const nextRound = tournament?.type === "custom"
+      ? roundColumns.find((column) => (column.matchups || []).length === 0)?.round || roundColumns.at(-1)?.round || "Round 1"
+      : "Round 1";
+    const nextGameNumber = Math.max(0, ...existingMatchups.map((matchup) => Number(matchup.generatedGameNumber) || 0)) + 1;
+    const nextMatchup = {
+      ...makeDefaultTournamentMatchup(nextGameNumber),
+      generatedGameNumber: nextGameNumber,
+      round: nextRound,
+      name: `Game ${nextGameNumber}`,
+    };
     updateSelectedLeagueRecord((league) => ({
       ...league,
       tournaments: (league.tournaments || []).map((tournament) => {
@@ -9168,7 +9314,249 @@ export default function WiffleScoringPrototype() {
         };
       }),
     }));
-    setOpenTournamentMatchupId(nextMatchup.id);
+  }
+
+  function clearTournamentCanvas(tournamentId) {
+    if (!window.confirm("Clear this tournament canvas? This will remove all matchups, rounds, links, and loser bracket lanes.")) return;
+    updateSelectedLeagueRecord((league) => ({
+      ...league,
+      tournaments: (league.tournaments || []).map((tournament) => {
+        if (tournament.id !== tournamentId) return tournament;
+        return {
+          ...tournament,
+          matchups: [],
+          customRounds: tournament.type === "custom" ? ["Round 1"] : tournament.customRounds || ["Round 1"],
+          loserBracketEnabled: false,
+          loserBracketLanes: [],
+          loserLaneOffset: 0,
+          championshipMatchupId: "",
+        };
+      }),
+    }));
+    setOpenTournamentMatchupId("");
+  }
+
+  function moveTournamentMatchupNumber(tournamentId, matchupId, direction) {
+    updateSelectedLeagueRecord((league) => ({
+      ...league,
+      tournaments: (league.tournaments || []).map((tournament) => {
+        if (tournament.id !== tournamentId) return tournament;
+        const numberedMatchups = (tournament.matchups || [])
+          .filter((matchup) => Number(matchup.generatedGameNumber) > 0)
+          .sort((a, b) => Number(a.generatedGameNumber) - Number(b.generatedGameNumber));
+        const currentIndex = numberedMatchups.findIndex((matchup) => matchup.id === matchupId);
+        const swapIndex = currentIndex + (direction === "up" ? -1 : 1);
+        if (currentIndex < 0 || swapIndex < 0 || swapIndex >= numberedMatchups.length) return tournament;
+        const current = numberedMatchups[currentIndex];
+        const swap = numberedMatchups[swapIndex];
+        return {
+          ...tournament,
+          matchups: (tournament.matchups || []).map((matchup) => {
+            if (matchup.id === current.id) return { ...matchup, generatedGameNumber: swap.generatedGameNumber, name: `Game ${swap.generatedGameNumber}` };
+            if (matchup.id === swap.id) return { ...matchup, generatedGameNumber: current.generatedGameNumber, name: `Game ${current.generatedGameNumber}` };
+            return matchup;
+          }),
+        };
+      }),
+    }));
+  }
+
+  async function exportTournamentBracket(format = "png") {
+    const sourceNode = tournamentCanvasExportRef.current;
+    if (!sourceNode || !selectedTournament) {
+      window.alert?.("Open a tournament bracket before exporting.");
+      return;
+    }
+
+    try {
+      const width = Math.max(1, Math.ceil(sourceNode.scrollWidth || sourceNode.offsetWidth || 1200));
+      const height = Math.max(1, Math.ceil(sourceNode.scrollHeight || sourceNode.offsetHeight || 800));
+      const clone = sourceNode.cloneNode(true);
+      clone.style.transform = "none";
+      clone.style.position = "relative";
+      clone.style.left = "0";
+      clone.style.top = "0";
+      clone.style.width = `${width}px`;
+      clone.style.height = `${height}px`;
+      clone.querySelectorAll("button").forEach((button) => { button.style.display = "none"; });
+      const cssText = [...document.styleSheets].map((sheet) => {
+        try {
+          return [...sheet.cssRules].map((rule) => rule.cssText).join("\n");
+        } catch {
+          return "";
+        }
+      }).join("\n");
+      const xhtml = `
+        <div xmlns="http://www.w3.org/1999/xhtml">
+          <style>${cssText}</style>
+          <div style="width:${width}px;height:${height}px;background:white;">${clone.outerHTML}</div>
+        </div>
+      `;
+      const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}"><foreignObject width="100%" height="100%">${xhtml}</foreignObject></svg>`;
+      const svgUrl = URL.createObjectURL(new Blob([svg], { type: "image/svg+xml;charset=utf-8" }));
+      const image = new Image();
+      await new Promise((resolve, reject) => {
+        image.onload = resolve;
+        image.onerror = reject;
+        image.src = svgUrl;
+      });
+      const canvas = document.createElement("canvas");
+      canvas.width = width;
+      canvas.height = height;
+      const context = canvas.getContext("2d");
+      context.fillStyle = "#ffffff";
+      context.fillRect(0, 0, width, height);
+      context.drawImage(image, 0, 0);
+      URL.revokeObjectURL(svgUrl);
+      const dataUrl = canvas.toDataURL("image/png");
+      const safeName = String(selectedTournament.name || "tournament-bracket").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "tournament-bracket";
+
+      if (format === "pdf") {
+        const printWindow = window.open("", "_blank");
+        if (!printWindow) {
+          window.alert?.("Your browser blocked the PDF export window. Allow popups and try again.");
+          return;
+        }
+        printWindow.document.write(`<!doctype html><html><head><title>${safeName}</title><style>body{margin:0;background:white;}img{display:block;width:100%;height:auto;}@media print{img{width:100%;page-break-inside:avoid;}}</style></head><body><img src="${dataUrl}" alt="Tournament bracket" /></body></html>`);
+        printWindow.document.close();
+        printWindow.focus();
+        setTimeout(() => printWindow.print(), 300);
+        return;
+      }
+
+      const link = document.createElement("a");
+      link.href = dataUrl;
+      link.download = `${safeName}.png`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+    } catch (error) {
+      console.warn("Unable to export tournament bracket.", error);
+      window.alert?.("The bracket could not be exported from this browser view. Try full screen canvas and export again.");
+    }
+  }
+
+  function addTournamentLoserMatchup(tournamentId) {
+    const tournament = selectedLeagueTournaments.find((item) => item.id === tournamentId);
+    const lanes = getTournamentLoserLanes(tournament || {});
+    const nextLane = {
+      id: newId(),
+      name: `Loser's Bracket ${lanes.length + 1}`,
+      offset: 0,
+    };
+    updateSelectedLeagueRecord((league) => ({
+      ...league,
+      tournaments: (league.tournaments || []).map((tournament) => {
+        if (tournament.id !== tournamentId) return tournament;
+        const currentLanes = getTournamentLoserLanes(tournament);
+        return {
+          ...tournament,
+          loserBracketEnabled: true,
+          loserBracketLanes: [...currentLanes, nextLane],
+        };
+      }),
+    }));
+  }
+
+  function updateTournamentLoserLane(tournamentId, action, laneId = "") {
+    if (action === "remove") {
+      const tournament = selectedLeagueTournaments.find((item) => item.id === tournamentId);
+      const lanes = getTournamentLoserLanes(tournament || {});
+      const targetLaneId = laneId || lanes[0]?.id || "";
+      const loserMatchupCount = (tournament?.matchups || []).filter((matchup) => getTournamentMatchupLoserLaneId(matchup, tournament) === targetLaneId).length;
+      const confirmMessage = loserMatchupCount > 0
+        ? `Remove this loser bracket lane and delete ${loserMatchupCount} matchup${loserMatchupCount === 1 ? "" : "s"} in it?`
+        : "Remove the loser bracket lane?";
+      if (!window.confirm(confirmMessage)) return;
+    }
+
+    updateSelectedLeagueRecord((league) => ({
+      ...league,
+      tournaments: (league.tournaments || []).map((tournament) => {
+        if (tournament.id !== tournamentId) return tournament;
+        const currentLanes = getTournamentLoserLanes(tournament);
+        const targetLaneId = laneId || currentLanes[0]?.id || "";
+        if (action === "remove") {
+          const loserMatchupIds = new Set((tournament.matchups || [])
+            .filter((matchup) => getTournamentMatchupLoserLaneId(matchup, tournament) === targetLaneId)
+            .map((matchup) => matchup.id));
+          const nextLanes = currentLanes.filter((lane) => lane.id !== targetLaneId);
+          return {
+            ...tournament,
+            loserBracketEnabled: nextLanes.length > 0,
+            loserBracketLanes: nextLanes,
+            loserLaneOffset: nextLanes[0]?.offset || 0,
+            championshipMatchupId: loserMatchupIds.has(tournament.championshipMatchupId) ? "" : tournament.championshipMatchupId,
+            matchups: (tournament.matchups || [])
+              .filter((matchup) => !loserMatchupIds.has(matchup.id))
+              .map((matchup) => ({
+                ...matchup,
+                nextMatchupId: loserMatchupIds.has(matchup.nextMatchupId) ? "" : matchup.nextMatchupId,
+                loserNextMatchupId: "",
+              })),
+          };
+        }
+        const targetLaneIndex = currentLanes.findIndex((lane) => lane.id === targetLaneId);
+        const proposedOffset = (Number(currentLanes[targetLaneIndex]?.offset) || 0) + (action === "up" ? -80 : 80);
+        const previousOffset = targetLaneIndex > 0 ? Number(currentLanes[targetLaneIndex - 1]?.offset) || 0 : -520;
+        const nextOffset = targetLaneIndex >= 0 && targetLaneIndex < currentLanes.length - 1 ? Number(currentLanes[targetLaneIndex + 1]?.offset) || 0 : 1200;
+        const minOffset = targetLaneIndex > 0 ? previousOffset - 150 : -520;
+        const maxOffset = targetLaneIndex < currentLanes.length - 1 ? nextOffset + 150 : 1200;
+        const clampedOffset = Math.max(minOffset, Math.min(maxOffset, proposedOffset));
+        const nextLanes = currentLanes.map((lane) => (
+          lane.id === targetLaneId ? { ...lane, offset: clampedOffset } : lane
+        ));
+        return {
+          ...tournament,
+          loserBracketEnabled: true,
+          loserBracketLanes: nextLanes,
+          loserLaneOffset: nextLanes[0]?.offset || 0,
+        };
+      }),
+    }));
+  }
+
+  function addTournamentRound(tournamentId) {
+    updateSelectedLeagueRecord((league) => ({
+      ...league,
+      tournaments: (league.tournaments || []).map((tournament) => {
+        if (tournament.id !== tournamentId) return tournament;
+        const rounds = [...new Set([...(tournament.customRounds || []), ...(tournament.matchups || []).map((matchup) => getTournamentRoundColumnLabel(matchup.round || "Round 1"))])];
+        const roundNumbers = rounds.map((round) => getTournamentRoundNumber(round)).filter(Number.isFinite);
+        const nextRound = `Round ${roundNumbers.length ? Math.max(...roundNumbers) + 1 : 1}`;
+        return { ...tournament, customRounds: [...rounds, nextRound] };
+      }),
+    }));
+  }
+
+  function openTournamentRoundDelete(tournamentId) {
+    const tournament = selectedLeagueTournaments.find((item) => item.id === tournamentId);
+    if (!tournament) return;
+    const rounds = [...new Set([...(tournament.customRounds || []), ...(tournament.matchups || []).map((matchup) => getTournamentRoundColumnLabel(matchup.round || "Round 1"))])];
+    setPendingTournamentRoundDelete({ tournamentId, rounds });
+  }
+
+  function removeTournamentRound(tournamentId, roundName) {
+    updateSelectedLeagueRecord((league) => ({
+      ...league,
+      tournaments: (league.tournaments || []).map((tournament) => {
+        if (tournament.id !== tournamentId) return tournament;
+        const removedIds = new Set((tournament.matchups || []).filter((matchup) => getTournamentRoundColumnLabel(matchup.round || "Round 1") === roundName).map((matchup) => matchup.id));
+        return {
+          ...tournament,
+          customRounds: (tournament.customRounds || []).filter((round) => getTournamentRoundColumnLabel(round) !== roundName),
+          championshipMatchupId: removedIds.has(tournament.championshipMatchupId) ? "" : tournament.championshipMatchupId,
+          matchups: (tournament.matchups || [])
+            .filter((matchup) => !removedIds.has(matchup.id))
+            .map((matchup) => ({
+              ...matchup,
+              nextMatchupId: removedIds.has(matchup.nextMatchupId) ? "" : matchup.nextMatchupId,
+              loserNextMatchupId: removedIds.has(matchup.loserNextMatchupId) ? "" : matchup.loserNextMatchupId,
+            })),
+        };
+      }),
+    }));
+    setPendingTournamentRoundDelete(null);
   }
 
   function updateTournamentMatchup(tournamentId, matchupId, field, value) {
@@ -9179,13 +9567,126 @@ export default function WiffleScoringPrototype() {
         return {
           ...tournament,
           matchups: (tournament.matchups || []).map((matchup) => {
+            const movingMatchup = (tournament.matchups || []).find((item) => item.id === matchupId);
+            const lanesForMove = field === "layoutPosition" ? getTournamentLoserLanes(tournament) : [];
+            const movingPreviousLaneId = field === "layoutPosition" ? getTournamentMatchupLoserLaneId(movingMatchup, tournament) : "";
+            const movingPreviousLaneIndex = lanesForMove.findIndex((lane) => lane.id === movingPreviousLaneId);
+            const movingNextLaneIndex = lanesForMove.findIndex((lane) => lane.id === value?.loserLaneId);
+            const movingToLoserLane = field === "layoutPosition" && value?.lane === "loser";
+            const movingToWinnerLane = field === "layoutPosition" && value?.lane === "winner";
+            const movingSkippedLane = movingToLoserLane && (
+              (!movingPreviousLaneId && movingNextLaneIndex > 0)
+              || (movingPreviousLaneId && movingNextLaneIndex > movingPreviousLaneIndex + 1)
+              || (movingPreviousLaneId && movingNextLaneIndex < movingPreviousLaneIndex)
+            );
+            const movingClearConnections = Boolean(field === "layoutPosition" && (value?.clearConnections || movingSkippedLane));
+
+            if (field === "layoutPosition" && matchup.id !== matchupId) {
+              if (movingClearConnections) {
+                return {
+                  ...matchup,
+                  nextMatchupId: matchup.nextMatchupId === matchupId ? "" : matchup.nextMatchupId,
+                  loserNextMatchupId: matchup.loserNextMatchupId === matchupId ? "" : matchup.loserNextMatchupId,
+                };
+              }
+              if (movingToLoserLane) {
+                const sourceLaneId = getTournamentMatchupLoserLaneId(matchup, tournament);
+                const sourceLaneIndex = lanesForMove.findIndex((lane) => lane.id === sourceLaneId);
+                const incomingCanPointToMovedLane = (!sourceLaneId && movingNextLaneIndex === 0) || (sourceLaneId && movingNextLaneIndex === sourceLaneIndex + 1);
+                if (!incomingCanPointToMovedLane && (matchup.nextMatchupId === matchupId || matchup.loserNextMatchupId === matchupId)) {
+                  return {
+                    ...matchup,
+                    nextMatchupId: matchup.nextMatchupId === matchupId ? "" : matchup.nextMatchupId,
+                    loserNextMatchupId: matchup.loserNextMatchupId === matchupId ? "" : matchup.loserNextMatchupId,
+                  };
+                }
+              }
+              if (movingToLoserLane && matchup.nextMatchupId === matchupId) {
+                return { ...matchup, nextMatchupId: "", loserNextMatchupId: matchupId };
+              }
+              if (movingToWinnerLane && matchup.loserNextMatchupId === matchupId) {
+                return { ...matchup, nextMatchupId: matchupId, loserNextMatchupId: "" };
+              }
+            }
+
+            if (field === "layoutPosition" && value?.clearConnections && matchup.id !== matchupId) {
+              return {
+                ...matchup,
+                nextMatchupId: matchup.nextMatchupId === matchupId ? "" : matchup.nextMatchupId,
+                loserNextMatchupId: matchup.loserNextMatchupId === matchupId ? "" : matchup.loserNextMatchupId,
+              };
+            }
             if (matchup.id !== matchupId) return matchup;
             if (field === "layoutPosition") {
+              const lanes = getTournamentLoserLanes(tournament);
+              const previousLoserLaneId = getTournamentMatchupLoserLaneId(matchup, tournament);
+              const previousLoserLaneIndex = lanes.findIndex((lane) => lane.id === previousLoserLaneId);
+              const nextLoserLaneIndex = lanes.findIndex((lane) => lane.id === value?.loserLaneId);
+              const wasInLoserLane = Boolean(previousLoserLaneId);
+              const nextRound = value?.round ? String(value.round) : matchup.round;
+              const movedToLoserLane = value?.lane === "loser";
+              const movedToWinnerLane = value?.lane === "winner";
+              const movedBetweenWinnerAndLoser = (movedToLoserLane && !wasInLoserLane) || (movedToWinnerLane && wasInLoserLane);
+              const skippedLoserLane = movedToLoserLane && (
+                (!wasInLoserLane && nextLoserLaneIndex > 0)
+                || (wasInLoserLane && nextLoserLaneIndex > previousLoserLaneIndex + 1)
+                || (wasInLoserLane && nextLoserLaneIndex < previousLoserLaneIndex)
+              );
+              const shouldClearConnections = Boolean(value?.clearConnections || skippedLoserLane);
+              const cleanRoundNumber = getTournamentRoundNumber(nextRound || matchup.round || "Round 1");
+              const nextLaneRound = tournament.type === "custom" && movedToLoserLane
+                ? `Loser's Bracket Round ${cleanRoundNumber}`
+                : tournament.type === "custom" && movedToWinnerLane && String(matchup.round || "").toLowerCase().includes("loser")
+                  ? `Round ${cleanRoundNumber}`
+                  : nextRound;
+              const nextName = tournament.type === "custom" && movedToLoserLane && !String(matchup.name || "").toLowerCase().includes("loser")
+                ? `Loser's Bracket ${cleanRoundNumber}`
+                : matchup.name;
               return {
                 ...matchup,
                 layoutX: Math.max(0, Math.round(Number(value?.x) || 0)),
                 layoutY: Math.max(0, Math.round(Number(value?.y) || 0)),
+                ...(shouldClearConnections ? { nextMatchupId: "", loserNextMatchupId: "" } : {}),
+                ...(!shouldClearConnections && movedToLoserLane ? { loserNextMatchupId: matchup.loserNextMatchupId || matchup.nextMatchupId || "", nextMatchupId: "" } : {}),
+                ...(!shouldClearConnections && movedToWinnerLane ? { nextMatchupId: matchup.nextMatchupId || matchup.loserNextMatchupId || "", loserNextMatchupId: "" } : {}),
+                ...(value?.loserLaneId ? { loserLaneId: value.loserLaneId } : movedToWinnerLane ? { loserLaneId: "" } : {}),
+                ...(tournament.type === "custom" ? { round: nextLaneRound, name: nextName } : {}),
               };
+            }
+            if (field === "customLane") {
+              const lanes = getTournamentLoserLanes(tournament);
+              if (value === "winner") {
+                return {
+                  ...matchup,
+                  loserLaneId: "",
+                  round: `Round ${getTournamentRoundNumber(matchup.round || "Round 1")}`,
+                  name: String(matchup.name || "").toLowerCase().includes("loser") ? `Matchup ${getTournamentRoundNumber(matchup.round || "Round 1")}` : matchup.name,
+                };
+              }
+              const lane = lanes.find((item) => item.id === value);
+              if (!lane) return matchup;
+              const roundNumber = getTournamentRoundNumber(matchup.round || "Round 1");
+              return {
+                ...matchup,
+                loserLaneId: lane.id,
+                round: `Loser's Bracket Round ${roundNumber}`,
+                name: String(matchup.name || "").toLowerCase().includes("loser") ? matchup.name : `${lane.name} Matchup ${roundNumber}`,
+              };
+            }
+            if (field === "loserNextMatchupId" && value) {
+              const lanes = getTournamentLoserLanes(tournament);
+              const targetMatchup = (tournament.matchups || []).find((item) => item.id === value);
+              const sourceLaneId = getTournamentMatchupLoserLaneId(matchup, tournament);
+              const targetLaneId = getTournamentMatchupLoserLaneId(targetMatchup, tournament);
+              if (targetLaneId) {
+                const sourceLaneIndex = lanes.findIndex((lane) => lane.id === sourceLaneId);
+                const targetLaneIndex = lanes.findIndex((lane) => lane.id === targetLaneId);
+                const canLink = (!sourceLaneId && targetLaneIndex === 0) || (sourceLaneId && targetLaneIndex === sourceLaneIndex + 1);
+                if (!canLink) {
+                  window.alert?.("Loser paths must move lane by lane: winner bracket to Loser's Bracket 1, then Loser's Bracket 1 to Loser's Bracket 2, and so on.");
+                  return matchup;
+                }
+              }
             }
             if (field === "homeAwayMode") {
               const teamOneId = matchup.teamOneId || "";
@@ -9364,7 +9865,9 @@ export default function WiffleScoringPrototype() {
         const loserLossesAfter = (lossCountsBefore[loserTeamId] || 0) + priorChampionshipResetLoss + (loserTeamId ? 1 : 0);
         const championshipResetRequired = Boolean(isChampionship && tournament.type === "double_elimination" && (loserTeamId || loserSeed) && (!loserTeamId || loserLossesAfter < 2));
         const loserIsEliminated = Boolean((loserTeamId && loserLossesAfter >= lossesNeededToEliminate) || (!loserTeamId && loserSeed && tournament.type !== "double_elimination"));
-        const sourceIsLosersBracket = String(sourceMatchup.round || sourceMatchup.name || "").toLowerCase().includes("loser");
+        const sourceMatchupText = String(`${sourceMatchup.round || ""} ${sourceMatchup.name || ""}`).toLowerCase();
+        const sourceIsLosersBracket = sourceMatchupText.includes("loser");
+        const sourceNextMatchupId = sourceMatchup.nextMatchupId || (tournament.type === "single_elimination" && tournament.championshipMatchupId && sourceMatchupText.includes("bracket winners") && tournament.championshipMatchupId !== sourceMatchup.id ? tournament.championshipMatchupId : "");
         const sourceWinnerPlaceholder = getTournamentWinnerPlaceholder(sourceMatchup) || (sourceIsLosersBracket ? "Loser's Bracket Winner" : "");
         const sourceLoserPlaceholder = sourceMatchup.generatedGameNumber ? `L${sourceMatchup.generatedGameNumber}` : "";
         return {
@@ -9384,7 +9887,7 @@ export default function WiffleScoringPrototype() {
               };
             }
             if (isChampionship) return matchup;
-            if (matchup.id === sourceMatchup.nextMatchupId) {
+            if (matchup.id === sourceNextMatchupId) {
               const cleared = {
                 ...matchup,
                 teamOneId: teamIds.includes(matchup.teamOneId) ? "" : matchup.teamOneId,
@@ -14000,24 +14503,33 @@ export default function WiffleScoringPrototype() {
 
         {activePage === "tournaments" && selectedLeague && (
           <div className="space-y-4">
-            <Card>
-              <div className="p-5">
-                <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-                  <div>
-                    <h2 className="text-xl font-bold">Tournaments</h2>
-                    <p className="text-sm text-slate-500">Create flexible tournament brackets, series, and playoff matchups, then import them into the league schedule.</p>
-                  </div>
-                  <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center sm:justify-end">
-                    <select className="w-full rounded-xl border px-3 py-2 text-sm font-semibold sm:w-auto" value={selectedLeague.id} onChange={(event) => handleSelectedLeagueChange(event.target.value)}>
-                      {leagues.map((league) => <option key={league.id} value={league.id}>{league.name}</option>)}
-                    </select>
-                    <Button variant="primary" onClick={createTournament}>+ New Tournament</Button>
+            {!selectedTournament ? (
+              <Card>
+                <div className="p-5">
+                  <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+                    <div>
+                      <h2 className="text-xl font-bold">Tournaments</h2>
+                      <p className="text-sm text-slate-500">Create flexible tournament brackets, series, and playoff matchups, then import them into the league schedule.</p>
+                    </div>
+                    <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center sm:justify-end">
+                      <select className="w-full rounded-xl border px-3 py-2 text-sm font-semibold sm:w-auto" value={tournamentLeagueFilter} onChange={(event) => setTournamentLeagueFilter(event.target.value)}>
+                        <option value="all">All Leagues</option>
+                        {leagues.map((league) => <option key={league.id} value={league.id}>{league.name}</option>)}
+                      </select>
+                      <Button variant="primary" onClick={createTournament}>+ New Tournament</Button>
+                    </div>
                   </div>
                 </div>
+              </Card>
+            ) : (
+              <div className="flex justify-start">
+                <Button variant="outline" onClick={() => { setSelectedTournamentId(""); setOpenTournamentMatchupId(""); setOpenTournamentTeamsId(""); }}>
+                  Back to Tournaments
+                </Button>
               </div>
-            </Card>
+            )}
 
-            {selectedLeagueTournaments.length === 0 ? (
+            {!selectedTournament && allLeagueTournaments.length === 0 ? (
               <Card>
                 <div className="p-8 text-center">
                   <h2 className="text-2xl font-black">Build your first tournament</h2>
@@ -14027,33 +14539,54 @@ export default function WiffleScoringPrototype() {
                   </div>
                 </div>
               </Card>
-            ) : (
-              <div className="grid gap-4 xl:grid-cols-[18rem_1fr] xl:items-start">
+            ) : !selectedTournament ? (
                 <Card>
-                  <div className="p-4">
-                    <div className="mb-3 flex items-center justify-between gap-2">
-                      <h2 className="text-lg font-black">Tournament List</h2>
-                      <span className="rounded-full bg-slate-100 px-2 py-1 text-[10px] font-black uppercase text-slate-500">{selectedLeagueTournaments.length}</span>
+                  <div className="p-5">
+                    <div className="mb-4 flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
+                      <div>
+                        <h2 className="text-lg font-black">Tournament List</h2>
+                        <p className="text-sm text-slate-500">Open a tournament to edit its settings, teams, bracket, and schedule import.</p>
+                      </div>
+                      <span className="w-fit rounded-full bg-slate-100 px-3 py-1 text-xs font-black uppercase text-slate-500">{visibleTournamentList.length} shown</span>
                     </div>
-                    <div className="space-y-2">
-                      {selectedLeagueTournaments.map((tournament) => (
+                    <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+                      {visibleTournamentList.map((tournament) => (
                         <button
-                          key={tournament.id}
+                          key={`${tournament.sourceLeagueId}-${tournament.id}`}
                           type="button"
-                          className={`w-full rounded-xl border p-3 text-left transition ${selectedTournament?.id === tournament.id ? "border-slate-900 bg-slate-900 text-white" : "bg-slate-50 hover:bg-slate-100"}`}
-                          onClick={() => setSelectedTournamentId(tournament.id)}
+                          className="w-full rounded-2xl border bg-slate-50 p-4 text-left transition hover:border-slate-400 hover:bg-white"
+                          onClick={() => {
+                            if (tournament.sourceLeagueId !== selectedLeague.id) handleSelectedLeagueChange(tournament.sourceLeagueId);
+                            setSelectedTournamentId(tournament.id);
+                          }}
                         >
-                          <div className="font-black">{tournament.name || "Untitled Tournament"}</div>
-                          <div className={`mt-1 text-xs font-semibold ${selectedTournament?.id === tournament.id ? "text-slate-200" : "text-slate-500"}`}>
+                          <div className="flex items-center gap-3">
+                            {tournament.sourceLeagueLogoUrl ? (
+                              <img src={tournament.sourceLeagueLogoUrl} alt="" className="h-10 w-10 rounded-xl object-cover" />
+                            ) : (
+                              <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-slate-200 text-sm font-black text-slate-600">{String(tournament.sourceLeagueName || "L").slice(0, 1)}</div>
+                            )}
+                            <div className="min-w-0">
+                              <div className="truncate font-black">{tournament.name || "Untitled Tournament"}</div>
+                              <div className="truncate text-xs font-bold uppercase text-slate-500">{tournament.sourceLeagueName}</div>
+                            </div>
+                          </div>
+                          <div className="mt-3 text-xs font-semibold text-slate-500">
                             {tournamentTypeLabel(tournament.type)} · {(tournament.matchups || []).length} matchup{(tournament.matchups || []).length === 1 ? "" : "s"}
+                          </div>
+                          <div className="mt-2 flex flex-wrap gap-2">
+                            <span className="rounded-full bg-white px-2 py-1 text-[10px] font-black uppercase text-slate-500">{tournament.status || "setup"}</span>
+                            {tournament.settingsSaved && <span className="rounded-full bg-green-100 px-2 py-1 text-[10px] font-black uppercase text-green-800">Settings Saved</span>}
                           </div>
                         </button>
                       ))}
                     </div>
+                    {visibleTournamentList.length === 0 && (
+                      <p className="rounded-xl border bg-slate-50 p-5 text-center text-sm text-slate-500">No tournaments match this league filter.</p>
+                    )}
                   </div>
                 </Card>
-
-                {selectedTournament && (
+            ) : (
                   <div className="min-w-0 space-y-4">
                     <Card>
                       <div className="p-5">
@@ -14101,15 +14634,32 @@ export default function WiffleScoringPrototype() {
                           </div>
                           )}
                           <div className="lg:col-span-5">
+                            <label className="text-xs font-semibold uppercase text-slate-500">Leagues Included</label>
+                            <div className="mt-2 grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+                              {leagues.map((league) => {
+                                const checked = selectedTournamentLeagueIds.includes(league.id);
+                                return (
+                                  <label key={`tournament-league-${league.id}`} className={`flex items-center gap-2 rounded-xl border p-3 text-sm font-semibold ${checked ? "border-slate-900 bg-slate-50" : "bg-white"}`}>
+                                    <input type="checkbox" checked={checked} onChange={(event) => toggleTournamentLeague(selectedTournament.id, league.id, event.target.checked)} />
+                                    {league.logoUrl ? <img src={league.logoUrl} alt="" className="h-7 w-7 rounded-lg object-cover" /> : <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-slate-100 text-xs font-black text-slate-500">{String(league.name || "L").slice(0, 1)}</span>}
+                                    <span className="min-w-0 truncate">{league.name}</span>
+                                  </label>
+                                );
+                              })}
+                            </div>
+                          </div>
+                          <div className="lg:col-span-5">
                             <label className="text-xs font-semibold uppercase text-slate-500">Notes</label>
                             <textarea className="mt-1 w-full rounded-xl border px-3 py-2 text-sm" rows="2" value={selectedTournament.notes || ""} onChange={(event) => updateTournament(selectedTournament.id, "notes", event.target.value)} placeholder="Seeding notes, format rules, commissioner notes, prize notes, etc." />
                           </div>
                         </div>
                         <div className="mt-4 flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-end sm:justify-between">
                           <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap">
-                            <Button variant={selectedTournament.settingsSaved ? "outline" : "primary"} onClick={() => saveTournamentSettings(selectedTournament.id)}>{selectedTournament.settingsSaved ? "Settings Saved" : "Save Tournament Settings"}</Button>
+                            <Button variant={selectedTournament.settingsSaved ? "outline" : "primary"} onClick={() => saveTournamentSettings(selectedTournament.id)}>{selectedTournament.settingsSaved ? "Rebuild Seed Slots" : "Save Settings & Seed Slots"}</Button>
+                            <p className="mt-2 text-xs font-semibold text-slate-500">Saving settings creates the seed slots from bracket count and teams per bracket. Rebuild if those settings change.</p>
                             <Button variant="outline" onClick={() => importTournamentToSchedule(selectedTournament)} disabled={(selectedTournament.matchups || []).length === 0 || (selectedTournament.type !== "round_robin" && !selectedTournament.championshipMatchupId)}>Import To Schedule</Button>
                             <Button variant={selectedTournament.simulationMode ? "primary" : "outline"} onClick={() => toggleTournamentSimulation(selectedTournament.id, !selectedTournament.simulationMode)} disabled={(selectedTournament.matchups || []).length === 0}>{selectedTournament.simulationMode ? "Exit Simulation" : "Simulate Tournament"}</Button>
+                            {selectedTournament.type !== "round_robin" && <Button variant="outline" onClick={() => openTournamentByeEditor(selectedTournament.id)} disabled={!selectedTournament.settingsSaved || (selectedTournament.participants || []).length === 0}>Assign Byes</Button>}
                             <Button variant="danger" onClick={() => { if (window.confirm?.(`Delete ${selectedTournament.name || "this tournament"}? This will remove this tournament setup but will not remove already imported schedule weeks.`)) removeTournament(selectedTournament.id); }}>Delete Tournament</Button>
                           </div>
                           <div className="w-full sm:w-44">
@@ -14190,7 +14740,7 @@ export default function WiffleScoringPrototype() {
                                       <td className="px-3 py-2">
                                         <select className="w-full rounded-xl border px-3 py-2 text-sm" value={participant.teamId || ""} onChange={(event) => updateTournamentParticipant(selectedTournament.id, participant.id, "teamId", event.target.value)}>
                                           <option value="">Select team</option>
-                                          {(selectedLeague.teams || []).map((team) => <option key={team.id} value={team.id} disabled={selectedTeamIds.has(team.id)}>{selectedTeamIds.has(team.id) ? `${team.name} - already selected` : team.name}</option>)}
+                                          {selectedTournamentTeamOptions.map((team) => <option key={`${team.sourceLeagueId}-${team.id}`} value={team.id} disabled={selectedTeamIds.has(team.id)}>{selectedTeamIds.has(team.id) ? `${team.name} - already selected` : `${team.name} · ${team.sourceLeagueName}`}</option>)}
                                         </select>
                                       </td>
                                       {selectedTournament.type !== "round_robin" && (
@@ -14203,7 +14753,7 @@ export default function WiffleScoringPrototype() {
                                         <div className="rounded-xl border bg-slate-50 px-3 py-2 text-sm font-black text-slate-900">Seed {participant.seed || "-"}</div>
                                       </td>
                                       )}
-                                      <td className="px-3 py-2">{selectedTournament.type === "round_robin" ? <Button variant="outline" onClick={() => removeTournamentParticipant(selectedTournament.id, participant.id)}>Remove</Button> : <span className="text-xs font-bold uppercase text-slate-400">Generated</span>}</td>
+                                      <td className="px-3 py-2">{selectedTournament.type === "round_robin" ? <Button variant="outline" onClick={() => removeTournamentParticipant(selectedTournament.id, participant.id)}>Remove</Button> : <span className={`text-xs font-bold uppercase ${participant.bye ? "text-green-700" : "text-slate-400"}`}>{participant.bye ? "Bye" : "Generated"}</span>}</td>
                                     </tr>
                                   );
                                 })}
@@ -14268,6 +14818,10 @@ export default function WiffleScoringPrototype() {
                             <Button variant="outline" onClick={() => addTournamentMatchup(selectedTournament.id)} disabled={!selectedTournament.settingsSaved}>+ Matchup</Button>
                             {selectedTournament.type !== "round_robin" && (
                               <>
+                                <Button variant="outline" onClick={() => openTournamentByeEditor(selectedTournament.id)} disabled={!selectedTournament.settingsSaved || (selectedTournament.participants || []).length === 0}>Assign Byes</Button>
+                                {selectedTournament.type === "custom" && <Button variant="outline" onClick={() => addTournamentRound(selectedTournament.id)} disabled={!selectedTournament.settingsSaved}>+ Round</Button>}
+                                {selectedTournament.type === "custom" && <Button variant="outline" onClick={() => openTournamentRoundDelete(selectedTournament.id)} disabled={!selectedTournament.settingsSaved}>Remove Round</Button>}
+                                {selectedTournament.type === "custom" && <Button variant="outline" onClick={() => clearTournamentCanvas(selectedTournament.id)} disabled={!selectedTournament.settingsSaved || ((selectedTournament.matchups || []).length === 0 && (selectedTournament.customRounds || []).length <= 1 && getTournamentLoserLanes(selectedTournament).length === 0)}>Clear Canvas</Button>}
                                 <div className="flex items-center gap-1 rounded-xl border bg-white px-2 py-1">
                                   <button type="button" className="rounded-lg px-2 py-1 text-sm font-black text-slate-500 hover:bg-slate-100" onClick={() => setTournamentCanvasZoom((zoom) => Math.max(0.2, Number((zoom - 0.1).toFixed(2))))}>-</button>
                                   <span className="w-14 text-center text-xs font-black uppercase text-slate-500">{Math.round(tournamentCanvasZoom * 100)}%</span>
@@ -14293,12 +14847,14 @@ export default function WiffleScoringPrototype() {
                                 >
                                   {tournamentLayoutMoveMode ? "Done Moving" : "Move Matchups"}
                                 </Button>
-                                {selectedTournament.type === "double_elimination" && (
+                                {(selectedTournament.type === "double_elimination" || selectedTournament.loserBracketEnabled || (selectedTournament.matchups || []).some((matchup) => matchup.loserNextMatchupId || String(`${matchup.round || ""} ${matchup.name || ""}`).toLowerCase().includes("loser"))) && (
                                   <Button variant={showTournamentLoserConnectors ? "primary" : "outline"} onClick={() => setShowTournamentLoserConnectors((current) => !current)}>
                                     {showTournamentLoserConnectors ? "Hide Loser Lines" : "Show Loser Lines"}
                                   </Button>
                                 )}
                                 <Button variant="outline" onClick={() => setTournamentCanvasFullscreen((current) => !current)} disabled={!selectedTournament.settingsSaved || (selectedTournament.matchups || []).length === 0}>{tournamentCanvasFullscreen ? "Exit Full Screen" : "Full Screen Canvas"}</Button>
+                                <Button variant="outline" onClick={() => exportTournamentBracket("png")} disabled={!selectedTournament.settingsSaved || (selectedTournament.matchups || []).length === 0}>Export PNG</Button>
+                                <Button variant="outline" onClick={() => exportTournamentBracket("pdf")} disabled={!selectedTournament.settingsSaved || (selectedTournament.matchups || []).length === 0}>Export PDF</Button>
                                 <Button variant="outline" onClick={() => resetTournamentLayout(selectedTournament.id)} disabled={!selectedTournament.settingsSaved || (selectedTournament.matchups || []).length === 0}>Reset Layout</Button>
                               </>
                             )}
@@ -14333,7 +14889,9 @@ export default function WiffleScoringPrototype() {
                                 <Button variant="outline" onClick={() => setTournamentCanvasZoom((zoom) => Math.max(0.2, Number((zoom - 0.1).toFixed(2))))}>Zoom Out</Button>
                                 <Button variant="outline" onClick={() => setTournamentCanvasZoom((zoom) => Math.min(1.75, Number((zoom + 0.1).toFixed(2))))}>Zoom In</Button>
                                 <Button variant={tournamentLayoutMoveMode ? "primary" : "outline"} onClick={() => setTournamentLayoutMoveMode((current) => !current)}>{tournamentLayoutMoveMode ? "Done Moving" : "Move Matchups"}</Button>
-                                {selectedTournament.type === "double_elimination" && (
+                                <Button variant="outline" onClick={() => exportTournamentBracket("png")} disabled={(selectedTournament.matchups || []).length === 0}>Export PNG</Button>
+                                <Button variant="outline" onClick={() => exportTournamentBracket("pdf")} disabled={(selectedTournament.matchups || []).length === 0}>Export PDF</Button>
+                                {(selectedTournament.type === "double_elimination" || selectedTournament.loserBracketEnabled || (selectedTournament.matchups || []).some((matchup) => matchup.loserNextMatchupId || String(`${matchup.round || ""} ${matchup.name || ""}`).toLowerCase().includes("loser"))) && (
                                   <Button variant={showTournamentLoserConnectors ? "primary" : "outline"} onClick={() => setShowTournamentLoserConnectors((current) => !current)}>
                                     {showTournamentLoserConnectors ? "Hide Loser Lines" : "Show Loser Lines"}
                                   </Button>
@@ -14341,7 +14899,7 @@ export default function WiffleScoringPrototype() {
                               </div>
                             )}
                             {(() => {
-                              const bracketColumns = getTournamentRoundColumns(selectedTournament.matchups || []);
+                              const bracketColumns = getTournamentRoundColumns(selectedTournament.matchups || [], selectedTournament.type === "custom" ? selectedTournament.customRounds || ["Round 1"] : []);
                               const columnWidth = 240;
                               const columnGap = 24;
                               const matchupHeight = 150;
@@ -14359,14 +14917,18 @@ export default function WiffleScoringPrototype() {
                               const safeCanvasZoom = Math.max(0.2, Math.min(1.75, Number(tournamentCanvasZoom) || 1));
                               const bracketFlow = selectedTournament.bracketFlow || "left_to_right";
                               const bracketMidpoint = Math.ceil((Number(selectedTournament.bracketCount) || 1) / 2);
-                              const isSingleEliminationMeetMiddle = selectedTournament.type === "single_elimination" && bracketFlow === "meet_middle";
-                              const maxTournamentRoundNumber = Math.max(1, ...(selectedTournament.matchups || []).map((matchup) => getTournamentRoundNumber(matchup.round || "")));
-                              const singleEliminationCenterX = Math.max(1, maxTournamentRoundNumber - 1) * (columnWidth + columnGap);
-                              const singleEliminationOuterSteps = Math.max(1, maxTournamentRoundNumber - 2);
+                              const isSingleEliminationMeetMiddle = ["single_elimination", "custom"].includes(selectedTournament.type) && bracketFlow === "meet_middle";
+                              const customRoundNumbers = selectedTournament.type === "custom" ? (selectedTournament.customRounds || []).map(getTournamentRoundNumber) : [];
+                              const maxTournamentRoundNumber = Math.max(1, ...customRoundNumbers, ...(selectedTournament.matchups || []).map((matchup) => getTournamentRoundNumber(matchup.round || "")));
+                              const singleEliminationSideRoundCount = Math.max(1, maxTournamentRoundNumber - 1);
+                              const singleEliminationCenterX = singleEliminationSideRoundCount * (columnWidth + columnGap);
+                              const singleEliminationPositionCounts = {};
+                              const loserLanes = getTournamentLoserLanes(selectedTournament);
                               const getMatchupVisualLane = (matchup) => {
                                 const text = String(`${matchup.round || ""} ${matchup.name || ""}`).toLowerCase();
-                                if (selectedTournament.championshipMatchupId === matchup.id || text.includes("championship")) return 2;
-                                if (text.includes("loser")) return 1;
+                                if (selectedTournament.championshipMatchupId === matchup.id || text.includes("championship")) return 100;
+                                const loserLaneId = getTournamentMatchupLoserLaneId(matchup, selectedTournament);
+                                if (loserLaneId) return 1 + Math.max(0, loserLanes.findIndex((lane) => lane.id === loserLaneId));
                                 return 0;
                               };
                               const getMatchupLayoutTrack = (matchup) => {
@@ -14377,12 +14939,47 @@ export default function WiffleScoringPrototype() {
                                 if (sideIndex === 2) return "winner-bottom";
                                 return "winner-final";
                               };
+                              const getEffectiveWinnerNextMatchupId = (matchup) => {
+                                if (matchup.nextMatchupId) return matchup.nextMatchupId;
+                                const text = String(`${matchup.round || ""} ${matchup.name || ""}`).toLowerCase();
+                                if (isSingleEliminationMeetMiddle && selectedTournament.championshipMatchupId && text.includes("bracket winners") && selectedTournament.championshipMatchupId !== matchup.id) {
+                                  return selectedTournament.championshipMatchupId;
+                                }
+                                return "";
+                              };
+                              const hasLoserBracketLane = loserLanes.length > 0 || (selectedTournament.matchups || []).some((matchup) => getMatchupVisualLane(matchup) >= 1 && getMatchupVisualLane(matchup) < 99);
+                              const winnerBracketRows = Math.max(2, ...bracketColumns.map((roundColumn) => roundColumn.matchups.filter((matchup) => getMatchupVisualLane(matchup) === 0).length));
+                              const winnerBottomBaseTop = selectedTournament.type === "custom"
+                                ? headerHeight + Math.max(260, (winnerBracketRows - 1) * (matchupHeight + 72))
+                                : headerHeight + Math.max(520, (winnerBracketRows - 1) * (matchupHeight + matchupGap));
+                              const firstLoserLaneBaseTop = winnerBottomBaseTop + 116;
+                              const getManualMatchupBottom = (matchup) => (
+                                Number.isFinite(Number(matchup.layoutY)) && matchup.layoutY !== "" ? Number(matchup.layoutY) + matchupHeight : null
+                              );
+                              let nextLoserLaneMinimumTop = Math.max(
+                                firstLoserLaneBaseTop,
+                                ...((selectedTournament.matchups || [])
+                                  .filter((matchup) => !getTournamentMatchupLoserLaneId(matchup, selectedTournament))
+                                  .map(getManualMatchupBottom)
+                                  .filter(Number.isFinite)
+                                  .map((bottom) => bottom + 90)),
+                              );
+                              const loserLaneBaseTops = loserLanes.reduce((bases, lane) => {
+                                const laneTop = Math.max(nextLoserLaneMinimumTop, firstLoserLaneBaseTop + (Number(lane.offset) || 0));
+                                const laneBottom = Math.max(
+                                  laneTop + matchupHeight,
+                                  ...((selectedTournament.matchups || [])
+                                    .filter((matchup) => getTournamentMatchupLoserLaneId(matchup, selectedTournament) === lane.id)
+                                    .map(getManualMatchupBottom)
+                                    .filter(Number.isFinite)),
+                                );
+                                nextLoserLaneMinimumTop = laneBottom + 90;
+                                return { ...bases, [lane.id]: laneTop };
+                              }, {});
+                              const loserLaneDividerYs = loserLanes.map((lane) => ({ ...lane, y: (loserLaneBaseTops[lane.id] || firstLoserLaneBaseTop) - 74 }));
+                              const loserLaneDividerY = loserLaneDividerYs[0]?.y ?? firstLoserLaneBaseTop - 74;
                               bracketColumns.forEach((column, columnIndex) => {
                                 const columnMatchupGap = matchupGap + Math.max(0, bracketColumns.length - columnIndex - 1) * 34;
-                                const winnerLaneCount = column.matchups.filter((matchup) => getMatchupVisualLane(matchup) === 0).length;
-                                const winnerBracketRows = Math.max(2, ...bracketColumns.map((roundColumn) => roundColumn.matchups.filter((matchup) => getMatchupVisualLane(matchup) === 0).length));
-                                const winnerBottomBaseTop = headerHeight + Math.max(520, (winnerBracketRows - 1) * (matchupHeight + matchupGap));
-                                const loserLaneBaseTop = winnerBottomBaseTop + matchupHeight + 240;
                                 const laneCounts = {};
                                 const trackCounts = {};
                                 const roundIndex = columnIndex;
@@ -14391,14 +14988,25 @@ export default function WiffleScoringPrototype() {
                                 const desiredLayouts = column.matchups.map((matchup, matchupIndex) => {
                                   const lane = getMatchupVisualLane(matchup);
                                   const track = getMatchupLayoutTrack(matchup);
+                                  const matchupBracket = Math.max(1, Number(matchup.bracket) || 1);
+                                  const roundNumber = getTournamentRoundNumber(matchup.round || "");
+                                  const matchupText = String(`${matchup.round || ""} ${matchup.name || ""}`).toLowerCase();
+                                  const singleEliminationPositionKey = `${matchupBracket}-${roundNumber}`;
+                                  const singleEliminationPositionIndex = singleEliminationPositionCounts[singleEliminationPositionKey] || 0;
+                                  singleEliminationPositionCounts[singleEliminationPositionKey] = singleEliminationPositionIndex + 1;
+                                  const bracketIsRightSide = matchupBracket > bracketMidpoint;
+                                  const bracketIndexWithinSide = bracketIsRightSide
+                                    ? Math.max(0, matchupBracket - bracketMidpoint - 1)
+                                    : Math.max(0, matchupBracket - 1);
+                                  const singleEliminationBracketBaseTop = headerHeight + (bracketIndexWithinSide * Math.max(520, matchupHeight + matchupGap + 210));
+                                  const singleEliminationFallbackTop = singleEliminationBracketBaseTop + (singleEliminationPositionIndex * (matchupHeight + 72));
                                   const feederLayouts = (selectedTournament.matchups || [])
-                                    .filter((item) => item.nextMatchupId === matchup.id || item.loserNextMatchupId === matchup.id)
+                                    .filter((item) => getEffectiveWinnerNextMatchupId(item) === matchup.id || item.loserNextMatchupId === matchup.id)
                                     .map((item) => matchupLayouts[item.id])
                                     .filter(Boolean);
                                   const feederCenterY = feederLayouts.length
                                     ? feederLayouts.reduce((total, layout) => total + layout.centerY, 0) / feederLayouts.length
                                     : null;
-                                  const roundNumber = getTournamentRoundNumber(matchup.round || "");
                                   const winnerSideIndex = lane === 0 ? getWinnerBracketSideIndex(matchup) : 0;
                                   const ladderOffset = winnerSideIndex === 1
                                     ? Math.max(0, roundNumber - 1) * 52
@@ -14409,9 +15017,13 @@ export default function WiffleScoringPrototype() {
                                     matchup,
                                     lane,
                                     track,
-                                    top: feederCenterY == null
-                                      ? headerHeight + (matchupIndex * (matchupHeight + columnMatchupGap)) + ladderOffset
-                                      : feederCenterY - centerLineOffset + ladderOffset,
+                                    top: isSingleEliminationMeetMiddle
+                                      ? feederCenterY == null
+                                        ? singleEliminationFallbackTop
+                                        : feederCenterY - centerLineOffset
+                                      : feederCenterY == null
+                                        ? headerHeight + (matchupIndex * (matchupHeight + columnMatchupGap)) + ladderOffset
+                                        : feederCenterY - centerLineOffset + ladderOffset,
                                   };
                                 });
                                 const layouts = desiredLayouts
@@ -14421,10 +15033,11 @@ export default function WiffleScoringPrototype() {
                                     laneCounts[layout.lane] = laneIndex + 1;
                                     const trackIndex = trackCounts[layout.track] || 0;
                                     trackCounts[layout.track] = trackIndex + 1;
-                                    const laneBaseTop = layout.lane === 1
-                                      ? loserLaneBaseTop
-                                      : layout.lane === 2
-                                        ? loserLaneBaseTop + matchupHeight + columnMatchupGap
+                                    const loserLaneId = getTournamentMatchupLoserLaneId(layout.matchup, selectedTournament);
+                                    const laneBaseTop = loserLaneId
+                                      ? loserLaneBaseTops[loserLaneId] || firstLoserLaneBaseTop
+                                      : layout.lane >= 100
+                                        ? firstLoserLaneBaseTop + matchupHeight + columnMatchupGap
                                         : layout.track === "winner-bottom"
                                           ? winnerBottomBaseTop
                                           : headerHeight;
@@ -14435,7 +15048,11 @@ export default function WiffleScoringPrototype() {
                                     const minTop = previous?.finalTop != null
                                       ? previous.finalTop + matchupHeight + columnMatchupGap
                                       : laneBaseTop + (trackIndex * (matchupHeight + columnMatchupGap));
-                                    const finalTop = layout.lane === 2
+                                    const finalTop = isSingleEliminationMeetMiddle
+                                      ? layout.lane !== 0
+                                        ? Math.max(layout.top, minTop)
+                                        : Math.max(headerHeight, layout.top)
+                                      : layout.lane >= 100
                                       ? Math.max(headerHeight, layout.top)
                                       : layout.track === "winner-bottom"
                                         ? Math.max(minTop, Math.min(layout.top, winnerBottomBaseTop - (getTournamentRoundNumber(layout.matchup.round || "") * 44)))
@@ -14443,15 +15060,14 @@ export default function WiffleScoringPrototype() {
                                     const hasManualLayout = Number.isFinite(Number(layout.matchup.layoutX)) && Number.isFinite(Number(layout.matchup.layoutY)) && layout.matchup.layoutX !== "" && layout.matchup.layoutY !== "";
                                     const previewLayout = tournamentDragPreview?.matchupId === layout.matchup.id ? tournamentDragPreview : null;
                                     const matchupBracket = Math.max(1, Number(layout.matchup.bracket) || 1);
-                                    const shouldMeetFromRight = bracketFlow === "meet_middle" && matchupBracket > bracketMidpoint && !layout.matchup.isFinalBracketGame;
                                     const matchupText = String(`${layout.matchup.round || ""} ${layout.matchup.name || ""}`).toLowerCase();
+                                    const shouldMeetFromRight = bracketFlow === "meet_middle" && matchupBracket > bracketMidpoint && !layout.matchup.isFinalBracketGame;
                                     const singleEliminationMeetX = (() => {
                                       if (!isSingleEliminationMeetMiddle) return null;
                                       if (selectedTournament.championshipMatchupId === layout.matchup.id || matchupText.includes("championship")) return singleEliminationCenterX;
                                       const roundNumber = getTournamentRoundNumber(layout.matchup.round || "");
-                                      if (matchupText.includes("bracket winners")) return singleEliminationCenterX;
                                       const bracketIsRight = matchupBracket > bracketMidpoint;
-                                      const stepsFromCenter = Math.max(1, Math.min(singleEliminationOuterSteps, maxTournamentRoundNumber - 1 - roundNumber));
+                                      const stepsFromCenter = Math.max(1, Math.min(singleEliminationSideRoundCount, maxTournamentRoundNumber - roundNumber));
                                       return singleEliminationCenterX + (bracketIsRight ? stepsFromCenter : -stepsFromCenter) * (columnWidth + columnGap);
                                     })();
                                     const autoX = singleEliminationMeetX != null ? singleEliminationMeetX : shouldMeetFromRight ? (bracketColumns.length - 1 - columnIndex) * (columnWidth + columnGap) : x;
@@ -14469,11 +15085,25 @@ export default function WiffleScoringPrototype() {
                                     matchupLayouts[layout.matchup.id] = finalLayout;
                                     return finalLayout;
                                   });
-                                columnLayouts.push({ round: column.round, x, layouts });
+                                if (!isSingleEliminationMeetMiddle) columnLayouts.push({ round: column.round, x, layouts });
                               });
+                              if (isSingleEliminationMeetMiddle) {
+                                for (let roundNumber = 1; roundNumber <= singleEliminationSideRoundCount; roundNumber += 1) {
+                                  const stepsFromCenter = Math.max(1, Math.min(singleEliminationSideRoundCount, maxTournamentRoundNumber - roundNumber));
+                                  columnLayouts.push({ round: `Round ${roundNumber}`, x: singleEliminationCenterX - (stepsFromCenter * (columnWidth + columnGap)), layouts: [] });
+                                  columnLayouts.push({ round: `Round ${roundNumber}`, x: singleEliminationCenterX + (stepsFromCenter * (columnWidth + columnGap)), layouts: [] });
+                                }
+                                columnLayouts.push({ round: "Championship", x: singleEliminationCenterX, layouts: [] });
+                              }
                               const championshipLayout = selectedTournament.championshipMatchupId ? matchupLayouts[selectedTournament.championshipMatchupId] : null;
                               const winnerLayout = championshipLayout
-                                ? {
+                                ? isSingleEliminationMeetMiddle
+                                  ? {
+                                    x: championshipLayout.x,
+                                    y: championshipLayout.bottomLineY + 76,
+                                    matchup: championshipLayout.matchup,
+                                  }
+                                  : {
                                   x: bracketFlow === "right_to_left"
                                     ? Math.max(0, championshipLayout.x - columnGap - winnerColumnWidth)
                                     : championshipLayout.x + columnWidth + columnGap,
@@ -14487,7 +15117,13 @@ export default function WiffleScoringPrototype() {
                                 winnerLayout ? winnerLayout.x + winnerColumnWidth + 24 : 0,
                                 (bracketColumns.length * columnWidth) + (Math.max(0, bracketColumns.length - 1) * columnGap),
                               );
-                              const bracketHeight = Math.max(260, ...Object.values(matchupLayouts).map((layout) => layout.top + matchupHeight + 24), winnerLayout ? winnerLayout.y + 80 : 0);
+                              const baseBracketHeight = Math.max(260, ...Object.values(matchupLayouts).map((layout) => layout.top + matchupHeight + 24), winnerLayout ? winnerLayout.y + 80 : 0);
+                              const lowestCanvasItemBottom = Math.max(headerHeight + 120, ...Object.values(matchupLayouts).map((layout) => layout.top + matchupHeight));
+                              const addLoserLaneButtonTop = Math.max(
+                                lowestCanvasItemBottom + 32,
+                                loserLaneDividerYs.length ? Math.max(...loserLaneDividerYs.map((lane) => lane.y)) + 52 : 0,
+                              );
+                              const bracketHeight = Math.max(baseBracketHeight, addLoserLaneButtonTop + 56);
                               const getRailPorts = (layout) => {
                                 const left = layout.x + railInset;
                                 const right = layout.x + columnWidth - railEndInset;
@@ -14510,12 +15146,12 @@ export default function WiffleScoringPrototype() {
                                 const source = matchupLayouts[matchup.id];
                                 if (!source) return [];
                                 return [
-                                  { id: `${matchup.id}-winner`, targetId: matchup.nextMatchupId, color: "#0f172a" },
+                                  { id: `${matchup.id}-winner`, targetId: getEffectiveWinnerNextMatchupId(matchup), color: "#0f172a" },
                                   ...(showTournamentLoserConnectors ? [{ id: `${matchup.id}-loser`, targetId: matchup.loserNextMatchupId, color: "#ef4444" }] : []),
                                 ].filter((link) => link.targetId && matchupLayouts[link.targetId]).map((link) => {
                                   const target = matchupLayouts[link.targetId];
                                   const targetFeeders = (selectedTournament.matchups || [])
-                                    .filter((item) => item.nextMatchupId === link.targetId || item.loserNextMatchupId === link.targetId)
+                                    .filter((item) => getEffectiveWinnerNextMatchupId(item) === link.targetId || item.loserNextMatchupId === link.targetId)
                                     .map((item) => matchupLayouts[item.id])
                                     .filter(Boolean)
                                     .sort((a, b) => a.centerY - b.centerY);
@@ -14528,7 +15164,8 @@ export default function WiffleScoringPrototype() {
                                   const joinX = sourceLineEndX + (routeRight ? connectorStem : -connectorStem);
                                   const targetLineY = feederIndex === 1 ? target.bottomLineY : target.topLineY;
                                   const targetLineStartX = routeRight ? targetPorts.left : targetPorts.right;
-                                  const elbowX = joinX + Math.max(20, (targetLineStartX - joinX) / 2);
+                                  const elbowDistance = Math.max(20, Math.abs(targetLineStartX - joinX) / 2);
+                                  const elbowX = joinX + (routeRight ? elbowDistance : -elbowDistance);
                                   return {
                                     ...link,
                                     path: `M ${sourceLineEndX} ${source.topLineY} H ${joinX} V ${source.bottomLineY} H ${sourceLineEndX} M ${joinX} ${joinY} H ${elbowX} V ${targetLineY} H ${targetLineStartX}`,
@@ -14541,6 +15178,10 @@ export default function WiffleScoringPrototype() {
                                   color: "#0f172a",
                                   path: (() => {
                                     const championshipPorts = getRailPorts(championshipLayout);
+                                    if (isSingleEliminationMeetMiddle) {
+                                      const centerX = championshipLayout.x + Math.round(columnWidth / 2);
+                                      return `M ${centerX} ${championshipLayout.bottomLineY} V ${winnerLayout.y}`;
+                                    }
                                     const routeRight = winnerLayout.x >= championshipLayout.x;
                                     const championshipPort = routeRight ? championshipPorts.right : championshipPorts.left;
                                     const joinX = championshipPort + (routeRight ? connectorStem : -connectorStem);
@@ -14550,7 +15191,7 @@ export default function WiffleScoringPrototype() {
                                 }
                                 : null;
                               const winnerLabel = winnerLayout?.matchup?.winnerTeamId
-                                ? tournamentTeamLabel(selectedLeague, selectedTournament, winnerLayout.matchup.winnerTeamId, "Winner TBD")
+                                ? tournamentTeamLabel(selectedLeague, selectedTournament, winnerLayout.matchup.winnerTeamId, "Winner TBD", leagues)
                                 : winnerLayout?.matchup?.winnerSeed
                                   ? tournamentSeedLabel(winnerLayout.matchup.winnerSeed, "Winner TBD")
                                   : "Winner TBD";
@@ -14610,7 +15251,7 @@ export default function WiffleScoringPrototype() {
                                   if (tournamentCanvasPointersRef.current.size === 0) tournamentCanvasPanRef.current = null;
                                 }}
                               >
-                                <div className="absolute left-0 top-0 overflow-visible" style={{ width: `${bracketWidth}px`, height: `${bracketHeight}px`, transform: `scale(${safeCanvasZoom})`, transformOrigin: "top left" }}>
+                                <div ref={tournamentCanvasExportRef} className="absolute left-0 top-0 overflow-visible" style={{ width: `${bracketWidth}px`, height: `${bracketHeight}px`, transform: `scale(${safeCanvasZoom})`, transformOrigin: "top left" }}>
                                 {selectedTournament.type !== "round_robin" && (
                                   <svg className="pointer-events-none absolute inset-0 z-0 overflow-visible" width={bracketWidth} height={bracketHeight} viewBox={`0 0 ${bracketWidth} ${bracketHeight}`} aria-hidden="true">
                                     {seedRailPaths.map((rail) => (
@@ -14625,12 +15266,34 @@ export default function WiffleScoringPrototype() {
                                   </svg>
                                 )}
                                 <div className="absolute inset-0 z-10 overflow-visible">
+                                  {selectedTournament.type === "custom" && (
+                                    <button
+                                      type="button"
+                                      className="absolute z-20 rounded-full border border-red-200 bg-white px-3 py-1 text-[11px] font-black uppercase tracking-wide text-red-700 shadow-sm hover:bg-red-50"
+                                      style={{ left: 0, top: `${addLoserLaneButtonTop}px` }}
+                                      onClick={() => addTournamentLoserMatchup(selectedTournament.id)}
+                                    >
+                                      + Loser Lane
+                                    </button>
+                                  )}
+                                  {loserLaneDividerYs.map((lane, laneIndex) => (
+                                    <div key={`loser-lane-divider-${lane.id}`} className="absolute border-t-2 border-dashed border-red-300 text-[11px] font-black uppercase tracking-wide text-red-700" style={{ left: 0, top: `${lane.y}px`, width: `${Math.max(bracketWidth, columnWidth)}px` }}>
+                                      <span className="relative -top-3 rounded-full bg-white px-3">{lane.name || `Loser's Bracket ${laneIndex + 1}`} Lane</span>
+                                      {selectedTournament.type === "custom" && (
+                                        <span className="relative -top-3 ml-2 inline-flex gap-1 rounded-full bg-white px-2">
+                                          <button type="button" className="px-2 text-red-700 hover:text-red-900" onClick={() => updateTournamentLoserLane(selectedTournament.id, "up", lane.id)}>Up</button>
+                                          <button type="button" className="px-2 text-red-700 hover:text-red-900" onClick={() => updateTournamentLoserLane(selectedTournament.id, "down", lane.id)}>Down</button>
+                                          <button type="button" className="px-2 text-red-700 hover:text-red-900" onClick={() => updateTournamentLoserLane(selectedTournament.id, "remove", lane.id)}>Remove</button>
+                                        </span>
+                                      )}
+                                    </div>
+                                  ))}
                                   {columnLayouts.map(({ round, x }) => (
-                                    <h3 key={`bracket-heading-${round}`} className="absolute border-b border-slate-200 pb-2 text-center text-xs font-black uppercase tracking-wide text-slate-500" style={{ left: `${x}px`, top: 0, width: `${columnWidth}px` }}>{round}</h3>
+                                    <h3 key={`bracket-heading-${round}-${x}`} className="absolute border-b border-slate-200 pb-2 text-center text-xs font-black uppercase tracking-wide text-slate-500" style={{ left: `${x}px`, top: 0, width: `${columnWidth}px` }}>{round}</h3>
                                   ))}
                                   {winnerLayout && (
                                     <>
-                                      <h3 className="absolute border-b border-slate-200 pb-2 text-center text-xs font-black uppercase tracking-wide text-slate-500" style={{ left: `${winnerLayout.x}px`, top: 0, width: `${winnerColumnWidth}px` }}>Winner</h3>
+                                      <h3 className="absolute border-b border-slate-200 pb-2 text-center text-xs font-black uppercase tracking-wide text-slate-500" style={{ left: `${winnerLayout.x}px`, top: `${isSingleEliminationMeetMiddle ? winnerLayout.y - 58 : 0}px`, width: `${winnerColumnWidth}px` }}>Winner</h3>
                                       <div className="absolute flex h-8 items-center gap-2 pr-1 text-[13px] font-black text-green-800" style={{ left: `${winnerLayout.x}px`, top: `${winnerLayout.y - 32}px`, width: `${winnerColumnWidth}px` }}>
                                         <span className="truncate">{winnerLabel}</span>
                                       </div>
@@ -14641,20 +15304,20 @@ export default function WiffleScoringPrototype() {
                                       const matchupIsWinnersBracket = selectedTournament.type === "double_elimination" && !matchupIsLosersBracket;
                                       const teamOneSeed = matchup.teamOneSeed || (selectedTournament.participants || []).find((participant) => participant.teamId === matchup.teamOneId)?.seed || "";
                                       const teamTwoSeed = matchup.teamTwoSeed || (selectedTournament.participants || []).find((participant) => participant.teamId === matchup.teamTwoId)?.seed || "";
-                                      const teamOne = getTournamentSideLabel(selectedLeague, selectedTournament, matchup, "one");
-                                      const teamTwo = getTournamentSideLabel(selectedLeague, selectedTournament, matchup, "two");
+                                      const teamOne = getTournamentSideLabel(selectedLeague, selectedTournament, matchup, "one", leagues);
+                                      const teamTwo = getTournamentSideLabel(selectedLeague, selectedTournament, matchup, "two", leagues);
                                       const pathLabel = getTournamentMatchupPathLabel(matchup, selectedTournament);
                                       const nextMatchup = (selectedTournament.matchups || []).find((item) => item.id === matchup.nextMatchupId);
                                       const loserNextMatchup = (selectedTournament.matchups || []).find((item) => item.id === matchup.loserNextMatchupId);
-                                      const winnerTeam = matchup.winnerTeamId ? tournamentTeamLabel(selectedLeague, selectedTournament, matchup.winnerTeamId, "") : tournamentSeedLabel(matchup.winnerSeed, "");
-                                      const loserTeam = matchup.loserTeamId ? tournamentTeamLabel(selectedLeague, selectedTournament, matchup.loserTeamId, "") : tournamentSeedLabel(matchup.loserSeed, "");
+                                      const winnerTeam = matchup.winnerTeamId ? tournamentTeamLabel(selectedLeague, selectedTournament, matchup.winnerTeamId, "", leagues) : tournamentSeedLabel(matchup.winnerSeed, "");
+                                      const loserTeam = matchup.loserTeamId ? tournamentTeamLabel(selectedLeague, selectedTournament, matchup.loserTeamId, "", leagues) : tournamentSeedLabel(matchup.loserSeed, "");
                                       const teamOneDisplaySeed = String(teamOne || "").toLowerCase().includes("tbd") ? "" : teamOneSeed;
                                       const teamTwoDisplaySeed = String(teamTwo || "").toLowerCase().includes("tbd") ? "" : teamTwoSeed;
                                       const tournamentLossCounts = getTournamentLossCounts(selectedTournament.matchups || []);
                                       const teamOneLosses = matchup.teamOneId ? tournamentLossCounts[matchup.teamOneId] || 0 : 0;
                                       const teamTwoLosses = matchup.teamTwoId ? tournamentLossCounts[matchup.teamTwoId] || 0 : 0;
                                       const isChampionshipMatchup = selectedTournament.championshipMatchupId === matchup.id;
-                                      const eliminatedTeams = (matchup.eliminatedTeamIds || []).map((teamId) => tournamentTeamLabel(selectedLeague, selectedTournament, teamId, "")).filter(Boolean);
+                                      const eliminatedTeams = (matchup.eliminatedTeamIds || []).map((teamId) => tournamentTeamLabel(selectedLeague, selectedTournament, teamId, "", leagues)).filter(Boolean);
                                       const importedGames = selectedCurrentSeason.scheduleWeeks?.flatMap((week) => week.games || []).filter((game) => game.tournamentMatchupId === matchup.id) || [];
                                       const completedImportedGames = importedGames.filter((game) => previousGames.some((savedGame) => savedGame.savedSetup?.selectedScheduledGameId === game.id && savedGame.status === "final"));
                                       return (
@@ -14692,7 +15355,38 @@ export default function WiffleScoringPrototype() {
                                             event.preventDefault();
                                             event.stopPropagation();
                                             event.currentTarget.releasePointerCapture?.(event.pointerId);
-                                            updateTournamentMatchup(selectedTournament.id, matchup.id, "layoutPosition", { x: tournamentDragPreview.x, y: tournamentDragPreview.y });
+                                            const closestColumn = columnLayouts.reduce((closest, column) => {
+                                              const distance = Math.abs((column.x || 0) - tournamentDragPreview.x);
+                                              return !closest || distance < closest.distance ? { ...column, distance } : closest;
+                                            }, null);
+                                            const dropCenterY = tournamentDragPreview.y + centerLineOffset;
+                                            const droppedLane = loserLaneDividerYs
+                                              .map((lane, index) => {
+                                                const nextLaneY = loserLaneDividerYs[index + 1]?.y ?? Infinity;
+                                                return dropCenterY >= lane.y && dropCenterY < nextLaneY ? lane : null;
+                                              })
+                                              .find(Boolean);
+                                            const droppedInLoserLane = Boolean(droppedLane);
+                                            const closestRound = closestColumn?.round && !["championship", "winner"].includes(String(closestColumn.round).toLowerCase()) ? closestColumn.round : matchup.round;
+                                            const previousX = Number.isFinite(Number(matchup.layoutX)) && matchup.layoutX !== "" ? Number(matchup.layoutX) : x;
+                                            const previousSide = previousX < singleEliminationCenterX ? "left" : previousX > singleEliminationCenterX ? "right" : "center";
+                                            const nextSide = tournamentDragPreview.x < singleEliminationCenterX ? "left" : tournamentDragPreview.x > singleEliminationCenterX ? "right" : "center";
+                                            const previousLaneId = getTournamentMatchupLoserLaneId(matchup, selectedTournament);
+                                            const previousLaneIndex = loserLanes.findIndex((lane) => lane.id === previousLaneId);
+                                            const droppedLaneIndex = loserLanes.findIndex((lane) => lane.id === droppedLane?.id);
+                                            const skippedLoserLaneOnDrop = droppedInLoserLane && (
+                                              (!previousLaneId && droppedLaneIndex > 0)
+                                              || (previousLaneId && droppedLaneIndex > previousLaneIndex + 1)
+                                              || (previousLaneId && droppedLaneIndex < previousLaneIndex)
+                                            );
+                                            updateTournamentMatchup(selectedTournament.id, matchup.id, "layoutPosition", {
+                                              x: tournamentDragPreview.x,
+                                              y: tournamentDragPreview.y,
+                                              lane: droppedInLoserLane ? "loser" : "winner",
+                                              loserLaneId: droppedLane?.id || "",
+                                              round: closestRound,
+                                              clearConnections: skippedLoserLaneOnDrop || (selectedTournament.type === "custom" && bracketFlow === "meet_middle" && previousSide !== "center" && nextSide !== "center" && previousSide !== nextSide),
+                                            });
                                             setTournamentDragPreview(null);
                                           }}
                                           onPointerCancel={() => {
@@ -14707,7 +15401,28 @@ export default function WiffleScoringPrototype() {
                                             event.preventDefault();
                                             const draggedMatchupId = event.dataTransfer.getData("text/plain");
                                             if (draggedMatchupId && draggedMatchupId !== matchup.id) {
-                                              updateTournamentMatchup(selectedTournament.id, draggedMatchupId, "nextMatchupId", matchup.id);
+                                              const draggedMatchup = (selectedTournament.matchups || []).find((item) => item.id === draggedMatchupId);
+                                              const targetLoserLaneId = getTournamentMatchupLoserLaneId(matchup, selectedTournament);
+                                              const sourceLoserLaneId = getTournamentMatchupLoserLaneId(draggedMatchup, selectedTournament);
+                                              const targetLaneIndex = loserLanes.findIndex((lane) => lane.id === targetLoserLaneId);
+                                              const sourceLaneIndex = loserLanes.findIndex((lane) => lane.id === sourceLoserLaneId);
+                                              const canLinkToLoserLane = targetLoserLaneId && (
+                                                (!sourceLoserLaneId && targetLaneIndex === 0)
+                                                || (sourceLoserLaneId && targetLaneIndex === sourceLaneIndex + 1)
+                                              );
+                                              if (targetLoserLaneId) {
+                                                if (sourceLoserLaneId && targetLaneIndex <= sourceLaneIndex) {
+                                                  updateTournamentMatchup(selectedTournament.id, draggedMatchupId, "nextMatchupId", matchup.id);
+                                                  return;
+                                                }
+                                                if (!canLinkToLoserLane) {
+                                                  window.alert?.("Loser paths must move lane by lane: winner bracket to Loser's Bracket 1, then Loser's Bracket 1 to Loser's Bracket 2, and so on.");
+                                                  return;
+                                                }
+                                                updateTournamentMatchup(selectedTournament.id, draggedMatchupId, "loserNextMatchupId", matchup.id);
+                                              } else {
+                                                updateTournamentMatchup(selectedTournament.id, draggedMatchupId, "nextMatchupId", matchup.id);
+                                              }
                                             }
                                           }}
                                           onClick={() => {
@@ -14718,7 +15433,7 @@ export default function WiffleScoringPrototype() {
                                           <div className="mb-1 flex items-center justify-between gap-2 text-[10px] font-black uppercase tracking-wide text-slate-400">
                                             <span className="flex min-w-0 items-center gap-1">
                                               {matchup.generatedGameNumber && <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full border border-slate-400 text-[10px] text-slate-700">{matchup.generatedGameNumber}</span>}
-                                              <span className="truncate">{matchup.name || "Matchup"}</span>
+                                              <span className="truncate">{getTournamentMatchupDisplayName(matchup)}</span>
                                             </span>
                                             {pathLabel && <span className={`${matchupIsLosersBracket ? "text-red-700" : matchupIsWinnersBracket ? "text-blue-700" : "text-slate-500"}`}>{pathLabel}</span>}
                                             {isChampionshipMatchup && <span className="text-yellow-700">Championship</span>}
@@ -14768,7 +15483,11 @@ export default function WiffleScoringPrototype() {
 		                        ) : null}
 			                        <div className="mt-4 flex flex-col gap-2 sm:flex-row sm:flex-wrap">
 	                          {(selectedTournament.matchups || []).length === 0 ? (
-                          <Button variant="outline" onClick={() => buildTournamentMatchupsFromParticipants(selectedTournament.id)} disabled={!selectedTournament.settingsSaved || (selectedTournament.type === "round_robin" ? (!selectedTournament.teamSetupSaved || (selectedTournament.participants || []).filter((participant) => participant.teamId).length < 2) : (selectedTournament.participants || []).length < 2)}>{selectedTournament.type === "round_robin" ? "Create Full Round Robin Schedule" : "Generate Starting Bracket"}</Button>
+                          selectedTournament.type === "custom" ? (
+                            <p className="rounded-xl border bg-slate-50 p-3 text-sm font-semibold text-slate-500">Custom tournaments start empty. Add matchups and rounds manually.</p>
+                          ) : (
+                            <Button variant="outline" onClick={() => buildTournamentMatchupsFromParticipants(selectedTournament.id)} disabled={!selectedTournament.settingsSaved || (selectedTournament.type === "round_robin" ? (!selectedTournament.teamSetupSaved || (selectedTournament.participants || []).filter((participant) => participant.teamId).length < 2) : (selectedTournament.participants || []).length < 2)}>{selectedTournament.type === "round_robin" ? "Create Full Round Robin Schedule" : "Generate Starting Bracket"}</Button>
+                          )
 	                          ) : selectedTournament.championshipMatchupId ? (
                             <p className="rounded-xl border border-yellow-200 bg-yellow-50 p-3 text-sm font-semibold text-yellow-900">Championship matchup selected. Further round generation is locked unless you remove the championship selection.</p>
 	                          ) : selectedTournament.type === "double_elimination" ? (
@@ -14776,7 +15495,7 @@ export default function WiffleScoringPrototype() {
                               <Button variant="outline" onClick={() => generateTournamentNextRound(selectedTournament.id, "winners")} disabled={!selectedTournament.settingsSaved || (selectedTournament.matchups || []).length < 2}>Generate Winners Bracket Next Round</Button>
                               <Button variant="outline" onClick={() => generateTournamentNextRound(selectedTournament.id, "losers")} disabled={!selectedTournament.settingsSaved || (selectedTournament.matchups || []).length < 2}>Generate Losers Bracket Next Round</Button>
                             </>
-                          ) : (
+                          ) : selectedTournament.type === "custom" ? null : (
                             <Button variant="outline" onClick={() => generateTournamentNextRound(selectedTournament.id)} disabled={!selectedTournament.settingsSaved || (selectedTournament.matchups || []).length < 2}>Generate Next Round</Button>
                           )}
                         </div>
@@ -14791,7 +15510,7 @@ export default function WiffleScoringPrototype() {
                             <h2 className="text-xl font-bold">Matchups</h2>
                             <p className="text-sm text-slate-500">Each matchup can be a single game or a series. Imported series can preset home/away or decide it at game time.</p>
                           </div>
-                          <Button variant="outline" onClick={() => addTournamentMatchup(selectedTournament.id)}>+ Matchup</Button>
+                                  <Button variant="outline" onClick={() => addTournamentMatchup(selectedTournament.id)}>+ Matchup</Button>
                         </div>
                         <div className="space-y-3">
                           {(selectedTournament.matchups || []).map((matchup, matchupIndex) => {
@@ -14830,7 +15549,7 @@ export default function WiffleScoringPrototype() {
                                 <div>
                                   <label className="text-xs font-semibold uppercase text-slate-500">Round</label>
                                   <select className="mt-1 w-full rounded-xl border px-3 py-2 text-sm font-semibold" value={matchup.round || ""} onChange={(event) => updateTournamentMatchup(selectedTournament.id, matchup.id, "round", event.target.value)}>
-                                    {getTournamentRoundOptions(selectedTournament.matchups || [], matchup.round).map((round) => <option key={`round-${matchup.id}-${round}`} value={round}>{round}</option>)}
+                                    {getTournamentRoundOptions(selectedTournament.matchups || [], matchup.round, selectedTournament.customRounds || []).map((round) => <option key={`round-${matchup.id}-${round}`} value={round}>{round}</option>)}
                                   </select>
                                 </div>
                                 <div>
@@ -14847,10 +15566,10 @@ export default function WiffleScoringPrototype() {
                                   <select className="mt-1 w-full rounded-xl border px-3 py-2 text-sm" value={matchup.teamOneId || ""} onChange={(event) => updateTournamentMatchup(selectedTournament.id, matchup.id, "teamOneId", event.target.value)}>
                                     <option value="">Select team</option>
                                     {sortTournamentParticipants(selectedTournament.participants || []).map((participant) => {
-                                      const team = (selectedLeague.teams || []).find((item) => item.id === participant.teamId);
+                                      const team = selectedTournamentTeamOptions.find((item) => item.id === participant.teamId);
                                       if (!team) return null;
                                       const disabled = matchup.teamTwoId === team.id || (selectedTournament.type !== "round_robin" && assignedTeamIds.has(team.id));
-                                      const label = selectedTournament.type !== "round_robin" && assignedTeamIds.has(team.id) ? `#${participant.seed || "-"} ${team.name} - already in matchup` : `#${participant.seed || "-"} ${team.name}`;
+                                      const label = selectedTournament.type !== "round_robin" && assignedTeamIds.has(team.id) ? `#${participant.seed || "-"} ${team.name} - already in matchup` : `#${participant.seed || "-"} ${team.name} · ${team.sourceLeagueName}`;
                                       return <option key={participant.id} value={team.id} disabled={disabled}>{label}</option>;
                                     })}
                                   </select>
@@ -14860,10 +15579,10 @@ export default function WiffleScoringPrototype() {
                                   <select className="mt-1 w-full rounded-xl border px-3 py-2 text-sm" value={matchup.teamTwoId || ""} onChange={(event) => updateTournamentMatchup(selectedTournament.id, matchup.id, "teamTwoId", event.target.value)}>
                                     <option value="">Select team</option>
                                     {sortTournamentParticipants(selectedTournament.participants || []).map((participant) => {
-                                      const team = (selectedLeague.teams || []).find((item) => item.id === participant.teamId);
+                                      const team = selectedTournamentTeamOptions.find((item) => item.id === participant.teamId);
                                       if (!team) return null;
                                       const disabled = matchup.teamOneId === team.id || (selectedTournament.type !== "round_robin" && assignedTeamIds.has(team.id));
-                                      const label = selectedTournament.type !== "round_robin" && assignedTeamIds.has(team.id) ? `#${participant.seed || "-"} ${team.name} - already in matchup` : `#${participant.seed || "-"} ${team.name}`;
+                                      const label = selectedTournament.type !== "round_robin" && assignedTeamIds.has(team.id) ? `#${participant.seed || "-"} ${team.name} - already in matchup` : `#${participant.seed || "-"} ${team.name} · ${team.sourceLeagueName}`;
                                       return <option key={participant.id} value={team.id} disabled={disabled}>{label}</option>;
                                     })}
                                   </select>
@@ -14884,7 +15603,7 @@ export default function WiffleScoringPrototype() {
                                     </select>
                                   </div>
                                 )}
-                                {!isChampionshipMatchup && selectedTournament.type === "double_elimination" && (
+                                {!isChampionshipMatchup && (selectedTournament.type === "double_elimination" || selectedTournament.type === "custom") && (
                                   <div className="md:col-span-2 lg:col-span-3">
                                     <label className="text-xs font-semibold uppercase text-slate-500">Loser Advances To</label>
                                     <select className="mt-1 w-full rounded-xl border px-3 py-2 text-sm" value={matchup.loserNextMatchupId || ""} onChange={(event) => updateTournamentMatchup(selectedTournament.id, matchup.id, "loserNextMatchupId", event.target.value)}>
@@ -14926,8 +15645,8 @@ export default function WiffleScoringPrototype() {
                         .flatMap((item) => [item.teamOneId, item.teamTwoId])
                         .filter(Boolean));
                       const isChampionshipMatchup = selectedTournament.championshipMatchupId === matchup.id;
-                      const modalTeamOne = getTournamentSideLabel(selectedLeague, selectedTournament, matchup, "one");
-                      const modalTeamTwo = getTournamentSideLabel(selectedLeague, selectedTournament, matchup, "two");
+                      const modalTeamOne = getTournamentSideLabel(selectedLeague, selectedTournament, matchup, "one", leagues);
+                      const modalTeamTwo = getTournamentSideLabel(selectedLeague, selectedTournament, matchup, "two", leagues);
                       const canSimulateMatchup = Boolean((matchup.teamOneId || matchup.teamOneSeed) && (matchup.teamTwoId || matchup.teamTwoSeed));
                       const isDoubleEliminationChampionship = selectedTournament.type === "double_elimination" && isChampionshipMatchup;
                       const isChampionshipResetGame = Boolean(isDoubleEliminationChampionship && matchup.championshipResetRequired);
@@ -14942,7 +15661,7 @@ export default function WiffleScoringPrototype() {
                               <div className="mb-4 flex items-start justify-between gap-3">
                                 <div>
                                   <div className="text-xs font-black uppercase tracking-wide text-slate-500">{isChampionshipResetGame ? "Championship Reset Game Winner" : isDoubleEliminationChampionship ? "Championship Game Winner" : "Simulation Winner"}</div>
-                                  <h2 className="mt-1 text-2xl font-black">{matchup.name || "Matchup"}</h2>
+                                  <h2 className="mt-1 text-2xl font-black">{getTournamentMatchupDisplayName(matchup)}</h2>
                                 </div>
                                 <Button variant="outline" onClick={() => setOpenTournamentMatchupId("")}>Close</Button>
                               </div>
@@ -14971,26 +15690,40 @@ export default function WiffleScoringPrototype() {
                             <div className="mb-4 flex items-start justify-between gap-3">
                               <div>
                                 <div className="text-xs font-black uppercase tracking-wide text-slate-500">Matchup Settings</div>
-                                <h2 className="mt-1 text-2xl font-black">{matchup.name || "Matchup"}</h2>
+                                <h2 className="mt-1 text-2xl font-black">{getTournamentMatchupDisplayName(matchup)}</h2>
                               </div>
                               <Button variant="outline" onClick={() => setOpenTournamentMatchupId("")}>Close</Button>
                             </div>
                             <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-[minmax(0,1fr)_10rem_9rem] lg:items-end">
                               <div>
-                                <label className="text-xs font-semibold uppercase text-slate-500">Matchup Name</label>
-                                <input className="mt-1 w-full rounded-xl border px-3 py-2 text-sm font-semibold" value={matchup.name || ""} onChange={(event) => updateTournamentMatchup(selectedTournament.id, matchup.id, "name", event.target.value)} />
+                                <label className="text-xs font-semibold uppercase text-slate-500">Game Number</label>
+                                <div className="mt-1 flex items-center gap-2 rounded-xl border bg-slate-50 p-2">
+                                  <span className="min-w-0 flex-1 px-2 text-sm font-black">{getTournamentMatchupDisplayName(matchup)}</span>
+                                  <Button variant="outline" onClick={() => setPendingTournamentGameNumber({ tournamentId: selectedTournament.id, matchupId: matchup.id })}>Change</Button>
+                                </div>
                               </div>
                               <div>
                                 <label className="text-xs font-semibold uppercase text-slate-500">Round</label>
                                 <select className="mt-1 w-full rounded-xl border px-3 py-2 text-sm font-semibold" value={matchup.round || ""} onChange={(event) => updateTournamentMatchup(selectedTournament.id, matchup.id, "round", event.target.value)}>
-                                  {getTournamentRoundOptions(selectedTournament.matchups || [], matchup.round).map((round) => <option key={`modal-round-${matchup.id}-${round}`} value={round}>{round}</option>)}
+                                  {getTournamentRoundOptions(selectedTournament.matchups || [], matchup.round, selectedTournament.customRounds || []).map((round) => <option key={`modal-round-${matchup.id}-${round}`} value={round}>{round}</option>)}
                                 </select>
                               </div>
-                              {selectedTournament.type !== "round_robin" && (
+                              {selectedTournament.type !== "round_robin" && Math.max(1, Number(selectedTournament.bracketCount) || 1) > 1 && (
                               <div>
                                 <label className="text-xs font-semibold uppercase text-slate-500">Bracket</label>
                                 <select className="mt-1 w-full rounded-xl border px-3 py-2 text-sm font-semibold" value={matchup.bracket || 1} onChange={(event) => updateTournamentMatchup(selectedTournament.id, matchup.id, "bracket", event.target.value)}>
                                   {Array.from({ length: Math.max(1, Number(selectedTournament.bracketCount) || 1) }, (_, index) => <option key={`modal-bracket-${index + 1}`} value={index + 1}>Bracket {index + 1}</option>)}
+                                </select>
+                              </div>
+                              )}
+                              {selectedTournament.type === "custom" && (
+                              <div>
+                                <label className="text-xs font-semibold uppercase text-slate-500">Canvas Lane</label>
+                                <select className="mt-1 w-full rounded-xl border px-3 py-2 text-sm font-semibold" value={getTournamentMatchupLoserLaneId(matchup, selectedTournament) || "winner"} onChange={(event) => updateTournamentMatchup(selectedTournament.id, matchup.id, "customLane", event.target.value)}>
+                                  <option value="winner">Winner/Main Bracket</option>
+                                  {getTournamentLoserLanes(selectedTournament).map((lane, laneIndex) => (
+                                    <option key={`matchup-lane-${lane.id}`} value={lane.id}>{lane.name || `Loser's Bracket ${laneIndex + 1}`}</option>
+                                  ))}
                                 </select>
                               </div>
                               )}
@@ -15037,7 +15770,7 @@ export default function WiffleScoringPrototype() {
                                   <label className="text-xs font-semibold uppercase text-slate-500">Winner Advances To</label>
                                   <select className="mt-1 w-full rounded-xl border px-3 py-2 text-sm" value={matchup.nextMatchupId || ""} onChange={(event) => updateTournamentMatchup(selectedTournament.id, matchup.id, "nextMatchupId", event.target.value)}>
                                     <option value="">No linked matchup yet</option>
-                                    {(selectedTournament.matchups || []).filter((item) => item.id !== matchup.id).map((item) => <option key={`modal-winner-${item.id}`} value={item.id}>{item.name || "Untitled Matchup"} · {item.round || "Round"}</option>)}
+                                    {(selectedTournament.matchups || []).filter((item) => item.id !== matchup.id).map((item, itemIndex) => <option key={`modal-winner-${item.id}`} value={item.id}>{getTournamentMatchupDisplayName(item, itemIndex)} · {item.round || "Round"}</option>)}
                                   </select>
                                 </div>
                               )}
@@ -15047,12 +15780,12 @@ export default function WiffleScoringPrototype() {
                                   Final Bracket Game
                                 </label>
                               )}
-                              {!isChampionshipMatchup && selectedTournament.type === "double_elimination" && (
+                              {!isChampionshipMatchup && (selectedTournament.type === "double_elimination" || selectedTournament.type === "custom") && (
                                 <div className="md:col-span-2 lg:col-span-3">
                                   <label className="text-xs font-semibold uppercase text-slate-500">Loser Advances To</label>
                                   <select className="mt-1 w-full rounded-xl border px-3 py-2 text-sm" value={matchup.loserNextMatchupId || ""} onChange={(event) => updateTournamentMatchup(selectedTournament.id, matchup.id, "loserNextMatchupId", event.target.value)}>
                                     <option value="">Loser is eliminated</option>
-                                    {(selectedTournament.matchups || []).filter((item) => item.id !== matchup.id).map((item) => <option key={`modal-loser-${item.id}`} value={item.id}>{item.name || "Untitled Matchup"} · {item.round || "Round"}</option>)}
+                                    {(selectedTournament.matchups || []).filter((item) => item.id !== matchup.id).map((item, itemIndex) => <option key={`modal-loser-${item.id}`} value={item.id}>{getTournamentMatchupDisplayName(item, itemIndex)} · {item.round || "Round"}</option>)}
                                   </select>
                                 </div>
                               )}
@@ -15079,9 +15812,101 @@ export default function WiffleScoringPrototype() {
                       );
                     })()}
                   </div>
-                )}
-              </div>
             )}
+          </div>
+        )}
+
+        {pendingTournamentByes && selectedTournament && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4">
+            <div className="w-full max-w-2xl rounded-3xl bg-white p-5 shadow-xl">
+              <div className="text-xs font-black uppercase tracking-wide text-slate-500">Assign Byes</div>
+              <h2 className="mt-1 text-2xl font-black">{selectedTournament.name || "Tournament"}</h2>
+              <p className="mt-2 rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm font-semibold text-amber-900">
+                Saved bye seeds will skip the opening round. Applying byes resets the generated bracket so it can be rebuilt with the new bye path.
+              </p>
+              <div className="mt-4 max-h-[60vh] overflow-auto rounded-2xl border">
+                <div className="grid gap-0 sm:grid-cols-2">
+                  {sortTournamentParticipants(selectedTournament.participants || []).map((participant) => {
+                    const key = `${Math.max(1, Number(participant.bracket) || 1)}-${participant.seed}`;
+                    const team = selectedTournamentTeamOptions.find((item) => item.id === participant.teamId);
+                    return (
+                      <label key={`bye-${participant.id}`} className="flex items-center justify-between gap-3 border-b p-3 text-sm font-semibold">
+                        <span>
+                          <span className="block font-black">Bracket {participant.bracket} · Seed {participant.seed}</span>
+                          <span className="block text-xs font-normal text-slate-500">{team ? `${team.name} · ${team.sourceLeagueName}` : "Team TBD"}</span>
+                        </span>
+                        <input
+                          type="checkbox"
+                          checked={Boolean(pendingTournamentByes.byes?.[key])}
+                          onChange={(event) => setPendingTournamentByes((prev) => ({
+                            ...prev,
+                            byes: { ...(prev?.byes || {}), [key]: event.target.checked },
+                          }))}
+                        />
+                      </label>
+                    );
+                  })}
+                </div>
+              </div>
+              <div className="mt-5 flex flex-wrap justify-end gap-2">
+                <Button variant="outline" onClick={() => setPendingTournamentByes(null)}>Cancel</Button>
+                <Button variant="primary" onClick={saveTournamentByes}>Apply Byes</Button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {pendingTournamentGameNumber && selectedTournament && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4">
+            <div className="w-full max-w-lg rounded-3xl bg-white p-5 shadow-xl">
+              <div className="mb-4 flex items-start justify-between gap-3">
+                <div>
+                  <div className="text-xs font-black uppercase tracking-wide text-slate-500">Game Number</div>
+                  <h2 className="mt-1 text-2xl font-black">Reorder Games</h2>
+                </div>
+                <Button variant="outline" onClick={() => setPendingTournamentGameNumber(null)}>Close</Button>
+              </div>
+              <div className="max-h-[60vh] space-y-2 overflow-auto">
+                {[...(selectedTournament.matchups || [])]
+                  .filter((matchup) => Number(matchup.generatedGameNumber) > 0)
+                  .sort((a, b) => Number(a.generatedGameNumber) - Number(b.generatedGameNumber))
+                  .map((matchup, index, list) => (
+                    <div key={`game-number-row-${matchup.id}`} className={`flex items-center gap-2 rounded-xl border p-3 text-sm ${pendingTournamentGameNumber.matchupId === matchup.id ? "border-blue-300 bg-blue-50" : "bg-white"}`}>
+                      <div className="min-w-0 flex-1">
+                        <div className="font-black">{getTournamentMatchupDisplayName(matchup, index)}</div>
+                        <div className="mt-1 truncate text-xs font-semibold text-slate-500">
+                          {matchup.round || "Round"} · {getTournamentSideLabel(selectedLeague, selectedTournament, matchup, "one", leagues)} vs {getTournamentSideLabel(selectedLeague, selectedTournament, matchup, "two", leagues)}
+                        </div>
+                      </div>
+                      <Button variant="outline" disabled={index === 0} onClick={() => moveTournamentMatchupNumber(selectedTournament.id, matchup.id, "up")}>Up</Button>
+                      <Button variant="outline" disabled={index === list.length - 1} onClick={() => moveTournamentMatchupNumber(selectedTournament.id, matchup.id, "down")}>Down</Button>
+                    </div>
+                  ))}
+              </div>
+              {(selectedTournament.matchups || []).filter((matchup) => Number(matchup.generatedGameNumber) > 0).length === 0 && (
+                <div className="rounded-xl border bg-slate-50 p-4 text-sm text-slate-500">No numbered games yet.</div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {pendingTournamentRoundDelete && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4">
+            <div className="w-full max-w-md rounded-3xl bg-white p-5 shadow-xl">
+              <div className="text-xs font-black uppercase tracking-wide text-red-600">Remove Round</div>
+              <h2 className="mt-1 text-2xl font-black">Which round should be removed?</h2>
+              <p className="mt-2 rounded-xl border border-red-200 bg-red-50 p-3 text-sm font-semibold text-red-700">
+                Removing a round deletes every matchup in that round and clears any winner or loser links pointing to those matchups.
+              </p>
+              <div className="mt-4 space-y-2">
+                {(pendingTournamentRoundDelete.rounds || []).map((round) => (
+                  <Button key={`remove-round-${round}`} variant="outline" onClick={() => removeTournamentRound(pendingTournamentRoundDelete.tournamentId, round)}>{round}</Button>
+                ))}
+              </div>
+              <div className="mt-5 flex justify-end">
+                <Button variant="primary" onClick={() => setPendingTournamentRoundDelete(null)}>Cancel</Button>
+              </div>
+            </div>
           </div>
         )}
 

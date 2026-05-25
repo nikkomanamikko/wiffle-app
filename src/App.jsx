@@ -468,6 +468,73 @@ function applyTournamentDefaultMatchupSettings(tournament = {}) {
   };
 }
 
+function resetTournamentMatchupForSchedule(matchup = {}) {
+  return {
+    ...matchup,
+    teamOneId: "",
+    teamTwoId: "",
+    winnerTeamId: "",
+    winnerSeed: "",
+    winnerBracket: "",
+    loserTeamId: "",
+    loserSeed: "",
+    loserBracket: "",
+    completedGameSummaries: [],
+    seriesSideOneWins: 0,
+    seriesSideTwoWins: 0,
+    seriesWinsNeeded: "",
+    seriesComplete: false,
+    championshipResetRequired: false,
+    eliminatedTeamIds: [],
+    teamOneSimulated: false,
+    teamTwoSimulated: false,
+  };
+}
+
+function makeScheduledTournamentInstance(template = {}) {
+  const instanceId = newId();
+  return {
+    ...cloneLeagueRecord(template),
+    id: instanceId,
+    templateTournamentId: template.id || "",
+    sourceTournamentId: template.id || "",
+    status: "scheduled",
+    finalized: true,
+    simulationMode: false,
+    participants: (template.participants || []).map((participant) => ({
+      ...participant,
+      id: participant.id || newId(),
+      teamId: "",
+      customTeamName: "",
+      customPlayers: [],
+    })),
+    matchups: (template.matchups || []).map(resetTournamentMatchupForSchedule),
+  };
+}
+
+function cloneScheduledTournamentForSchedule(tournament = {}) {
+  if (!tournament?.id) return null;
+  const instanceId = newId();
+  return {
+    ...cloneLeagueRecord(tournament),
+    id: instanceId,
+    templateTournamentId: tournament.templateTournamentId || tournament.sourceTournamentId || tournament.id,
+    sourceTournamentId: tournament.sourceTournamentId || tournament.templateTournamentId || "",
+  };
+}
+
+function getWeekTournament(week = {}, league = {}) {
+  if (week?.scheduledTournament?.id) return week.scheduledTournament;
+  const sourceId = week?.sourceTournamentId || "";
+  return (league?.tournaments || []).find((tournament) => tournament.id === sourceId) || null;
+}
+
+function weekUsesTournament(week = {}, tournamentId = "") {
+  if (!tournamentId) return false;
+  if (week?.scheduledTournament?.id) return week.scheduledTournament.id === tournamentId;
+  return week?.sourceTournamentId === tournamentId;
+}
+
 function tournamentTypeLabel(type = "custom") {
   if (type === "round_robin") return "Round Robin";
   if (type === "single_elimination") return "Single Elimination";
@@ -482,7 +549,33 @@ function seriesLabel(seriesLength = "") {
 function getTournamentMatchupResolvedTeamId(tournament = {}, matchup = {}, side = "one") {
   const slot = getTournamentMatchupSide(matchup, side);
   if (slot.teamId) return slot.teamId;
+  if (slot.placeholder) return resolveTournamentPlaceholderSlot(tournament, slot.placeholder).teamId || "";
   return getTournamentSeedTeamId(tournament, slot.bracket, slot.seed);
+}
+
+function isTournamentSeedParticipantAssigned(participant = {}) {
+  return Boolean(String(participant.teamId || "").trim() || String(participant.customTeamName || "").trim());
+}
+
+function areTournamentSeedsAssigned(tournament = {}) {
+  const participants = tournament.participants || [];
+  return participants.length > 0 && participants.every(isTournamentSeedParticipantAssigned);
+}
+
+function isTournamentMatchupSideReady(tournament = {}, matchup = {}, side = "one") {
+  const slot = getTournamentMatchupSide(matchup, side);
+  if (slot.teamId) return true;
+  if (slot.placeholder) {
+    const resolved = resolveTournamentPlaceholderSlot(tournament, slot.placeholder);
+    return Boolean(String(resolved.teamId || "").trim() || String(resolved.customTeamName || "").trim());
+  }
+  const participant = getTournamentSeedParticipant(tournament, slot.bracket, slot.seed);
+  return Boolean(isTournamentSeedParticipantAssigned(participant));
+}
+
+function isTournamentMatchupReady(tournament = {}, matchup = {}) {
+  if (!matchup?.id) return false;
+  return isTournamentMatchupSideReady(tournament, matchup, "one") && isTournamentMatchupSideReady(tournament, matchup, "two");
 }
 
 function makeScheduledGamesFromTournament(tournament = {}, sessionId = "", timingOptions = {}, league = {}, leagues = []) {
@@ -500,8 +593,9 @@ function makeScheduledGamesFromTournament(tournament = {}, sessionId = "", timin
     const teamTwoSeed = Number(matchup.teamTwoSeed) || 0;
     const higherSeedCanSetHome = homeAwayMode === "higher_seed_home" && teamOneId && teamTwoId && teamOneSeed && teamTwoSeed && teamOneSeed !== teamTwoSeed;
     const higherSeedTeamOneHome = higherSeedCanSetHome && teamOneSeed < teamTwoSeed;
-    const homeTeamId = higherSeedCanSetHome ? (higherSeedTeamOneHome ? teamOneId : teamTwoId) : isSeries ? "" : teamTwoId;
-    const awayTeamId = higherSeedCanSetHome ? (higherSeedTeamOneHome ? teamTwoId : teamOneId) : isSeries ? "" : teamOneId;
+    const gameTimeHomeAway = homeAwayMode === "game_time";
+    const homeTeamId = higherSeedCanSetHome ? (higherSeedTeamOneHome ? teamOneId : teamTwoId) : (isSeries || gameTimeHomeAway) ? "" : teamTwoId;
+    const awayTeamId = higherSeedCanSetHome ? (higherSeedTeamOneHome ? teamTwoId : teamOneId) : (isSeries || gameTimeHomeAway) ? "" : teamOneId;
     const homeTeamData = higherSeedCanSetHome ? (higherSeedTeamOneHome ? teamOneData : teamTwoData) : teamTwoData;
     const awayTeamData = higherSeedCanSetHome ? (higherSeedTeamOneHome ? teamTwoData : teamOneData) : teamOneData;
     return {
@@ -518,10 +612,10 @@ function makeScheduledGamesFromTournament(tournament = {}, sessionId = "", timin
       seriesHomeAwayMode: homeAwayMode,
       awayTeamId,
       homeTeamId,
-      awayTeamName: awayTeamData.name || "",
-      homeTeamName: homeTeamData.name || "",
-      awayTeamPlayers: awayTeamData.players || [],
-      homeTeamPlayers: homeTeamData.players || [],
+      awayTeamName: gameTimeHomeAway ? "" : awayTeamData.name || "",
+      homeTeamName: gameTimeHomeAway ? "" : homeTeamData.name || "",
+      awayTeamPlayers: gameTimeHomeAway ? [] : awayTeamData.players || [],
+      homeTeamPlayers: gameTimeHomeAway ? [] : homeTeamData.players || [],
       sessionId,
       completedGameId: "",
       tournamentId: tournament.id,
@@ -562,6 +656,35 @@ function hydrateScheduledTournamentGame(game = {}, tournament = {}, league = {},
   };
 }
 
+function resolveTournamentPlaceholderSlot(tournament = {}, placeholder = "") {
+  const cleanPlaceholder = String(placeholder || "").trim();
+  if (!cleanPlaceholder) return { teamId: "", seed: "", bracket: 1, label: "" };
+  const winLossMatch = cleanPlaceholder.match(/^([WL])(\d+)$/i);
+  const isLosersBracketWinner = cleanPlaceholder.toLowerCase() === "loser's bracket winner";
+  const sourceMatchup = isLosersBracketWinner
+    ? (tournament.matchups || []).find((matchup) => (
+      matchup.nextMatchupId === tournament.championshipMatchupId
+      && String(`${matchup.round || ""} ${matchup.name || ""}`).toLowerCase().includes("loser")
+    ))
+    : winLossMatch
+      ? (tournament.matchups || []).find((matchup) => Number(matchup.generatedGameNumber) === Number(winLossMatch[2]))
+      : null;
+  if (!sourceMatchup) return { teamId: "", seed: "", bracket: 1, label: cleanPlaceholder };
+  const useWinner = isLosersBracketWinner || winLossMatch?.[1]?.toUpperCase() === "W";
+  const teamId = useWinner ? sourceMatchup.winnerTeamId || "" : sourceMatchup.loserTeamId || "";
+  const seed = useWinner ? sourceMatchup.winnerSeed || "" : sourceMatchup.loserSeed || "";
+  const bracket = Math.max(1, Number(useWinner ? sourceMatchup.winnerBracket || sourceMatchup.bracket : sourceMatchup.loserBracket || sourceMatchup.bracket) || 1);
+  const participant = seed ? getTournamentSeedParticipant(tournament, bracket, seed) : null;
+  return {
+    teamId: teamId || participant?.teamId || "",
+    seed,
+    bracket,
+    customTeamName: participant?.customTeamName || "",
+    customPlayers: participant?.customPlayers || [],
+    label: cleanPlaceholder,
+  };
+}
+
 function findTournamentContextForSetup(leagues = [], setup = {}) {
   const cleanSetup = setup || {};
   const preferredLeagueIds = [
@@ -585,8 +708,10 @@ function findTournamentContextForSetup(leagues = [], setup = {}) {
         || null;
       if (!week) continue;
       const scheduledGame = (week.games || []).find((game) => game.id === cleanSetup.selectedScheduledGameId) || null;
-      const tournamentId = scheduledGame?.tournamentId || week.sourceTournamentId || "";
-      const tournament = (league.tournaments || []).find((item) => item.id === tournamentId) || null;
+      const tournamentId = scheduledGame?.tournamentId || week.scheduledTournament?.id || week.sourceTournamentId || "";
+      const tournament = week.scheduledTournament?.id === tournamentId
+        ? week.scheduledTournament
+        : (league.tournaments || []).find((item) => item.id === tournamentId || item.id === week.sourceTournamentId) || null;
       if (tournament) return { league, season, week, scheduledGame, tournament };
     }
   }
@@ -648,7 +773,13 @@ function getTournamentMatchupSide(matchup = {}, side = "one") {
 
 function getTournamentSideLabel(league, tournament, matchup = {}, side = "one", leagues = []) {
   const slot = getTournamentMatchupSide(matchup, side);
-  if (slot.placeholder) return slot.placeholder;
+  if (slot.placeholder) {
+    const resolved = resolveTournamentPlaceholderSlot(tournament, slot.placeholder);
+    if (resolved.teamId) return tournamentTeamLabel(league, tournament, resolved.teamId, tournamentSeedLabel(resolved.seed, slot.placeholder), leagues);
+    if (resolved.customTeamName) return resolved.seed ? `#${resolved.seed} ${resolved.customTeamName}` : resolved.customTeamName;
+    if (resolved.seed) return tournamentSeedLabel(resolved.seed, slot.placeholder);
+    return slot.placeholder;
+  }
   const seedParticipant = getTournamentSeedParticipant(tournament, slot.bracket, slot.seed);
   if (!slot.teamId && seedParticipant?.customTeamName) {
     return seedParticipant.seed ? `#${seedParticipant.seed} ${seedParticipant.customTeamName}` : seedParticipant.customTeamName;
@@ -672,17 +803,132 @@ function getTournamentSeedCustomPlayers(tournament = {}, bracket = 1, seed = "")
 
 function getTournamentMatchupSideScheduleData(tournament = {}, matchup = {}, side = "one", league = {}, leagues = []) {
   const slot = getTournamentMatchupSide(matchup, side);
-  const participant = getTournamentMatchupParticipant(tournament, matchup, side);
+  const resolved = slot.placeholder ? resolveTournamentPlaceholderSlot(tournament, slot.placeholder) : null;
+  const participant = resolved?.seed
+    ? getTournamentSeedParticipant(tournament, resolved.bracket, resolved.seed)
+    : getTournamentMatchupParticipant(tournament, matchup, side);
   const team = slot.teamId
     ? getTournamentTeamOptionsFromLeagues(leagues, tournament, league).find((item) => item.id === slot.teamId) || (league?.teams || []).find((item) => item.id === slot.teamId)
-    : null;
+    : resolved?.teamId
+      ? getTournamentTeamOptionsFromLeagues(leagues, tournament, league).find((item) => item.id === resolved.teamId) || (league?.teams || []).find((item) => item.id === resolved.teamId)
+      : null;
   const label = getTournamentSideLabel(league, tournament, matchup, side, leagues);
   return {
-    id: slot.teamId || "",
+    id: slot.teamId || resolved?.teamId || "",
     name: team?.name || participant?.customTeamName || label,
-    players: cleanRoster(participant?.customPlayers || []),
-    seed: slot.seed || "",
-    bracket: slot.bracket || matchup.bracket || 1,
+    players: cleanRoster(participant?.customPlayers || resolved?.customPlayers || []),
+    seed: slot.seed || resolved?.seed || "",
+    bracket: slot.bracket || resolved?.bracket || matchup.bracket || 1,
+  };
+}
+
+function isTournamentSlotResult(matchup = {}, tournament = {}, side = "one", resultType = "winner") {
+  const slot = getTournamentMatchupSide(matchup, side);
+  const resultTeamId = resultType === "winner" ? matchup.winnerTeamId || "" : matchup.loserTeamId || "";
+  const resultSeed = resultType === "winner" ? matchup.winnerSeed || "" : matchup.loserSeed || "";
+  const resultBracket = Math.max(1, Number(resultType === "winner" ? matchup.winnerBracket || matchup.bracket : matchup.loserBracket || matchup.bracket) || 1);
+  if (!resultTeamId && !resultSeed) return false;
+  const resolved = slot.placeholder ? resolveTournamentPlaceholderSlot(tournament, slot.placeholder) : null;
+  const slotTeamId = slot.teamId || resolved?.teamId || getTournamentSeedTeamId(tournament, slot.bracket, slot.seed);
+  const slotSeed = slot.seed || resolved?.seed || "";
+  const slotBracket = Math.max(1, Number(resolved?.bracket || slot.bracket || matchup.bracket) || 1);
+  if (resultTeamId && slotTeamId && resultTeamId === slotTeamId) return true;
+  return Boolean(resultSeed && slotSeed && String(resultSeed) === String(slotSeed) && resultBracket === slotBracket);
+}
+
+function getSeriesWinsNeeded(seriesLength = "") {
+  const length = Math.max(1, Number(seriesLength) || 1);
+  return Math.floor(length / 2) + 1;
+}
+
+function getSavedGamesForScheduledGame(previousGames = [], scheduledGameId = "") {
+  if (!scheduledGameId) return [];
+  return (previousGames || [])
+    .filter((game) => game.status === "final" && game.savedSetup?.selectedScheduledGameId === scheduledGameId)
+    .sort((a, b) => String(a.savedAt || "").localeCompare(String(b.savedAt || "")) || String(a.id || "").localeCompare(String(b.id || "")));
+}
+
+function getTournamentScheduledGameIds(season = {}, tournamentId = "") {
+  if (!tournamentId) return new Set();
+  return new Set(
+    (season?.scheduleWeeks || [])
+      .filter((week) => weekUsesTournament(week, tournamentId))
+      .flatMap((week) => week.games || [])
+      .map((game) => game.id)
+      .filter(Boolean),
+  );
+}
+
+function getTournamentMatchupScheduledGameIds(season = {}, tournamentId = "", matchupId = "") {
+  if (!tournamentId || !matchupId) return new Set();
+  return new Set(
+    (season?.scheduleWeeks || [])
+      .filter((week) => weekUsesTournament(week, tournamentId))
+      .flatMap((week) => week.games || [])
+      .filter((game) => game.tournamentMatchupId === matchupId)
+      .map((game) => game.id)
+      .filter(Boolean),
+  );
+}
+
+function getSavedGamesForScheduledGameIds(previousGames = [], scheduledGameIds = new Set()) {
+  return (previousGames || [])
+    .filter((game) => game.status === "final" && scheduledGameIds.has(game.savedSetup?.selectedScheduledGameId))
+    .sort((a, b) => String(a.savedAt || "").localeCompare(String(b.savedAt || "")) || String(a.id || "").localeCompare(String(b.id || "")));
+}
+
+function scheduleWeekHasSavedResults(week = {}, previousGames = []) {
+  const scheduledGameIds = new Set((week.games || []).map((game) => game.id).filter(Boolean));
+  return scheduledGameIds.size > 0 && getSavedGamesForScheduledGameIds(previousGames, scheduledGameIds).length > 0;
+}
+
+function getScheduledTournamentGameSeriesSummary(scheduledGame = {}, tournament = {}, matchup = {}, previousGames = [], league = {}, leagues = []) {
+  const savedGames = getSavedGamesForScheduledGame(previousGames, scheduledGame.id);
+  const sideOne = getTournamentMatchupSideScheduleData(tournament, matchup, "one", league, leagues);
+  const sideTwo = getTournamentMatchupSideScheduleData(tournament, matchup, "two", league, leagues);
+  const normalizeName = (value) => String(value || "").trim().replace(/^#\d+\s+/, "").toLowerCase();
+  const hydratedGame = hydrateScheduledTournamentGame(scheduledGame, tournament, league, leagues);
+  const sideMatchesWinner = (side, savedGame, winningSlot) => {
+    const winningTeamId = savedGame.savedSetup?.[winningSlot === "away" ? "awayLeagueTeamId" : "homeLeagueTeamId"] || hydratedGame?.[winningSlot === "away" ? "awayTeamId" : "homeTeamId"] || "";
+    const winningTeamName = savedGame[winningSlot === "away" ? "awayTeam" : "homeTeam"] || hydratedGame?.[winningSlot === "away" ? "awayTeamName" : "homeTeamName"] || "";
+    return Boolean(
+      (winningTeamId && side.id && side.id === winningTeamId)
+      || (winningTeamName && normalizeName(side.name) === normalizeName(winningTeamName))
+    );
+  };
+  const games = savedGames.flatMap((savedGame, index) => {
+    if (savedGame.winner === "tie") return [];
+    const winnerSlot = savedGame.winner === "away" ? "away" : "home";
+    const winnerSide = sideMatchesWinner(sideOne, savedGame, winnerSlot) ? "one" : sideMatchesWinner(sideTwo, savedGame, winnerSlot) ? "two" : "";
+    if (!winnerSide) return [];
+    const awayMatchesSideOne = Boolean(
+      (savedGame.savedSetup?.awayLeagueTeamId && sideOne.id && savedGame.savedSetup.awayLeagueTeamId === sideOne.id)
+      || normalizeName(savedGame.awayTeam) === normalizeName(sideOne.name)
+    );
+    return [{
+      id: savedGame.id,
+      index: index + 1,
+      winnerSide,
+      awayScore: Number(savedGame.awayScore) || 0,
+      homeScore: Number(savedGame.homeScore) || 0,
+      sideOneScore: awayMatchesSideOne ? Number(savedGame.awayScore) || 0 : Number(savedGame.homeScore) || 0,
+      sideTwoScore: awayMatchesSideOne ? Number(savedGame.homeScore) || 0 : Number(savedGame.awayScore) || 0,
+    }];
+  });
+  const sideOneWins = games.filter((game) => game.winnerSide === "one").length;
+  const sideTwoWins = games.filter((game) => game.winnerSide === "two").length;
+  const winsNeeded = scheduledGame.seriesLength ? getSeriesWinsNeeded(scheduledGame.seriesLength) : 1;
+  const winnerSide = sideOneWins >= winsNeeded ? "one" : sideTwoWins >= winsNeeded ? "two" : "";
+  return {
+    sideOne,
+    sideTwo,
+    games,
+    sideOneWins,
+    sideTwoWins,
+    winsNeeded,
+    complete: Boolean(winnerSide),
+    winnerSide,
+    latestGame: games[games.length - 1] || null,
   };
 }
 
@@ -1243,6 +1489,160 @@ function syncTournamentAdvancementPlaceholders(tournament = {}, matchups = []) {
   return nextMatchups;
 }
 
+function applyTournamentMatchupWinnerResult(tournament = {}, matchupId = "", winnerSide = "one") {
+  const sourceMatchup = (tournament.matchups || []).find((matchup) => matchup.id === matchupId);
+  if (!sourceMatchup) return tournament;
+  const winnerSlot = getTournamentMatchupSide(sourceMatchup, winnerSide === "two" ? "two" : "one");
+  const loserSlot = getTournamentMatchupSide(sourceMatchup, winnerSide === "two" ? "one" : "two");
+  const winnerTeamId = winnerSlot.teamId || "";
+  const loserTeamId = loserSlot.teamId || "";
+  const winnerSeed = winnerSlot.seed || "";
+  const loserSeed = loserSlot.seed || "";
+  const winnerBracket = Math.max(1, Number(winnerSlot.bracket) || 1);
+  const loserBracket = Math.max(1, Number(loserSlot.bracket) || 1);
+  if (!winnerTeamId && !winnerSeed) return tournament;
+
+  const teamIds = [sourceMatchup.teamOneId, sourceMatchup.teamTwoId].filter(Boolean);
+  const sourceSlots = [
+    sourceMatchup.teamOneSeed ? `${Math.max(1, Number(sourceMatchup.teamOneSourceBracket || sourceMatchup.bracket) || 1)}-${sourceMatchup.teamOneSeed}` : "",
+    sourceMatchup.teamTwoSeed ? `${Math.max(1, Number(sourceMatchup.teamTwoSourceBracket || sourceMatchup.bracket) || 1)}-${sourceMatchup.teamTwoSeed}` : "",
+  ].filter(Boolean);
+  const isChampionship = tournament.championshipMatchupId === matchupId;
+  const lossesNeededToEliminate = tournament.type === "double_elimination" ? 2 : 1;
+  const lossCountsBefore = getTournamentLossCounts((tournament.matchups || []).filter((matchup) => matchup.id !== matchupId));
+  const loserLossesAfter = (lossCountsBefore[loserTeamId] || 0) + (loserTeamId ? 1 : 0);
+  const championshipResetRequired = Boolean(isChampionship && tournament.type === "double_elimination" && (loserTeamId || loserSeed) && (!loserTeamId || loserLossesAfter < 2));
+  const loserIsEliminated = Boolean((loserTeamId && loserLossesAfter >= lossesNeededToEliminate) || (!loserTeamId && loserSeed && tournament.type !== "double_elimination"));
+  const sourceMatchupText = String(`${sourceMatchup.round || ""} ${sourceMatchup.name || ""}`).toLowerCase();
+  const sourceIsLosersBracket = sourceMatchupText.includes("loser");
+  const sourceWinnerPlaceholder = getTournamentWinnerPlaceholder(sourceMatchup) || (sourceIsLosersBracket ? "Loser's Bracket Winner" : "");
+  const inferredSourceNextMatchupId = sourceWinnerPlaceholder
+    ? (tournament.matchups || []).find((matchup) => matchup.id !== sourceMatchup.id && (matchup.teamOnePlaceholder === sourceWinnerPlaceholder || matchup.teamTwoPlaceholder === sourceWinnerPlaceholder))?.id || ""
+    : "";
+  const rawSourceNextMatchupId = sourceMatchup.nextMatchupId || inferredSourceNextMatchupId || (tournament.type === "single_elimination" && tournament.championshipMatchupId && sourceMatchupText.includes("bracket winners") && tournament.championshipMatchupId !== sourceMatchup.id ? tournament.championshipMatchupId : "");
+  const rawSourceNextMatchup = (tournament.matchups || []).find((matchup) => matchup.id === rawSourceNextMatchupId);
+  const sourceNextIsAccidentalLoserTarget = Boolean(tournament.type === "double_elimination" && !sourceIsLosersBracket && getTournamentMatchupLoserLaneId(rawSourceNextMatchup, tournament));
+  const sourceNextMatchupId = sourceNextIsAccidentalLoserTarget ? "" : rawSourceNextMatchupId;
+  const sourceLoserPlaceholder = sourceMatchup.generatedGameNumber ? `L${sourceMatchup.generatedGameNumber}` : "";
+
+  return {
+    ...tournament,
+    matchups: (tournament.matchups || []).map((matchup) => {
+      if (matchup.id === matchupId) {
+        return {
+          ...matchup,
+          winnerTeamId,
+          loserTeamId,
+          winnerSeed,
+          loserSeed,
+          winnerBracket,
+          loserBracket,
+          championshipResetRequired,
+          eliminatedTeamIds: loserIsEliminated && (isChampionship || !sourceMatchup.loserNextMatchupId) ? [loserTeamId] : [],
+        };
+      }
+      if (isChampionship) return matchup;
+      if (matchup.id === sourceNextMatchupId) {
+        const cleared = {
+          ...matchup,
+          teamOneId: teamIds.includes(matchup.teamOneId) ? "" : matchup.teamOneId,
+          teamTwoId: teamIds.includes(matchup.teamTwoId) ? "" : matchup.teamTwoId,
+          teamOneSeed: sourceSlots.includes(`${Math.max(1, Number(matchup.teamOneSourceBracket || matchup.bracket) || 1)}-${matchup.teamOneSeed || ""}`) ? "" : matchup.teamOneSeed,
+          teamTwoSeed: sourceSlots.includes(`${Math.max(1, Number(matchup.teamTwoSourceBracket || matchup.bracket) || 1)}-${matchup.teamTwoSeed || ""}`) ? "" : matchup.teamTwoSeed,
+          teamOneSourceBracket: sourceSlots.includes(`${Math.max(1, Number(matchup.teamOneSourceBracket || matchup.bracket) || 1)}-${matchup.teamOneSeed || ""}`) ? "" : matchup.teamOneSourceBracket,
+          teamTwoSourceBracket: sourceSlots.includes(`${Math.max(1, Number(matchup.teamTwoSourceBracket || matchup.bracket) || 1)}-${matchup.teamTwoSeed || ""}`) ? "" : matchup.teamTwoSourceBracket,
+          teamOneSimulated: sourceSlots.includes(`${Math.max(1, Number(matchup.teamOneSourceBracket || matchup.bracket) || 1)}-${matchup.teamOneSeed || ""}`) ? false : matchup.teamOneSimulated,
+          teamTwoSimulated: sourceSlots.includes(`${Math.max(1, Number(matchup.teamTwoSourceBracket || matchup.bracket) || 1)}-${matchup.teamTwoSeed || ""}`) ? false : matchup.teamTwoSimulated,
+        };
+        const topSlotIsSameWinner = String(cleared.teamOneSeed || "") === String(winnerSeed || "") && Math.max(1, Number(cleared.teamOneSourceBracket || cleared.bracket) || 1) === winnerBracket && (!winnerTeamId || cleared.teamOneId === winnerTeamId);
+        const winnerPlaceholderSlot = sourceWinnerPlaceholder && cleared.teamOnePlaceholder === sourceWinnerPlaceholder
+          ? "one"
+          : sourceWinnerPlaceholder && cleared.teamTwoPlaceholder === sourceWinnerPlaceholder
+            ? "two"
+            : "";
+        const useSecondSlot = winnerPlaceholderSlot
+          ? winnerPlaceholderSlot === "two"
+          : sourceIsLosersBracket && matchup.id !== tournament.championshipMatchupId
+            ? true
+          : Boolean((cleared.teamOneId || cleared.teamOneSeed) && !topSlotIsSameWinner);
+        return {
+          ...cleared,
+          [useSecondSlot ? "teamTwoId" : "teamOneId"]: winnerTeamId,
+          [useSecondSlot ? "teamTwoSeed" : "teamOneSeed"]: winnerSeed,
+          [useSecondSlot ? "teamTwoPlaceholder" : "teamOnePlaceholder"]: "",
+          [useSecondSlot ? "teamTwoSourceBracket" : "teamOneSourceBracket"]: winnerBracket,
+          [useSecondSlot ? "teamTwoSimulated" : "teamOneSimulated"]: true,
+        };
+      }
+      if (matchup.id === sourceMatchup.loserNextMatchupId && (loserTeamId || loserSeed)) {
+        const cleared = {
+          ...matchup,
+          teamOneId: teamIds.includes(matchup.teamOneId) ? "" : matchup.teamOneId,
+          teamTwoId: teamIds.includes(matchup.teamTwoId) ? "" : matchup.teamTwoId,
+          teamOneSeed: sourceSlots.includes(`${Math.max(1, Number(matchup.teamOneSourceBracket || matchup.bracket) || 1)}-${matchup.teamOneSeed || ""}`) ? "" : matchup.teamOneSeed,
+          teamTwoSeed: sourceSlots.includes(`${Math.max(1, Number(matchup.teamTwoSourceBracket || matchup.bracket) || 1)}-${matchup.teamTwoSeed || ""}`) ? "" : matchup.teamTwoSeed,
+          teamOneSourceBracket: sourceSlots.includes(`${Math.max(1, Number(matchup.teamOneSourceBracket || matchup.bracket) || 1)}-${matchup.teamOneSeed || ""}`) ? "" : matchup.teamOneSourceBracket,
+          teamTwoSourceBracket: sourceSlots.includes(`${Math.max(1, Number(matchup.teamTwoSourceBracket || matchup.bracket) || 1)}-${matchup.teamTwoSeed || ""}`) ? "" : matchup.teamTwoSourceBracket,
+          teamOneSimulated: sourceSlots.includes(`${Math.max(1, Number(matchup.teamOneSourceBracket || matchup.bracket) || 1)}-${matchup.teamOneSeed || ""}`) ? false : matchup.teamOneSimulated,
+          teamTwoSimulated: sourceSlots.includes(`${Math.max(1, Number(matchup.teamTwoSourceBracket || matchup.bracket) || 1)}-${matchup.teamTwoSeed || ""}`) ? false : matchup.teamTwoSimulated,
+        };
+        const topSlotIsSameLoser = String(cleared.teamOneSeed || "") === String(loserSeed || "") && Math.max(1, Number(cleared.teamOneSourceBracket || cleared.bracket) || 1) === loserBracket && (!loserTeamId || cleared.teamOneId === loserTeamId);
+        const loserPlaceholderSlot = sourceLoserPlaceholder && cleared.teamOnePlaceholder === sourceLoserPlaceholder
+          ? "one"
+          : sourceLoserPlaceholder && cleared.teamTwoPlaceholder === sourceLoserPlaceholder
+            ? "two"
+            : "";
+        const useSecondSlot = loserPlaceholderSlot
+          ? loserPlaceholderSlot === "two"
+          : Boolean((cleared.teamOneId || cleared.teamOneSeed) && !topSlotIsSameLoser);
+        return {
+          ...cleared,
+          [useSecondSlot ? "teamTwoId" : "teamOneId"]: loserTeamId,
+          [useSecondSlot ? "teamTwoSeed" : "teamOneSeed"]: loserSeed,
+          [useSecondSlot ? "teamTwoPlaceholder" : "teamOnePlaceholder"]: "",
+          [useSecondSlot ? "teamTwoSourceBracket" : "teamOneSourceBracket"]: loserBracket,
+          [useSecondSlot ? "teamTwoSimulated" : "teamOneSimulated"]: true,
+        };
+      }
+      return matchup;
+    }),
+  };
+}
+
+function getTournamentWithCompletedGames(league = {}, season = {}, tournament = {}, previousGames = [], leagues = []) {
+  if (!tournament?.id || !season) return tournament;
+  const scheduledTournamentGames = (season.scheduleWeeks || [])
+    .filter((week) => weekUsesTournament(week, tournament.id))
+    .flatMap((week) => week.games || [])
+    .filter((game) => game.tournamentMatchupId && getSavedGamesForScheduledGame(previousGames, game.id).length > 0)
+    .sort((a, b) => {
+      const aMatchup = (tournament.matchups || []).find((matchup) => matchup.id === a.tournamentMatchupId);
+      const bMatchup = (tournament.matchups || []).find((matchup) => matchup.id === b.tournamentMatchupId);
+      return (Number(aMatchup?.generatedGameNumber) || 9999) - (Number(bMatchup?.generatedGameNumber) || 9999)
+        || String(a.time || "").localeCompare(String(b.time || ""));
+    });
+
+  return scheduledTournamentGames.reduce((currentTournament, scheduledGame) => {
+    const matchup = (currentTournament.matchups || []).find((item) => item.id === scheduledGame.tournamentMatchupId);
+    if (!matchup) return currentTournament;
+    const seriesSummary = getScheduledTournamentGameSeriesSummary(scheduledGame, currentTournament, matchup, previousGames, league, leagues);
+    const withSummary = {
+      ...currentTournament,
+      matchups: (currentTournament.matchups || []).map((item) => (item.id === matchup.id
+        ? {
+          ...item,
+          completedGameSummaries: seriesSummary.games,
+          seriesSideOneWins: seriesSummary.sideOneWins,
+          seriesSideTwoWins: seriesSummary.sideTwoWins,
+          seriesWinsNeeded: seriesSummary.winsNeeded,
+          seriesComplete: seriesSummary.complete,
+        }
+        : item)),
+    };
+    return seriesSummary.complete ? applyTournamentMatchupWinnerResult(withSummary, matchup.id, seriesSummary.winnerSide) : withSummary;
+  }, { ...tournament, matchups: (tournament.matchups || []).map((matchup) => ({ ...matchup })) });
+}
+
 function buildRoundRobinStandings(league = {}, season = {}, tournament = {}, previousGames = []) {
   const rows = Object.fromEntries((tournament.participants || [])
     .filter((participant) => participant.teamId)
@@ -1259,7 +1659,7 @@ function buildRoundRobinStandings(league = {}, season = {}, tournament = {}, pre
       headToHead: {},
     }]));
   const tournamentGames = (season.scheduleWeeks || [])
-    .filter((week) => week.sourceTournamentId === tournament.id)
+    .filter((week) => weekUsesTournament(week, tournament.id))
     .flatMap((week) => week.games || []);
 
   function applyResult(awayTeamId = "", homeTeamId = "", awayScore = 0, homeScore = 0, winnerTeamId = "") {
@@ -5144,8 +5544,20 @@ function LeadersSection({ battingStats, pitchingStats, legacyPoints = {}, subCou
   );
 }
 
-function ReadOnlyTournamentBracketCanvas({ tournament, league, leagues = [], previousGames = [], className = "", heightClassName = "max-h-[70vh]", showLoserConnectors = true }) {
+function ReadOnlyTournamentBracketCanvas({ tournament, league, leagues = [], previousGames = [], scheduledGames = [], className = "", heightClassName = "max-h-[70vh]", showLoserConnectors = true, fitToContainer = false, showZoomControls = true, onMatchupClick = null }) {
+  const containerRef = useRef(null);
+  const [containerWidth, setContainerWidth] = useState(0);
+  const [zoom, setZoom] = useState(1);
   const matchups = tournament?.matchups || [];
+  useEffect(() => {
+    if (!fitToContainer || !containerRef.current || typeof ResizeObserver === "undefined") return undefined;
+    const updateWidth = () => setContainerWidth(containerRef.current?.clientWidth || 0);
+    updateWidth();
+    const observer = new ResizeObserver(updateWidth);
+    observer.observe(containerRef.current);
+    return () => observer.disconnect();
+  }, [fitToContainer]);
+
   if (!tournament || matchups.length === 0) {
     return <div className="rounded-xl border bg-slate-50 p-4 text-sm font-semibold text-slate-500">This tournament does not have a bracket canvas yet.</div>;
   }
@@ -5156,10 +5568,23 @@ function ReadOnlyTournamentBracketCanvas({ tournament, league, leagues = [], pre
   const rowGap = tournament.type === "round_robin" ? 36 : 96;
   const padding = 44;
   const columns = getTournamentRoundColumns(matchups, tournament.type === "custom" ? tournament.customRounds || [] : []);
-  const hasSavedLayout = matchups.some((matchup) => Number.isFinite(Number(matchup.layoutX)) && Number.isFinite(Number(matchup.layoutY)));
+  const matchupById = Object.fromEntries(matchups.map((matchup) => [matchup.id, matchup]));
+  const getPreviewNextMatchupId = (matchup) => {
+    if (matchup.nextMatchupId && matchupById[matchup.nextMatchupId]) return matchup.nextMatchupId;
+    const placeholder = getTournamentWinnerPlaceholder(matchup);
+    if (!placeholder) return "";
+    return matchups.find((target) => (
+      target.id !== matchup.id
+      && (target.teamOnePlaceholder === placeholder || target.teamTwoPlaceholder === placeholder)
+    ))?.id || "";
+  };
+  const hasCompleteSavedLayout = matchups.length > 0 && matchups.every((matchup) => (
+    Number.isFinite(Number(matchup.layoutX)) && Number.isFinite(Number(matchup.layoutY))
+  ));
+  const useSavedLayout = hasCompleteSavedLayout && !fitToContainer;
   const rawPositions = new Map();
 
-  if (hasSavedLayout) {
+  if (useSavedLayout) {
     matchups.forEach((matchup, index) => {
       const fallbackColumnIndex = Math.max(0, columns.findIndex((column) => (column.matchups || []).some((item) => item.id === matchup.id)));
       const fallbackRowIndex = Math.max(0, columns[fallbackColumnIndex]?.matchups?.findIndex((item) => item.id === matchup.id) ?? index);
@@ -5169,12 +5594,37 @@ function ReadOnlyTournamentBracketCanvas({ tournament, league, leagues = [], pre
       });
     });
   } else {
+    const incomingIdsByTarget = matchups.reduce((incoming, matchup) => {
+      const targetId = getPreviewNextMatchupId(matchup);
+      if (!targetId) return incoming;
+      return { ...incoming, [targetId]: [...(incoming[targetId] || []), matchup.id] };
+    }, {});
+
     columns.forEach((column, columnIndex) => {
       (column.matchups || []).forEach((matchup, rowIndex) => {
+        const incomingPositions = (incomingIdsByTarget[matchup.id] || [])
+          .map((sourceId) => rawPositions.get(sourceId))
+          .filter(Boolean);
+        const incomingCenterY = incomingPositions.length
+          ? (incomingPositions.reduce((total, position) => total + position.y + matchupHeight / 2, 0) / incomingPositions.length) - matchupHeight / 2
+          : null;
         rawPositions.set(matchup.id, {
           x: columnIndex * (matchupWidth + columnGap),
-          y: Math.max(0, Number(column.topOffsetRem || 0) * 12) + rowIndex * (matchupHeight + rowGap),
+          y: Math.max(0, incomingCenterY ?? (Number(column.topOffsetRem || 0) * 12) + rowIndex * (matchupHeight + rowGap)),
         });
+      });
+
+      const positionedInColumn = (column.matchups || [])
+        .map((matchup) => ({ matchup, position: rawPositions.get(matchup.id) }))
+        .filter((item) => item.position)
+        .sort((a, b) => a.position.y - b.position.y);
+      positionedInColumn.forEach((item, index) => {
+        const previous = positionedInColumn[index - 1];
+        if (!previous) return;
+        const minimumY = previous.position.y + matchupHeight + rowGap * 0.65;
+        if (item.position.y < minimumY) {
+          rawPositions.set(item.matchup.id, { ...item.position, y: minimumY });
+        }
       });
     });
   }
@@ -5189,7 +5639,12 @@ function ReadOnlyTournamentBracketCanvas({ tournament, league, leagues = [], pre
   const maxY = Math.max(...[...positions.values()].map((position) => position.y + matchupHeight), matchupHeight + padding);
   const width = maxX + padding + 120;
   const height = maxY + padding;
-  const matchupById = Object.fromEntries(matchups.map((matchup) => [matchup.id, matchup]));
+  const fitScale = fitToContainer && containerWidth
+    ? Math.max(0.12, Math.min(1, (containerWidth - 24) / Math.max(1, width)))
+    : 1;
+  const displayScale = Math.max(0.15, Math.min(2, fitScale * zoom));
+  const renderedWidth = Math.ceil(width * displayScale);
+  const renderedHeight = Math.ceil(height * displayScale);
 
   const slotLineY = (position, slot = "one") => position.y + (slot === "two" ? 76 : 48);
   const getTargetSlot = (targetMatchup, placeholder = "") => {
@@ -5215,14 +5670,25 @@ function ReadOnlyTournamentBracketCanvas({ tournament, league, leagues = [], pre
   };
   const connectors = matchups.flatMap((matchup) => {
     const items = [];
-    if (matchup.nextMatchupId && matchupById[matchup.nextMatchupId]) items.push({ id: `${matchup.id}-w`, path: connectorPath(matchup, matchupById[matchup.nextMatchupId], false), color: "#0f172a" });
+    const nextMatchupId = getPreviewNextMatchupId(matchup);
+    if (nextMatchupId && matchupById[nextMatchupId]) items.push({ id: `${matchup.id}-w`, path: connectorPath(matchup, matchupById[nextMatchupId], false), color: "#0f172a" });
     if (showLoserConnectors && matchup.loserNextMatchupId && matchupById[matchup.loserNextMatchupId]) items.push({ id: `${matchup.id}-l`, path: connectorPath(matchup, matchupById[matchup.loserNextMatchupId], true), color: "#ef4444" });
     return items.filter((item) => item.path);
   });
+  const scheduledTimeByMatchupId = Object.fromEntries((scheduledGames || []).map((game) => [game.tournamentMatchupId, game.time || ""]).filter(([, time]) => Boolean(time)));
 
   return (
-    <div className={`overflow-auto rounded-2xl border bg-white p-3 ${heightClassName} ${className}`}>
-      <div className="relative overflow-visible" style={{ width: `${width}px`, height: `${height}px` }}>
+    <div ref={containerRef} className={`overflow-auto rounded-2xl border bg-white p-3 ${heightClassName} ${className}`}>
+      {showZoomControls && (
+        <div className="sticky left-0 top-0 z-10 mb-1 flex w-fit items-center gap-1 rounded-full border bg-white/95 p-0.5 text-[10px] font-black uppercase shadow-sm">
+          <button type="button" className="rounded-full px-2 py-0.5 text-slate-600 hover:bg-slate-100" onClick={() => setZoom((value) => Math.max(0.25, Number((value - 0.15).toFixed(2))))}>-</button>
+          <span className="min-w-9 text-center text-slate-500">{Math.round(displayScale * 100)}%</span>
+          <button type="button" className="rounded-full px-2 py-0.5 text-slate-600 hover:bg-slate-100" onClick={() => setZoom((value) => Math.min(2, Number((value + 0.15).toFixed(2))))}>+</button>
+          <button type="button" className="rounded-full px-2 py-0.5 text-slate-400 hover:bg-slate-100 hover:text-slate-700" onClick={() => setZoom(1)}>Fit</button>
+        </div>
+      )}
+      <div className="relative overflow-visible" style={{ width: `${renderedWidth}px`, height: `${renderedHeight}px` }}>
+        <div className="absolute left-0 top-0 origin-top-left" style={{ width: `${width}px`, height: `${height}px`, transform: `scale(${displayScale})` }}>
         <svg className="pointer-events-none absolute inset-0 overflow-visible" width={width} height={height} aria-hidden="true">
           {connectors.map((connector) => (
             <path key={connector.id} d={connector.path} fill="none" stroke={connector.color} strokeWidth="2.5" strokeLinejoin="round" strokeLinecap="square" />
@@ -5232,26 +5698,53 @@ function ReadOnlyTournamentBracketCanvas({ tournament, league, leagues = [], pre
           const position = positions.get(matchup.id) || { x: padding, y: padding + index * (matchupHeight + rowGap) };
           const matchupNumber = Number(matchup.generatedGameNumber) || index + 1;
           const isChampionship = tournament.championshipMatchupId === matchup.id;
+          const latestGame = matchup.completedGameSummaries?.[matchup.completedGameSummaries.length - 1] || null;
+          const sideOneResult = matchup.seriesLength
+            ? `${Number(matchup.seriesSideOneWins) || 0}`
+            : latestGame ? `${latestGame.sideOneScore}` : "";
+          const sideTwoResult = matchup.seriesLength
+            ? `${Number(matchup.seriesSideTwoWins) || 0}`
+            : latestGame ? `${latestGame.sideTwoScore}` : "";
+          const resultSuffix = matchup.seriesLength && matchup.completedGameSummaries?.length
+            ? `Series ${Number(matchup.seriesSideOneWins) || 0}-${Number(matchup.seriesSideTwoWins) || 0}`
+            : "";
+          const canOpenMatchup = typeof onMatchupClick === "function";
           return (
-            <div key={matchup.id} className="absolute rounded-xl border-2 border-blue-100 bg-white p-2 text-[11px] shadow-sm" style={{ left: `${position.x}px`, top: `${position.y}px`, width: `${matchupWidth}px`, minHeight: `${matchupHeight}px` }}>
+            <div
+              key={matchup.id}
+              role={canOpenMatchup ? "button" : undefined}
+              tabIndex={canOpenMatchup ? 0 : undefined}
+              className={`absolute rounded-xl border-2 border-blue-100 bg-white p-2 text-[11px] shadow-sm ${canOpenMatchup ? "cursor-pointer transition hover:border-blue-300 hover:shadow-md focus:outline-none focus:ring-2 focus:ring-blue-300" : ""}`}
+              style={{ left: `${position.x}px`, top: `${position.y}px`, width: `${matchupWidth}px`, minHeight: `${matchupHeight}px` }}
+              onClick={canOpenMatchup ? () => onMatchupClick(matchup) : undefined}
+              onKeyDown={canOpenMatchup ? (event) => {
+                if (event.key === "Enter" || event.key === " ") {
+                  event.preventDefault();
+                  onMatchupClick(matchup);
+                }
+              } : undefined}
+            >
               <div className="mb-2 flex items-center justify-between gap-2">
                 <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full border border-slate-300 text-[11px] font-black text-slate-500">{matchupNumber}</span>
                 <span className={`truncate text-[10px] font-black uppercase ${isChampionship ? "text-amber-700" : getTournamentMatchupLoserLaneId(matchup, tournament) ? "text-red-600" : "text-blue-700"}`}>
                   {isChampionship ? "Championship" : getTournamentMatchupPathLabel(matchup, tournament)}
                 </span>
               </div>
-              <div className="space-y-1 text-sm font-black text-slate-900">
-                <div className="truncate border-b-2 border-slate-900 pb-1">{getTournamentSideLabel(league, tournament, matchup, "one", leagues)}</div>
-                <div className="truncate border-b-2 border-slate-900 pb-1">{getTournamentSideLabel(league, tournament, matchup, "two", leagues)}</div>
+              <div className="space-y-1 text-sm font-black">
+                <div className={`flex min-w-0 items-center justify-between gap-2 border-b-2 border-slate-900 pb-1 ${isTournamentSlotResult(matchup, tournament, "one", "winner") ? "text-green-800" : isTournamentSlotResult(matchup, tournament, "one", "loser") ? "text-red-700 line-through decoration-red-500" : "text-slate-900"}`}><span className="truncate">{getTournamentSideLabel(league, tournament, matchup, "one", leagues)}</span>{sideOneResult !== "" && <span className="shrink-0 tabular-nums">{sideOneResult}</span>}</div>
+                <div className={`flex min-w-0 items-center justify-between gap-2 border-b-2 border-slate-900 pb-1 ${isTournamentSlotResult(matchup, tournament, "two", "winner") ? "text-green-800" : isTournamentSlotResult(matchup, tournament, "two", "loser") ? "text-red-700 line-through decoration-red-500" : "text-slate-900"}`}><span className="truncate">{getTournamentSideLabel(league, tournament, matchup, "two", leagues)}</span>{sideTwoResult !== "" && <span className="shrink-0 tabular-nums">{sideTwoResult}</span>}</div>
               </div>
               <div className="mt-2 flex flex-wrap items-center gap-2 text-[10px] font-black uppercase text-slate-400">
+                {scheduledTimeByMatchupId[matchup.id] && <span>{formatTimeDisplay(scheduledTimeByMatchupId[matchup.id])}</span>}
                 <span>{seriesLabel(matchup.seriesLength)}</span>
+                {resultSuffix && <span>{resultSuffix}</span>}
                 {matchup.winnerTeamId && <span className="text-green-700">Winner set</span>}
               </div>
               {tournament.type === "round_robin" && <div className="mt-1 text-[10px] font-bold text-slate-400">Round robin matchup</div>}
             </div>
           );
         })}
+        </div>
       </div>
     </div>
   );
@@ -5288,6 +5781,7 @@ function FullscreenGameView({
   subIndex = {},
   onSelectRunner,
   tournamentButton = null,
+  seriesSummaryText = "",
   onClose,
 }) {
   const awayBattingStats = statsForPlayers(battingStats, teamPlayers.away || []);
@@ -5352,6 +5846,11 @@ function FullscreenGameView({
                 <div className="mt-1 text-6xl font-black leading-none tracking-tight sm:mt-2 sm:text-8xl lg:text-9xl">{homeScore}</div>
               </div>
             </div>
+            {seriesSummaryText && (
+              <div className="mt-3 rounded-2xl bg-white/10 px-3 py-2 text-center text-sm font-black uppercase tracking-wide text-slate-200">
+                {seriesSummaryText}
+              </div>
+            )}
 
             <div className="mt-3 grid grid-cols-3 gap-2 sm:mt-5 sm:gap-3">
               <div className="rounded-2xl bg-white/10 p-2 text-center sm:p-4">
@@ -5778,6 +6277,8 @@ export default function WiffleScoringPrototype() {
   const [previousGames, setPreviousGames] = useState([]);
   const [archivedFinalEventId, setArchivedFinalEventId] = useState(null);
   const [expandedGameId, setExpandedGameId] = useState(null);
+  const [expandedHistoryGroupId, setExpandedHistoryGroupId] = useState("");
+  const [historyLeagueFilter, setHistoryLeagueFilter] = useState("all");
   const [activeSavedGameId, setActiveSavedGameId] = useState(null);
   const [activeLiveGameId, setActiveLiveGameId] = useState(DEFAULT_LIVE_GAME_ID);
   const [liveGamesIndex, setLiveGamesIndex] = useState([]);
@@ -5785,6 +6286,17 @@ export default function WiffleScoringPrototype() {
   const [scoreboardFrozen, setScoreboardFrozen] = useState(true);
   const [fullscreenGameViewOpen, setFullscreenGameViewOpen] = useState(false);
   const [gameTournamentBracketOpen, setGameTournamentBracketOpen] = useState(false);
+  const [gameTournamentBracketView, setGameTournamentBracketView] = useState("bracket");
+  const [tournamentGamePicker, setTournamentGamePicker] = useState(null);
+  const [tournamentGameDetail, setTournamentGameDetail] = useState(null);
+  const [tournamentMatchupAction, setTournamentMatchupAction] = useState(null);
+  const [historyTournamentStats, setHistoryTournamentStats] = useState(null);
+  const [historyTournamentViewer, setHistoryTournamentViewer] = useState(null);
+  const [pendingTournamentStartSetup, setPendingTournamentStartSetup] = useState(null);
+  const [tournamentStatsGroup, setTournamentStatsGroup] = useState("player");
+  const [tournamentStatsType, setTournamentStatsType] = useState("hitting");
+  const [tournamentStatsSort, setTournamentStatsSort] = useState("H");
+  const [tournamentStatsSearch, setTournamentStatsSearch] = useState("");
   const [gameLogModalOpen, setGameLogModalOpen] = useState(false);
   const [selectedBaseRunner, setSelectedBaseRunner] = useState(null);
   const [pendingPitcherChange, setPendingPitcherChange] = useState(null);
@@ -5912,7 +6424,7 @@ export default function WiffleScoringPrototype() {
   const [tournamentEditModeById, setTournamentEditModeById] = useState({});
   const [tournamentImportDate, setTournamentImportDate] = useState(todayInputValue());
   const [tournamentImportStartTime, setTournamentImportStartTime] = useState(defaultScheduleTimeValue());
-  const [tournamentImportGapMinutes, setTournamentImportGapMinutes] = useState("45");
+  const [tournamentImportGapMinutes, setTournamentImportGapMinutes] = useState("40");
   const [tournamentImportConcurrentCount, setTournamentImportConcurrentCount] = useState("1");
   const [openTournamentTeamsId, setOpenTournamentTeamsId] = useState("");
   const [tournamentSetupWizard, setTournamentSetupWizard] = useState(null);
@@ -6191,8 +6703,6 @@ export default function WiffleScoringPrototype() {
   }));
   const leagueSettingsLocked = activePage === "league" && selectedLeagueRealDraftInProgress;
   const selectedCurrentSeason = selectedLeagueSeasons.find((season) => Number(season.year) === Number(selectedLeague?.currentSeasonYear)) || selectedLeagueSeasons[0] || normalizeSeasonRecord(makeDefaultSeasonRecord(currentYearNumber()));
-  const selectedLeagueTournaments = selectedLeague?.tournaments || [];
-  const selectedTournament = selectedLeagueTournaments.find((tournament) => tournament.id === selectedTournamentId) || null;
   const allLeagueTournaments = leagues
     .flatMap((league) => (league.tournaments || []).map((tournament) => ({
       ...tournament,
@@ -6201,7 +6711,17 @@ export default function WiffleScoringPrototype() {
       sourceLeagueLogoUrl: league.logoUrl || "",
     })))
     .sort((a, b) => String(a.sourceLeagueName || "").localeCompare(String(b.sourceLeagueName || "")) || String(a.name || "").localeCompare(String(b.name || "")));
-  const visibleTournamentList = allLeagueTournaments.filter((tournament) => tournamentLeagueFilter === "all" || tournament.sourceLeagueId === tournamentLeagueFilter);
+  const selectedLeagueTournaments = allLeagueTournaments.filter((tournament) => {
+    const associatedLeagueIds = Array.isArray(tournament.leagueIds) ? tournament.leagueIds : [];
+    if (!selectedLeague?.id) return false;
+    return tournament.sourceLeagueId === selectedLeague.id || associatedLeagueIds.length === 0 || associatedLeagueIds.includes(selectedLeague.id);
+  });
+  const selectedTournament = allLeagueTournaments.find((tournament) => tournament.id === selectedTournamentId) || null;
+  const visibleTournamentList = allLeagueTournaments.filter((tournament) => {
+    if (tournamentLeagueFilter === "all") return true;
+    const associatedLeagueIds = Array.isArray(tournament.leagueIds) ? tournament.leagueIds : [];
+    return tournament.sourceLeagueId === tournamentLeagueFilter || associatedLeagueIds.includes(tournamentLeagueFilter);
+  });
   const selectedTournamentLeagueIds = selectedTournament?.leagueIds || [];
   const selectedTournamentTeamOptions = leagues
     .filter((league) => selectedTournamentLeagueIds.includes(league.id))
@@ -6320,6 +6840,11 @@ export default function WiffleScoringPrototype() {
   const headToHeadStats = buildHeadToHeadStats(currentBatter, currentPitcher, previousGames, setupLeague, matchupStatScope === "season" ? "season" : "career", gameSeasonYear);
   const displayedBatterStats = matchupStatScope === "game" ? currentBatterStats : matchupStatScope === "head-to-head" ? headToHeadStats.batterStats : getPlayerBattingStat(matchupLeagueStats.battingStats, currentBatter);
   const displayedPitcherStats = matchupStatScope === "game" ? currentPitcherStats : matchupStatScope === "head-to-head" ? headToHeadStats.pitcherStats : getPlayerPitchingStat(matchupLeagueStats.pitchingStats, currentPitcher);
+  const pitcherOptionLabel = (player, teamKey = defensiveTeam) => {
+    const cleanPlayer = String(player || "").trim();
+    const pitcherStat = game.pitchingStats?.[cleanPlayer] || emptyPitchingStats();
+    return `${formatPlayerName(cleanPlayer, subPlayers[teamKey])} · ${formatInningsPitched(pitcherStat.OUTS || 0)} IP`;
+  };
   const selectedField = setupLeague?.fields?.find((field) => field.id === selectedFieldId) || null;
   const knownSubPlayers = getKnownSubPlayers(previousGames, subPlayers);
   const currentSubIndex = Object.fromEntries(getSubPlayerNamesFromSubStatus(subPlayers).map((name) => [name, true]));
@@ -6359,7 +6884,7 @@ export default function WiffleScoringPrototype() {
   const selectedScheduledWeek = scheduledWeeksForSetup.find((week) => week.id === selectedScheduledWeekId) || null;
   const unavailableScheduledGameIds = new Set(
     (previousGames || [])
-      .filter((savedGame) => savedGame.status !== "cancelled" && savedGame.savedSetup?.selectedScheduledGameId)
+      .filter((savedGame) => savedGame.status !== "cancelled" && savedGame.status !== "final" && savedGame.savedSetup?.selectedScheduledGameId)
       .map((savedGame) => savedGame.savedSetup.selectedScheduledGameId),
   );
   const scheduledGameStatusById = Object.fromEntries(
@@ -6377,7 +6902,10 @@ export default function WiffleScoringPrototype() {
       }),
   );
   const selectedScheduledWeekTournament = selectedScheduledWeek?.sourceTournamentId
-    ? (setupLeague?.tournaments || []).find((tournament) => tournament.id === selectedScheduledWeek.sourceTournamentId)
+    ? (() => {
+      const rawTournament = getWeekTournament(selectedScheduledWeek, setupLeague);
+      return rawTournament ? getTournamentWithCompletedGames(setupLeague, setupScheduleSeason, rawTournament, previousGames, leagues) : null;
+    })()
     : null;
   const scheduledGamesForSetup = selectedScheduledWeek
     ? (selectedScheduledWeek.games || [])
@@ -6385,11 +6913,29 @@ export default function WiffleScoringPrototype() {
         const hydratedGame = selectedScheduledWeekTournament
           ? hydrateScheduledTournamentGame(game, selectedScheduledWeekTournament, setupLeague, leagues)
           : game;
-        return { ...hydratedGame, weekId: selectedScheduledWeek.id, weekName: selectedScheduledWeek.name, date: selectedScheduledWeek.date || "", fieldId: selectedScheduledWeek.fieldId || "", isTournament: Boolean(selectedScheduledWeek.isTournament), unavailable: unavailableScheduledGameIds.has(game.id), unavailableStatus: scheduledGameStatusById[game.id] || null };
+        const matchup = selectedScheduledWeekTournament?.matchups?.find((item) => item.id === game.tournamentMatchupId) || null;
+        const tournamentSeedsReady = selectedScheduledWeekTournament ? areTournamentSeedsAssigned(selectedScheduledWeekTournament) : true;
+        const tournamentMatchupReady = selectedScheduledWeekTournament && matchup ? isTournamentMatchupReady(selectedScheduledWeekTournament, matchup) : true;
+        const tournamentUnavailableReason = selectedScheduledWeek?.isTournament && !tournamentSeedsReady
+          ? "Seeds not selected"
+          : selectedScheduledWeek?.isTournament && !tournamentMatchupReady
+            ? "Matchup not ready"
+            : "";
+        const seriesSummary = selectedScheduledWeekTournament && matchup
+          ? getScheduledTournamentGameSeriesSummary(hydratedGame, selectedScheduledWeekTournament, matchup, previousGames, setupLeague, leagues)
+          : null;
+        const seriesComplete = Boolean(hydratedGame.seriesLength && seriesSummary?.complete);
+        const singleGameComplete = Boolean(!hydratedGame.seriesLength && getSavedGamesForScheduledGame(previousGames, game.id).length > 0);
+        return { ...hydratedGame, weekId: selectedScheduledWeek.id, weekName: selectedScheduledWeek.name, date: selectedScheduledWeek.date || "", fieldId: selectedScheduledWeek.fieldId || "", isTournament: Boolean(selectedScheduledWeek.isTournament), seriesSummary, unavailable: Boolean(tournamentUnavailableReason) || unavailableScheduledGameIds.has(game.id) || seriesComplete || singleGameComplete, unavailableReason: tournamentUnavailableReason, unavailableStatus: scheduledGameStatusById[game.id] || null };
       })
     : [];
   const hasAnyScheduledGamesForSetup = scheduledWeeksForSetup.some((week) => (week.games || []).length > 0);
   const selectedScheduledGame = scheduledGamesForSetup.find((scheduledGame) => scheduledGame.id === selectedScheduledGameId && (!scheduledGame.unavailable || setupIdentityLocked)) || null;
+  const selectedScheduledGameForContext = selectedScheduledGame || scheduledGamesForSetup.find((scheduledGame) => scheduledGame.id === selectedScheduledGameId) || null;
+  const selectedScheduledGameSeriesSummary = selectedScheduledGameForContext?.seriesSummary || null;
+  const selectedScheduledGameSeriesText = selectedScheduledGameForContext?.isTournament && selectedScheduledGameForContext?.seriesLength && selectedScheduledGameSeriesSummary
+    ? `Series: ${selectedScheduledGameSeriesSummary.sideOne.name} ${selectedScheduledGameSeriesSummary.sideOneWins}-${selectedScheduledGameSeriesSummary.sideTwoWins} ${selectedScheduledGameSeriesSummary.sideTwo.name} · Best of ${selectedScheduledGameForContext.seriesLength}`
+    : "";
   const customSetupDetailsComplete = Boolean(String(awayTeam || "").trim() && String(homeTeam || "").trim());
   const customSetupPlayersComplete = Boolean(
     (teamPlayers.away || []).some((player) => String(player || "").trim()) &&
@@ -6408,12 +6954,12 @@ export default function WiffleScoringPrototype() {
       (setupWizardGameType === "league" && setupLeague && (setupWizardLeagueMode === "official" || setupWizardLeagueMode === "tournament") && selectedScheduledGame && setupWizardLeagueRostersConfirmed && setupWizardLeagueLineupsConfirmed)
     ),
   );
-  const selectedScheduledSeriesNeedsTeams = Boolean(selectedScheduledGame?.isTournament && selectedScheduledGame?.seriesLength && selectedScheduledGame?.seriesHomeAwayMode === "game_time");
+  const selectedScheduledSeriesNeedsTeams = Boolean(selectedScheduledGame?.isTournament && selectedScheduledGame?.seriesHomeAwayMode === "game_time");
   const selectedScheduledGameHasCustomTeams = Boolean(
-    selectedScheduledGame?.awayTeamName ||
-    selectedScheduledGame?.homeTeamName ||
-    selectedScheduledGame?.seriesTeamOneName ||
-    selectedScheduledGame?.seriesTeamTwoName,
+    (selectedScheduledGame?.awayTeamName && !selectedScheduledGame?.awayTeamId) ||
+    (selectedScheduledGame?.homeTeamName && !selectedScheduledGame?.homeTeamId) ||
+    (selectedScheduledGame?.seriesTeamOneName && !selectedScheduledGame?.seriesTeamOneId) ||
+    (selectedScheduledGame?.seriesTeamTwoName && !selectedScheduledGame?.seriesTeamTwoId),
   );
   const officialScheduleItemSelected = Boolean(isOfficialLeagueGame && selectedScheduledGame);
   const homeAwayPromptTeamOptions = setupLeague
@@ -6540,7 +7086,393 @@ export default function WiffleScoringPrototype() {
   }), [setupLeagueId, leagueGameMode, useExhibitionLeagueTeams, awayTeam, homeTeam, gameDate, gameTime, gameLocation, gameSeasonYear, gameSessionId, selectedFieldId, gameInnings, pitchingOrderPredetermined, powerPlaysEnabled, powerPlayLimitType, powerPlayLimitAmount, whammysEnabled, pudwhackerEnabled, extraRunnerRules, ghostRunnersCountAsRbi, runRuleEnabled, runRuleRuns, runRuleBeforeFourthOnly, walkRunRuleCountsAsHr, confirmHomeAwayBeforeStart, useLeagueDefaultRules, teamPlayers, subPlayers, subSlots, battingOrder, pitchingOrder, extraPitchers, selectedLeagueId, awayLeagueTeamId, homeLeagueTeamId, useLeagueSchedule, selectedScheduledWeekId, selectedScheduledGameId, savedSetupSignature, currentSetupSignature]);
   const activeTournamentSetupSnapshot = game.status === "final" ? scoreDisplaySetup : liveGameSetupSnapshot;
   const activeGameTournamentContext = findTournamentContextForSetup(leagues, activeTournamentSetupSnapshot);
-  const activeGameTournament = activeGameTournamentContext?.tournament || null;
+  const activeGameTournament = activeGameTournamentContext?.tournament
+    ? getTournamentWithCompletedGames(activeGameTournamentContext.league, activeGameTournamentContext.season, activeGameTournamentContext.tournament, previousGames, leagues)
+    : null;
+  const activeTournamentLiveStatsGame = useMemo(() => {
+    if (!activeGameTournament?.id || !activeGameTournamentContext?.scheduledGame?.id || game.status === "final") return null;
+    const scheduledTournamentId = activeGameTournamentContext.scheduledGame.tournamentId || activeGameTournamentContext.week?.sourceTournamentId || "";
+    if (scheduledTournamentId !== activeGameTournament.id) return null;
+    return {
+      id: `live-${activeLiveGameId || activeGameTournamentContext.scheduledGame.id}`,
+      status: game.status || "live",
+      savedSetup: {
+        selectedScheduledGameId: activeGameTournamentContext.scheduledGame.id,
+        setupLeagueId,
+      },
+      awayTeam,
+      homeTeam,
+      awayScore: game.awayScore,
+      homeScore: game.homeScore,
+      teamPlayers,
+      stats: game.stats || {},
+      pitchingStats: game.pitchingStats || {},
+    };
+  }, [activeGameTournament?.id, activeGameTournamentContext?.scheduledGame?.id, activeGameTournamentContext?.scheduledGame?.tournamentId, activeGameTournamentContext?.week?.sourceTournamentId, game.status, game.awayScore, game.homeScore, game.stats, game.pitchingStats, activeLiveGameId, setupLeagueId, awayTeam, homeTeam, teamPlayers]);
+  const activeTournamentSavedGames = useMemo(() => {
+    if (!activeGameTournamentContext?.season || !activeGameTournament?.id) return [];
+    const savedGames = getSavedGamesForScheduledGameIds(
+      previousGames,
+      getTournamentScheduledGameIds(activeGameTournamentContext.season, activeGameTournament.id),
+    );
+    if (!activeTournamentLiveStatsGame) return savedGames;
+    return [...savedGames.filter((savedGame) => savedGame.savedSetup?.selectedScheduledGameId !== activeTournamentLiveStatsGame.savedSetup.selectedScheduledGameId), activeTournamentLiveStatsGame];
+  }, [activeGameTournamentContext?.season, activeGameTournament?.id, previousGames, activeTournamentLiveStatsGame]);
+  const tournamentStatsSortOptions = tournamentStatsType === "pitching"
+    ? ["Name", "IP", "ERA", "WHIP", "R", "H", "BB", "K", "HR"]
+    : ["Name", "PA", "AB", "H", "2B", "3B", "HR", "R", "RBI", "BB", "K", "AVG", "OPS"];
+  const buildTournamentStatsRows = (sourceGames = []) => {
+    const rows = {};
+    const addTeamStats = (savedGame, slot) => {
+      const teamName = String(savedGame?.[slot === "away" ? "awayTeam" : "homeTeam"] || slot).trim() || slot;
+      const players = savedGame?.teamPlayers?.[slot] || [];
+      const sourceStats = tournamentStatsType === "pitching"
+        ? aggregatePitchingStats(statsForPlayers(savedGame.pitchingStats, players))
+        : aggregateBattingStats(statsForPlayers(savedGame.stats, players));
+      if (tournamentStatsType === "pitching") addPitchingStats(rows, { [teamName]: sourceStats });
+      else addBattingStats(rows, { [teamName]: sourceStats });
+    };
+
+    (sourceGames || []).forEach((savedGame) => {
+      if (tournamentStatsGroup === "team") {
+        addTeamStats(savedGame, "away");
+        addTeamStats(savedGame, "home");
+        return;
+      }
+      if (tournamentStatsType === "pitching") addPitchingStats(rows, savedGame.pitchingStats || {});
+      else addBattingStats(rows, savedGame.stats || {});
+    });
+
+    const searchValue = String(tournamentStatsSearch || "").trim().toLowerCase();
+    const sortKey = tournamentStatsSort;
+    const getSortValue = (label, stat) => {
+      if (sortKey === "Name") return String(label || "").toLowerCase();
+      if (sortKey === "AVG") return safeNumber(stat.AB) ? safeNumber(stat.H) / safeNumber(stat.AB) : 0;
+      if (sortKey === "OPS") return safeNumber(stat.AB) ? (safeNumber(stat.H) + safeNumber(stat.BB)) / Math.max(1, safeNumber(stat.AB) + safeNumber(stat.BB)) + totalBases(stat) / safeNumber(stat.AB) : 0;
+      if (sortKey === "IP") return safeNumber(stat.OUTS);
+      if (sortKey === "ERA") return safeNumber(stat.OUTS) ? (safeNumber(stat.ER ?? stat.R) * Math.max(1, Number(gameInnings) || GAME_INNINGS) * 3) / safeNumber(stat.OUTS) : 999999;
+      if (sortKey === "WHIP") return safeNumber(stat.OUTS) ? ((safeNumber(stat.H) + safeNumber(stat.BB)) * 3) / safeNumber(stat.OUTS) : 0;
+      if (sortKey === "2B") return safeNumber(stat.D2);
+      if (sortKey === "3B") return safeNumber(stat.D3);
+      return safeNumber(stat[sortKey]);
+    };
+
+    return Object.entries(rows)
+      .filter(([label]) => !searchValue || String(label || "").toLowerCase().includes(searchValue))
+      .sort(([labelA, statA], [labelB, statB]) => {
+        if (sortKey === "Name") return String(labelA).localeCompare(String(labelB));
+        const valueA = getSortValue(labelA, statA);
+        const valueB = getSortValue(labelB, statB);
+        if (sortKey === "ERA") return valueA - valueB || String(labelA).localeCompare(String(labelB));
+        return valueB - valueA || String(labelA).localeCompare(String(labelB));
+      });
+  };
+  const tournamentStatsRows = useMemo(() => buildTournamentStatsRows(activeTournamentSavedGames), [activeTournamentSavedGames, tournamentStatsGroup, tournamentStatsType, tournamentStatsSort, tournamentStatsSearch, gameInnings]);
+  const historyTournamentStatsRows = useMemo(() => buildTournamentStatsRows(historyTournamentStats?.games || []), [historyTournamentStats?.games, tournamentStatsGroup, tournamentStatsType, tournamentStatsSort, tournamentStatsSearch, gameInnings]);
+  const activeGameChampionshipMatchup = activeGameTournament?.championshipMatchupId
+    ? (activeGameTournament.matchups || []).find((matchup) => matchup.id === activeGameTournament.championshipMatchupId)
+    : null;
+  const activeGameTournamentWinnerLabel = activeGameChampionshipMatchup?.winnerTeamId
+    ? tournamentTeamLabel(activeGameTournamentContext?.league || setupLeague, activeGameTournament, activeGameChampionshipMatchup.winnerTeamId, "Winner TBD", leagues)
+    : activeGameChampionshipMatchup?.winnerSeed
+      ? tournamentSeedLabel(activeGameChampionshipMatchup.winnerSeed, "Winner TBD")
+      : "";
+  const activeGameScheduledGameForFinal = activeGameTournamentContext?.scheduledGame || selectedScheduledGameForContext || null;
+  const tournamentChampionJustCrowned = Boolean(
+    game.status === "final" &&
+    activeGameTournament?.id &&
+    activeGameChampionshipMatchup?.id &&
+    activeGameScheduledGameForFinal?.tournamentMatchupId === activeGameChampionshipMatchup.id &&
+    activeGameTournamentWinnerLabel &&
+    activeGameTournamentWinnerLabel !== "Winner TBD",
+  );
+  const canPlayNextSeriesGame = Boolean(
+    game.status === "final" &&
+    selectedScheduledGameForContext?.isTournament &&
+    selectedScheduledGameForContext?.seriesLength &&
+    selectedScheduledGameSeriesSummary &&
+    !selectedScheduledGameSeriesSummary.complete,
+  );
+  const nextScheduledGameAfterFinal = (() => {
+    if (game.status !== "final" || !selectedScheduledGameForContext?.id) return null;
+    const currentIndex = scheduledGamesForSetup.findIndex((scheduledGame) => scheduledGame.id === selectedScheduledGameForContext.id);
+    if (currentIndex < 0) return null;
+    return scheduledGamesForSetup.slice(currentIndex + 1).find((scheduledGame) => !scheduledGame.unavailable) || null;
+  })();
+  const historyGroups = useMemo(() => {
+    const groups = [];
+    const groupMap = new Map();
+    const visibleGames = (previousGames || []).filter((savedGame) => savedGame.status !== "cancelled");
+    visibleGames.forEach((savedGame) => {
+      const setup = savedGame.savedSetup || {};
+      const context = findTournamentContextForSetup(leagues, setup);
+      const scheduledWeekId = setup.selectedScheduledWeekId || context?.week?.id || "";
+      const isTournamentGame = Boolean(setup.isTournament || savedGame.isTournament || context?.week?.isTournament || context?.tournament);
+      if (isTournamentGame && context?.tournament && context?.week && context?.season && context?.league) {
+        const key = `tournament-${context.league.id}-${context.season.id}-${context.week.id}-${context.tournament.id}`;
+        if (!groupMap.has(key)) {
+          groupMap.set(key, {
+            id: key,
+            type: "tournament",
+            league: context.league,
+            season: context.season,
+            week: context.week,
+            tournament: context.tournament,
+            title: context.tournament.name || context.week.name || "Tournament",
+            subtitle: context.week.name || "Tournament Week",
+            games: [],
+          });
+        }
+        groupMap.get(key).games.push(savedGame);
+        return;
+      }
+      if (scheduledWeekId) {
+        let weekContext = null;
+        for (const league of leagues || []) {
+          for (const season of (league.years || []).map(normalizeSeasonRecord)) {
+            const week = (season.scheduleWeeks || []).find((item) => item.id === scheduledWeekId);
+            if (week) {
+              weekContext = { league, season, week };
+              break;
+            }
+          }
+          if (weekContext) break;
+        }
+        const key = `week-${weekContext?.league?.id || setup.setupLeagueId || "league"}-${weekContext?.season?.id || setup.gameSeasonYear || "season"}-${scheduledWeekId}`;
+        if (!groupMap.has(key)) {
+          groupMap.set(key, {
+            id: key,
+            type: "week",
+            league: weekContext?.league || (leagues || []).find((league) => league.id === setup.setupLeagueId) || null,
+            season: weekContext?.season || null,
+            week: weekContext?.week || null,
+            title: weekContext?.week?.name || "Scheduled Week",
+            subtitle: weekContext?.week?.name || "League Schedule",
+            games: [],
+          });
+        }
+        groupMap.get(key).games.push(savedGame);
+        return;
+      }
+      groups.push({
+        id: `game-${savedGame.id}`,
+        type: "single",
+        title: `${savedGame.awayTeam || "Away"} vs ${savedGame.homeTeam || "Home"}`,
+        subtitle: `${savedGame.gameDate || "No date"} ${savedGame.gameTime || ""}`,
+        league: (leagues || []).find((league) => league.id === setup.setupLeagueId) || null,
+        games: [savedGame],
+      });
+    });
+    return [...groupMap.values(), ...groups]
+      .map((group) => ({
+        ...group,
+        games: [...(group.games || [])].sort((a, b) => String(b.savedAt || "").localeCompare(String(a.savedAt || "")) || String(b.id || "").localeCompare(String(a.id || ""))),
+      }))
+      .sort((a, b) => {
+        const aLatest = a.games?.[0]?.savedAt || "";
+        const bLatest = b.games?.[0]?.savedAt || "";
+        return String(bLatest).localeCompare(String(aLatest)) || String(a.title || "").localeCompare(String(b.title || ""));
+      });
+  }, [previousGames, leagues]);
+  const historyLeagueOptions = useMemo(() => {
+    const usedLeagueIds = new Set();
+    historyGroups.forEach((group) => {
+      if (group.league?.id) usedLeagueIds.add(group.league.id);
+      (group.games || []).forEach((savedGame) => {
+        const setupLeagueId = savedGame.savedSetup?.setupLeagueId || "";
+        if (setupLeagueId && setupLeagueId !== "custom") usedLeagueIds.add(setupLeagueId);
+      });
+    });
+    return (leagues || []).filter((league) => usedLeagueIds.has(league.id));
+  }, [historyGroups, leagues]);
+  const filteredHistoryGroups = useMemo(() => {
+    if (historyLeagueFilter === "all") return historyGroups;
+    const isExhibitionHistoryGroup = (group) => (
+      group.type === "single"
+      && (group.games || []).some((savedGame) => {
+        const setup = savedGame.savedSetup || {};
+        return !setup.selectedScheduledWeekId && !setup.isTournament && !savedGame.isTournament;
+      })
+    );
+    if (historyLeagueFilter === "exhibition") return historyGroups.filter(isExhibitionHistoryGroup);
+    return historyGroups.filter((group) => (
+      group.league?.id === historyLeagueFilter
+      || (group.games || []).some((savedGame) => savedGame.savedSetup?.setupLeagueId === historyLeagueFilter)
+    ));
+  }, [historyGroups, historyLeagueFilter]);
+
+  function getSavedGamesForActiveTournamentMatchup(matchupId = "") {
+    if (!activeGameTournamentContext?.season || !activeGameTournament?.id || !matchupId) return [];
+    return getSavedGamesForScheduledGameIds(
+      previousGames,
+      getTournamentMatchupScheduledGameIds(activeGameTournamentContext.season, activeGameTournament.id, matchupId),
+    );
+  }
+
+  function openHistoryTournamentMatchupResults(group, matchup) {
+    if (!group?.season || !group?.tournament || !matchup?.id) return;
+    const savedGames = getSavedGamesForScheduledGameIds(
+      previousGames,
+      getTournamentMatchupScheduledGameIds(group.season, group.tournament.id, matchup.id),
+    );
+    if (savedGames.length === 0) {
+      window.alert?.("No completed games have been saved for this matchup yet.");
+      return;
+    }
+    if (savedGames.length === 1) {
+      setTournamentGameDetail(savedGames[0]);
+      return;
+    }
+    setTournamentGamePicker({ matchup, games: savedGames });
+  }
+
+  function getTournamentMatchupScheduleOptions(context, matchup) {
+    if (!context?.week || !context?.tournament || !matchup?.id) return { scheduledGames: [], savedGames: [], liveGames: [], finalGames: [] };
+    const scheduledGames = (context.week.games || [])
+      .filter((scheduledGame) => scheduledGame.tournamentMatchupId === matchup.id)
+      .map((scheduledGame) => hydrateScheduledTournamentGame(scheduledGame, context.tournament, context.league, leagues));
+    const scheduledGameIds = new Set(scheduledGames.map((scheduledGame) => scheduledGame.id));
+    const savedGames = (previousGames || [])
+      .filter((savedGame) => savedGame.status !== "cancelled" && scheduledGameIds.has(savedGame.savedSetup?.selectedScheduledGameId))
+      .sort((a, b) => String(b.savedAt || "").localeCompare(String(a.savedAt || "")) || String(b.id || "").localeCompare(String(a.id || "")));
+    return {
+      scheduledGames,
+      savedGames,
+      liveGames: savedGames.filter((savedGame) => savedGame.status !== "final"),
+      finalGames: savedGames.filter((savedGame) => savedGame.status === "final"),
+    };
+  }
+
+  function isTournamentMatchupStartable(context, matchup, scheduledGame) {
+    if (!context?.tournament || !matchup || !scheduledGame) return false;
+    const one = getTournamentSideLabel(context.league, context.tournament, matchup, "one", leagues);
+    const two = getTournamentSideLabel(context.league, context.tournament, matchup, "two", leagues);
+    const isPlaceholder = (label) => /TBD|^W\d+|^L\d+|Winner|Loser/i.test(String(label || ""));
+    return Boolean(one && two && !isPlaceholder(one) && !isPlaceholder(two));
+  }
+
+  function openLiveTournamentMatchupAction(matchup) {
+    const actionContext = activeGameTournamentContext
+      ? { ...activeGameTournamentContext, tournament: activeGameTournament || activeGameTournamentContext.tournament }
+      : null;
+    const options = getTournamentMatchupScheduleOptions(actionContext, matchup);
+    const startableGame = options.scheduledGames.find((scheduledGame) => isTournamentMatchupStartable(actionContext, matchup, scheduledGame)) || null;
+    if (options.liveGames.length === 0 && options.finalGames.length > 0) {
+      if (options.finalGames.length === 1) {
+        setTournamentGameDetail(options.finalGames[0]);
+        return;
+      }
+      setTournamentGamePicker({ matchup, games: options.finalGames });
+      return;
+    }
+    setTournamentMatchupAction({
+      matchup,
+      context: actionContext,
+      scheduledGame: startableGame || options.scheduledGames[0] || null,
+      liveGames: options.liveGames,
+      finalGames: options.finalGames,
+      canStart: Boolean(startableGame && options.liveGames.length === 0),
+    });
+  }
+
+  function startTournamentMatchupFromAction() {
+    const action = tournamentMatchupAction;
+    if (!action?.context?.league || !action?.context?.week || !action?.scheduledGame) return;
+    setTournamentMatchupAction(null);
+    setSetupLeagueId(action.context.league.id);
+    setLeagueGameMode("tournament");
+    setUseLeagueSchedule(true);
+    setUseLeagueDefaultRules(true);
+    setSetupWizardStarted(true);
+    setSetupWizardGameType("league");
+    setSetupWizardLeagueMode("tournament");
+    setSetupWizardLeagueDetailsConfirmed(true);
+    setSetupWizardLeagueRostersConfirmed(false);
+    setSetupWizardLeagueRulesConfirmed(true);
+    setSetupWizardLeagueLineupsConfirmed(false);
+    setSelectedScheduledWeekId(action.context.week.id);
+    setSelectedScheduledGameId("");
+    setPendingTournamentStartSetup({ scheduledGameId: action.scheduledGame.id });
+    setGameTournamentBracketOpen(false);
+    setFullscreenGameViewOpen(false);
+    setGamesPageMode("");
+    setActivePage("setup");
+  }
+
+  function openTournamentMatchupResults(matchup) {
+    const savedGames = getSavedGamesForActiveTournamentMatchup(matchup?.id || "");
+    if (savedGames.length === 0) {
+      window.alert?.("No completed games have been saved for this matchup yet.");
+      return;
+    }
+    if (savedGames.length === 1) {
+      setTournamentGameDetail(savedGames[0]);
+      return;
+    }
+    setTournamentGamePicker({ matchup, games: savedGames });
+  }
+
+  function playNextSeriesGameFromFinal() {
+    if (!selectedScheduledGameForContext?.id || !selectedScheduledGameForContext?.seriesLength) return;
+    markNextSharedStateSaveAuthoritative();
+    setEvents([]);
+    setArchivedFinalEventId(null);
+    setActiveSavedGameId(null);
+    setGameStarted(false);
+    setGamePaused(false);
+    setSetupEditingDuringGame(false);
+    setSetupAttempted(false);
+    setSetupWizardStarted(true);
+    setSetupWizardGameType("league");
+    setSetupWizardLeagueMode("tournament");
+    setSetupWizardCustomStep("details");
+    setSetupWizardLeagueDetailsConfirmed(true);
+    setSetupWizardLeagueRostersConfirmed(false);
+    setSetupWizardLeagueRulesConfirmed(true);
+    setSetupWizardLeagueLineupsConfirmed(false);
+    setSetupLineupTiming("later");
+    setLineupStartPromptAcknowledged(false);
+    setHomeAwayStartPromptAcknowledged(false);
+    setPendingLineupStartPrompt(false);
+    setPendingHomeAwayStartPrompt(false);
+    applyScheduledGameToSetup(selectedScheduledGameForContext.id);
+    setGamesPageMode("");
+    setActivePage("setup");
+  }
+
+  function startNextScheduledGameFromFinal() {
+    if (!nextScheduledGameAfterFinal?.id) return;
+    markNextSharedStateSaveAuthoritative();
+    setEvents([]);
+    setArchivedFinalEventId(null);
+    setActiveSavedGameId(null);
+    setGameStarted(false);
+    setGamePaused(false);
+    setSetupEditingDuringGame(false);
+    setSetupAttempted(false);
+    setSetupWizardStarted(true);
+    setSetupWizardGameType("league");
+    setSetupWizardLeagueMode(nextScheduledGameAfterFinal.isTournament ? "tournament" : "official");
+    setSetupWizardCustomStep("details");
+    setSetupWizardLeagueDetailsConfirmed(true);
+    setSetupWizardLeagueRostersConfirmed(false);
+    setSetupWizardLeagueRulesConfirmed(true);
+    setSetupWizardLeagueLineupsConfirmed(false);
+    setSetupLineupTiming("later");
+    setLineupStartPromptAcknowledged(false);
+    setHomeAwayStartPromptAcknowledged(false);
+    setPendingLineupStartPrompt(false);
+    setPendingHomeAwayStartPrompt(false);
+    setLeagueGameMode(nextScheduledGameAfterFinal.isTournament ? "tournament" : "official");
+    setUseExhibitionLeagueTeams(false);
+    setUseLeagueSchedule(true);
+    setUseLeagueDefaultRules(true);
+    if (nextScheduledGameAfterFinal.weekId) setSelectedScheduledWeekId(nextScheduledGameAfterFinal.weekId);
+    setSelectedScheduledGameId("");
+    setPendingTournamentStartSetup({ scheduledGameId: nextScheduledGameAfterFinal.id });
+    setGamesPageMode("");
+    setActivePage("setup");
+  }
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -7601,20 +8533,22 @@ export default function WiffleScoringPrototype() {
 
   function getScheduledTournamentSeriesSides(scheduledGame = {}) {
     if (!scheduledGame) return [];
-    const teamOne = setupLeague?.teams?.find((team) => team.id === scheduledGame.seriesTeamOneId);
-    const teamTwo = setupLeague?.teams?.find((team) => team.id === scheduledGame.seriesTeamTwoId);
+    const tournamentForGame = selectedScheduledWeekTournament || null;
+    const teamOptions = getTournamentTeamOptionsFromLeagues(leagues, tournamentForGame || {}, setupLeague || {});
+    const teamOne = teamOptions.find((team) => team.id === scheduledGame.seriesTeamOneId) || setupLeague?.teams?.find((team) => team.id === scheduledGame.seriesTeamOneId);
+    const teamTwo = teamOptions.find((team) => team.id === scheduledGame.seriesTeamTwoId) || setupLeague?.teams?.find((team) => team.id === scheduledGame.seriesTeamTwoId);
     return [
       {
         key: scheduledGame.seriesTeamOneId || `${scheduledGame.id}:series-one`,
         teamId: scheduledGame.seriesTeamOneId || "",
         name: teamOne?.name || scheduledGame.seriesTeamOneName || "Team 1 TBD",
-        players: scheduledGame.seriesTeamOnePlayers || [],
+        players: scheduledGame.seriesTeamOnePlayers?.length ? scheduledGame.seriesTeamOnePlayers : cleanRoster(teamOne?.players || []),
       },
       {
         key: scheduledGame.seriesTeamTwoId || `${scheduledGame.id}:series-two`,
         teamId: scheduledGame.seriesTeamTwoId || "",
         name: teamTwo?.name || scheduledGame.seriesTeamTwoName || "Team 2 TBD",
-        players: scheduledGame.seriesTeamTwoPlayers || [],
+        players: scheduledGame.seriesTeamTwoPlayers?.length ? scheduledGame.seriesTeamTwoPlayers : cleanRoster(teamTwo?.players || []),
       },
     ];
   }
@@ -7622,7 +8556,7 @@ export default function WiffleScoringPrototype() {
   function applyScheduledTournamentSideToGameSlot(slot, scheduledGame = {}, sideKey = "") {
     const side = getScheduledTournamentSeriesSides(scheduledGame).find((item) => item.key === sideKey);
     if (!side) return;
-    if (side.teamId) {
+    if (side.teamId && setupLeague?.teams?.some((team) => team.id === side.teamId)) {
       applyLeagueTeamToGameSlot(slot, side.teamId);
       return;
     }
@@ -7661,6 +8595,23 @@ export default function WiffleScoringPrototype() {
     if (scheduledGame.time) setGameTime(scheduledGame.time);
     if (scheduledGame.sessionId) setGameSessionId(scheduledGame.sessionId);
     if (scheduledGame.fieldId) applyFieldToGame(scheduledGame.fieldId);
+    const tournamentHomeAwayAtGameTime = Boolean(scheduledGame.isTournament && scheduledGame.seriesHomeAwayMode === "game_time");
+    if (tournamentHomeAwayAtGameTime) {
+      const sides = getScheduledTournamentSeriesSides(scheduledGame);
+      setConfirmHomeAwayBeforeStart(true);
+      setHomeAwayStartPromptAcknowledged(false);
+      setAwayLeagueTeamId("");
+      setHomeLeagueTeamId("");
+      setAwayTeam(sides[0]?.name || "Team 1");
+      setHomeTeam(sides[1]?.name || "Team 2");
+      setTeamPlayers(emptyGameRosters);
+      setBattingOrder(emptyGameRosters);
+      setPitchingOrder(emptyGameRosters);
+      setSubPlayers({ away: {}, home: {} });
+      setSubSlots({ away: {}, home: {} });
+      setExtraPitchers({ away: {}, home: {} });
+      return;
+    }
     if (scheduledGame.isTournament && scheduledGame.seriesLength) {
       if (scheduledGame.seriesHomeAwayMode === "team_one_home" && scheduledGame.seriesTeamOneId && scheduledGame.seriesTeamTwoId) {
         applyLeagueTeamToGameSlot("away", scheduledGame.seriesTeamTwoId);
@@ -7677,13 +8628,9 @@ export default function WiffleScoringPrototype() {
         applyScheduledTournamentSideToGameSlot("away", scheduledGame, sides[0]?.key || "");
         applyScheduledTournamentSideToGameSlot("home", scheduledGame, sides[1]?.key || "");
       } else {
-        setAwayLeagueTeamId("");
-        setHomeLeagueTeamId("");
-        setAwayTeam("Away Team");
-        setHomeTeam("Home Team");
-        setTeamPlayers(emptyGameRosters);
-        setBattingOrder(emptyGameRosters);
-        setPitchingOrder(emptyGameRosters);
+        const sides = getScheduledTournamentSeriesSides(scheduledGame);
+        applyScheduledTournamentSideToGameSlot("away", scheduledGame, sides[0]?.key || "");
+        applyScheduledTournamentSideToGameSlot("home", scheduledGame, sides[1]?.key || "");
       }
       return;
     }
@@ -7692,6 +8639,13 @@ export default function WiffleScoringPrototype() {
     if (scheduledGame.homeTeamId) applyLeagueTeamToGameSlot("home", scheduledGame.homeTeamId);
     else if (scheduledGame.homeTeamName) applyCustomScheduledTeamToGameSlot("home", `${scheduledGame.id}:home`, scheduledGame.homeTeamName, scheduledGame.homeTeamPlayers || []);
   }
+
+  useEffect(() => {
+    if (!pendingTournamentStartSetup?.scheduledGameId) return;
+    if (!scheduledGamesForSetup.some((scheduledGame) => scheduledGame.id === pendingTournamentStartSetup.scheduledGameId)) return;
+    applyScheduledGameToSetup(pendingTournamentStartSetup.scheduledGameId);
+    setPendingTournamentStartSetup(null);
+  }, [pendingTournamentStartSetup, scheduledGamesForSetup]);
 
   function chooseSetupCustomGame() {
     setSetupWizardStarted(true);
@@ -7739,18 +8693,24 @@ export default function WiffleScoringPrototype() {
   function chooseSetupTournamentGame() {
     setSetupWizardStarted(true);
     setSetupWizardGameType("league");
-    setSetupWizardLeagueMode("");
+    setSetupWizardLeagueMode("tournament");
     setSetupWizardCustomStep("details");
     setSetupWizardRuleStep("source");
     setSetupWizardRulesSource("custom");
-    setSetupWizardLeagueDetailsConfirmed(false);
+    setSetupWizardLeagueDetailsConfirmed(true);
     setSetupWizardLeagueRostersConfirmed(false);
-    setSetupWizardLeagueRulesConfirmed(false);
+    setSetupWizardLeagueRulesConfirmed(true);
     setSetupWizardLeagueLineupsConfirmed(false);
     setSetupLineupTiming("now");
     setLineupStartPromptAcknowledged(false);
     const firstLeagueId = leagues[0]?.id || selectedLeagueId || "";
     if (isCustomGame && firstLeagueId) handleSetupLeagueChange(firstLeagueId);
+    setLeagueGameMode("tournament");
+    setUseExhibitionLeagueTeams(false);
+    setUseLeagueSchedule(true);
+    setUseLeagueDefaultRules(true);
+    setSelectedScheduledWeekId("");
+    setSelectedScheduledGameId("");
   }
 
   function chooseSetupLeagueMode(mode) {
@@ -9088,6 +10048,7 @@ export default function WiffleScoringPrototype() {
                 ...week,
                 isTournament: false,
                 sourceTournamentId: "",
+                scheduledTournament: null,
                 tournamentSeedTiming: "",
                 games: (week.games || []).map((game) => ({
                   ...game,
@@ -9098,6 +10059,9 @@ export default function WiffleScoringPrototype() {
                 })),
               };
             }
+            if (field === "sourceTournamentId") {
+              return { ...week, sourceTournamentId: value, scheduledTournament: null, games: [] };
+            }
             return { ...week, [field]: value };
           }),
         };
@@ -9106,7 +10070,7 @@ export default function WiffleScoringPrototype() {
     markScheduleWeekDirty(weekId);
   }
 
-  function cloneScheduleGamesForNewPeriod(games = [], targetSessionId = "") {
+  function cloneScheduleGamesForNewPeriod(games = [], targetSessionId = "", tournamentIdOverride = "") {
     return (games || []).map((game, index) => ({
       id: newId(),
       name: game.name || `Game ${index + 1}`,
@@ -9119,7 +10083,7 @@ export default function WiffleScoringPrototype() {
       awayTeamId: "",
       homeTeamId: "",
       completedGameId: "",
-      tournamentId: game.tournamentId || "",
+      tournamentId: tournamentIdOverride || game.tournamentId || "",
       tournamentMatchupId: game.tournamentMatchupId || "",
     }));
   }
@@ -9135,9 +10099,11 @@ export default function WiffleScoringPrototype() {
         if (!sourceWeek) return year;
         const activeSessionId = normalized.sessionsEnabled ? sourceWeek.sessionId || normalized.currentSessionId || normalized.sessions?.[0]?.id || "" : "";
         const visibleWeekCount = (normalized.scheduleWeeks || []).filter((week) => !normalized.sessionsEnabled || week.sessionId === activeSessionId).length;
+        const copiedScheduledTournament = cloneScheduledTournamentForSchedule(sourceWeek.scheduledTournament);
         const copiedGames = cloneScheduleGamesForNewPeriod(
           (sourceWeek.games || []).filter((game) => !normalized.sessionsEnabled || game.sessionId === activeSessionId),
           activeSessionId,
+          copiedScheduledTournament?.id || "",
         );
         return {
           ...normalized,
@@ -9151,6 +10117,7 @@ export default function WiffleScoringPrototype() {
               sessionId: activeSessionId,
               isTournament: Boolean(sourceWeek.isTournament),
               sourceTournamentId: sourceWeek.sourceTournamentId || "",
+              scheduledTournament: copiedScheduledTournament,
               tournamentSeedTiming: sourceWeek.tournamentSeedTiming || "",
               games: copiedGames,
             },
@@ -9178,6 +10145,7 @@ export default function WiffleScoringPrototype() {
         const firstSourceDate = sourceWeeks.find((week) => week.date)?.date || "";
         const copiedWeeks = sourceWeeks.map((week, weekIndex) => {
           const offset = firstSourceDate && week.date ? dateDiffInDays(firstSourceDate, week.date) : weekIndex * 7;
+          const copiedScheduledTournament = cloneScheduledTournamentForSchedule(week.scheduledTournament);
           return {
             id: newId(),
             name: week.name || `Week ${weekIndex + 1}`,
@@ -9186,8 +10154,9 @@ export default function WiffleScoringPrototype() {
             sessionId: targetSessionId,
             isTournament: Boolean(week.isTournament),
             sourceTournamentId: week.sourceTournamentId || "",
+            scheduledTournament: copiedScheduledTournament,
             tournamentSeedTiming: week.tournamentSeedTiming || "",
-            games: cloneScheduleGamesForNewPeriod(week.games || [], targetSessionId),
+            games: cloneScheduleGamesForNewPeriod(week.games || [], targetSessionId, copiedScheduledTournament?.id || ""),
           };
         });
         return {
@@ -9232,6 +10201,7 @@ export default function WiffleScoringPrototype() {
           const targetSessionId = sourceSeason.sessionsEnabled ? sessionIdMap[sourceSessionId] || targetSessions?.[0]?.id || "" : "";
           return sortedWeeks.map((week, weekIndex) => {
             const offset = firstSourceDate && week.date ? dateDiffInDays(firstSourceDate, week.date) : weekIndex * 7;
+            const copiedScheduledTournament = cloneScheduledTournamentForSchedule(week.scheduledTournament);
             return {
               id: newId(),
               name: week.name || `Week ${weekIndex + 1}`,
@@ -9240,8 +10210,9 @@ export default function WiffleScoringPrototype() {
               sessionId: targetSessionId,
               isTournament: Boolean(week.isTournament),
               sourceTournamentId: week.sourceTournamentId || "",
+              scheduledTournament: copiedScheduledTournament,
               tournamentSeedTiming: week.tournamentSeedTiming || "",
-              games: cloneScheduleGamesForNewPeriod(week.games || [], targetSessionId),
+              games: cloneScheduleGamesForNewPeriod(week.games || [], targetSessionId, copiedScheduledTournament?.id || ""),
             };
           });
         });
@@ -9332,6 +10303,13 @@ export default function WiffleScoringPrototype() {
   }
 
   function removeScheduleWeek(yearId, weekId) {
+    const year = (selectedLeague?.years || []).find((yearEntry) => yearEntry.id === yearId);
+    const normalizedYear = normalizeSeasonRecord(year || {});
+    const week = (normalizedYear.scheduleWeeks || []).find((item) => item.id === weekId);
+    if (scheduleWeekHasSavedResults(week, previousGames)) {
+      window.alert?.("This schedule week has completed results. Erase those games from Results before removing the week.");
+      return;
+    }
     updateSelectedLeague((league) => ({
       ...league,
       years: (league.years || []).map((year) => {
@@ -9365,6 +10343,7 @@ export default function WiffleScoringPrototype() {
   function applyTournamentToScheduleWeek(yearId, weekId, tournamentId, seedTiming = "later", timingOptions = {}) {
     const tournament = selectedLeagueTournaments.find((item) => item.id === tournamentId);
     if (!tournament) return;
+    const scheduledTournament = makeScheduledTournamentInstance(tournament);
     updateSelectedLeague((league) => ({
       ...league,
       years: (league.years || []).map((year) => {
@@ -9380,8 +10359,9 @@ export default function WiffleScoringPrototype() {
               name: tournament.name || week.name,
               isTournament: true,
               sourceTournamentId: tournament.id,
+              scheduledTournament,
               tournamentSeedTiming: seedTiming,
-              games: makeScheduledGamesFromTournament(tournament, activeSessionId, timingOptions, selectedLeague, leagues),
+              games: makeScheduledGamesFromTournament(scheduledTournament, activeSessionId, timingOptions, selectedLeague, leagues),
             };
           }),
         };
@@ -9396,6 +10376,17 @@ export default function WiffleScoringPrototype() {
     if (!leagueId) return;
     markNextSharedStateSaveAuthoritative();
     setLeagues((prev) => prev.map((league) => (league.id === leagueId ? updater(league) : league)));
+  }
+
+  function updateTournamentRecord(tournamentId, updater) {
+    if (!tournamentId) return;
+    markNextSharedStateSaveAuthoritative();
+    setLeagues((prev) => prev.map((league) => ({
+      ...league,
+      tournaments: (league.tournaments || []).map((tournament) => (
+        tournament.id === tournamentId ? updater(tournament, league) : tournament
+      )),
+    })));
   }
 
   function createTournament() {
@@ -9433,6 +10424,7 @@ export default function WiffleScoringPrototype() {
           bracketCount: value === "double_elimination" || value === "round_robin" ? "1" : current.bracketCount || "1",
           bracketFlow: nextFlow,
           ...(value === "double_elimination" ? { defaultSeriesLength: "", defaultFinalSeriesLength: "", defaultChampionshipSeriesLength: "" } : {}),
+          ...(value === "round_robin" ? { defaultFinalSeriesLength: "", defaultChampionshipSeriesLength: "" } : {}),
         };
       }
       if (field === "leagueIds") {
@@ -9480,8 +10472,8 @@ export default function WiffleScoringPrototype() {
       bracketFlow: type === "round_robin" || type === "double_elimination" ? "left_to_right" : tournamentSetupWizard.bracketFlow || "left_to_right",
       roundRobinRounds: tournamentSetupWizard.roundRobinRounds || "single",
       defaultSeriesLength: type === "double_elimination" ? "" : tournamentSetupWizard.defaultSeriesLength || "",
-      defaultFinalSeriesLength: type === "double_elimination" ? "" : tournamentSetupWizard.defaultFinalSeriesLength || "",
-      defaultChampionshipSeriesLength: type === "double_elimination" ? "" : tournamentSetupWizard.defaultChampionshipSeriesLength || "",
+      defaultFinalSeriesLength: type === "double_elimination" || type === "round_robin" ? "" : tournamentSetupWizard.defaultFinalSeriesLength || "",
+      defaultChampionshipSeriesLength: type === "double_elimination" || type === "round_robin" ? "" : tournamentSetupWizard.defaultChampionshipSeriesLength || "",
       defaultHomeAwayMode: tournamentSetupWizard.defaultHomeAwayMode || "game_time",
       notes: tournamentSetupWizard.notes || "",
       settingsSaved: true,
@@ -9602,17 +10594,13 @@ export default function WiffleScoringPrototype() {
   }
 
   function toggleTournamentLeague(tournamentId, leagueId, isSelected) {
-    updateSelectedLeagueRecord((league) => ({
-      ...league,
-      tournaments: (league.tournaments || []).map((tournament) => {
-        if (tournament.id !== tournamentId) return tournament;
-        const currentLeagueIds = tournament.leagueIds || [];
-        const leagueIds = isSelected
-          ? [...new Set([...currentLeagueIds, leagueId])]
-          : currentLeagueIds.filter((id) => id !== leagueId);
-        return { ...tournament, leagueIds, settingsSaved: false };
-      }),
-    }));
+    updateTournamentRecord(tournamentId, (tournament) => {
+      const currentLeagueIds = tournament.leagueIds || [];
+      const leagueIds = isSelected
+        ? [...new Set([...currentLeagueIds, leagueId])]
+        : currentLeagueIds.filter((id) => id !== leagueId);
+      return { ...tournament, leagueIds };
+    });
   }
 
   function openTournamentByeEditor(tournamentId, options = {}) {
@@ -9674,49 +10662,100 @@ export default function WiffleScoringPrototype() {
     setOpenTournamentTeamsId(tournamentId);
   }
 
+  function getTournamentWithParticipantUpdate(tournament, participantId, field, value) {
+    const currentParticipant = (tournament.participants || []).find((participant) => participant.id === participantId);
+    const oldBracket = Math.max(1, Number(currentParticipant?.bracket) || 1);
+    const oldSeed = String(currentParticipant?.seed || "");
+    let nextTeamIdForSlot = null;
+    let slotTeamChangeBlocked = false;
+    const participants = (tournament.participants || []).map((participant) => {
+      if (participant.id !== participantId) return participant;
+      if (field === "teamId") {
+        const duplicateTeam = value && (tournament.participants || []).some((item) => item.id !== participantId && item.teamId === value);
+        if (duplicateTeam) {
+          slotTeamChangeBlocked = true;
+          return participant;
+        }
+        nextTeamIdForSlot = value;
+        return { ...participant, teamId: value };
+      }
+      if (field === "seed") return { ...participant, seed: value === "" ? "" : Math.max(1, Number(value) || 1) };
+      if (field === "bracket") return { ...participant, bracket: tournament.type === "double_elimination" ? 1 : Math.max(1, Math.min(Number(tournament.bracketCount) || 1, Number(value) || 1)) };
+      return { ...participant, [field]: value };
+    });
+    const matchups = field === "teamId" && !slotTeamChangeBlocked
+      ? (tournament.matchups || []).map((matchup) => {
+        const sameBracket = Math.max(1, Number(matchup.bracket) || 1) === oldBracket;
+        return {
+          ...matchup,
+          teamOneId: sameBracket && String(matchup.teamOneSeed || "") === oldSeed ? nextTeamIdForSlot || "" : matchup.teamOneId,
+          teamTwoId: sameBracket && String(matchup.teamTwoSeed || "") === oldSeed ? nextTeamIdForSlot || "" : matchup.teamTwoId,
+        };
+      })
+      : tournament.matchups || [];
+    return {
+      ...tournament,
+      teamSetupSaved: tournament.type === "round_robin" ? false : tournament.teamSetupSaved,
+      participants,
+      matchups,
+    };
+  }
+
   function updateTournamentParticipant(tournamentId, participantId, field, value) {
     updateSelectedLeagueRecord((league) => ({
       ...league,
-      tournaments: (league.tournaments || []).map((tournament) => {
-        if (tournament.id !== tournamentId) return tournament;
-        const currentParticipant = (tournament.participants || []).find((participant) => participant.id === participantId);
-        const oldBracket = Math.max(1, Number(currentParticipant?.bracket) || 1);
-        const oldSeed = String(currentParticipant?.seed || "");
-        let nextTeamIdForSlot = null;
-        let slotTeamChangeBlocked = false;
-        const participants = (tournament.participants || []).map((participant) => {
-          if (participant.id !== participantId) return participant;
-          if (field === "teamId") {
-            const duplicateTeam = value && (tournament.participants || []).some((item) => item.id !== participantId && item.teamId === value);
-            if (duplicateTeam) {
-              slotTeamChangeBlocked = true;
-              return participant;
-            }
-            nextTeamIdForSlot = value;
-            return { ...participant, teamId: value };
-          }
-          if (field === "seed") return { ...participant, seed: value === "" ? "" : Math.max(1, Number(value) || 1) };
-          if (field === "bracket") return { ...participant, bracket: tournament.type === "double_elimination" ? 1 : Math.max(1, Math.min(Number(tournament.bracketCount) || 1, Number(value) || 1)) };
-          return { ...participant, [field]: value };
-        });
-        const matchups = field === "teamId" && !slotTeamChangeBlocked
-          ? (tournament.matchups || []).map((matchup) => {
-            const sameBracket = Math.max(1, Number(matchup.bracket) || 1) === oldBracket;
-            return {
-              ...matchup,
-              teamOneId: sameBracket && String(matchup.teamOneSeed || "") === oldSeed ? nextTeamIdForSlot || "" : matchup.teamOneId,
-              teamTwoId: sameBracket && String(matchup.teamTwoSeed || "") === oldSeed ? nextTeamIdForSlot || "" : matchup.teamTwoId,
-            };
-          })
-          : tournament.matchups || [];
+      tournaments: (league.tournaments || []).map((tournament) => (
+        tournament.id === tournamentId ? getTournamentWithParticipantUpdate(tournament, participantId, field, value) : tournament
+      )),
+    }));
+  }
+
+  function updateScheduledTournamentParticipant(yearId, weekId, participantId, field, value) {
+    updateSelectedLeagueRecord((league) => ({
+      ...league,
+      years: (league.years || []).map((year) => {
+        if (year.id !== yearId) return year;
         return {
-          ...tournament,
-          teamSetupSaved: tournament.type === "round_robin" ? false : tournament.teamSetupSaved,
-          participants,
-          matchups,
+          ...year,
+          scheduleWeeks: (year.scheduleWeeks || []).map((week) => {
+            if (week.id !== weekId || !week.scheduledTournament) return week;
+            const activeSessionId = year.sessionsEnabled ? week.sessionId || year.currentSessionId || year.sessions?.[0]?.id || "" : "";
+            const scheduledTournament = getTournamentWithParticipantUpdate(week.scheduledTournament, participantId, field, value);
+            return {
+              ...week,
+              scheduledTournament,
+              games: makeScheduledGamesFromTournament(
+                scheduledTournament,
+                activeSessionId,
+                {
+                  firstTime: week.games?.[0]?.time || defaultScheduleTimeValue(),
+                  gapMinutes: 0,
+                  concurrentCount: Math.max(1, (week.games || []).filter((game) => game.time === week.games?.[0]?.time).length || 1),
+                },
+                league,
+                leagues,
+              ).map((generatedGame) => {
+                const existingGame = (week.games || []).find((game) => game.tournamentMatchupId === generatedGame.tournamentMatchupId);
+                return existingGame
+                  ? {
+                    ...existingGame,
+                    ...generatedGame,
+                    id: existingGame.id,
+                    name: existingGame.name || generatedGame.name,
+                    time: existingGame.time || generatedGame.time,
+                    sessionId: existingGame.sessionId || generatedGame.sessionId,
+                    seriesLength: existingGame.seriesLength ?? generatedGame.seriesLength,
+                    seriesHomeAwayMode: existingGame.seriesHomeAwayMode || generatedGame.seriesHomeAwayMode,
+                    completedGameId: existingGame.completedGameId || "",
+                  }
+                  : generatedGame;
+              }),
+            };
+          }),
         };
       }),
     }));
+    markScheduleWeekDirty(weekId);
   }
 
   function removeTournamentParticipant(tournamentId, participantId) {
@@ -10957,26 +11996,35 @@ export default function WiffleScoringPrototype() {
     };
     const issues = [];
     if (!championshipId || !matchupIds.has(championshipId)) issues.push("Select a championship matchup.");
-    const winnerIncomingSources = {};
+    const explicitWinnerSourcesByTarget = {};
     matchups.forEach((matchup) => {
       if (matchup.nextMatchupId && matchupIds.has(matchup.nextMatchupId)) {
-        if (!winnerIncomingSources[matchup.nextMatchupId]) winnerIncomingSources[matchup.nextMatchupId] = new Set();
-        winnerIncomingSources[matchup.nextMatchupId].add(matchup.id);
-      }
-      const placeholder = getTournamentWinnerPlaceholder(matchup);
-      if (!placeholder) return;
-      const target = matchups.find((item) => item.id !== matchup.id && (item.teamOnePlaceholder === placeholder || item.teamTwoPlaceholder === placeholder));
-      if (target) {
-        if (!winnerIncomingSources[target.id]) winnerIncomingSources[target.id] = new Set();
-        winnerIncomingSources[target.id].add(matchup.id);
+        if (!explicitWinnerSourcesByTarget[matchup.nextMatchupId]) explicitWinnerSourcesByTarget[matchup.nextMatchupId] = new Set();
+        explicitWinnerSourcesByTarget[matchup.nextMatchupId].add(matchup.id);
       }
     });
     matchups.forEach((matchup, index) => {
       const label = getTournamentMatchupDisplayName(matchup, index);
       const isChampionship = championshipId === matchup.id || String(`${matchup.round || ""} ${matchup.name || ""}`).toLowerCase().includes("championship");
+      const placeholderSlots = [matchup.teamOnePlaceholder, matchup.teamTwoPlaceholder].filter(Boolean);
+      const explicitIncomingSources = explicitWinnerSourcesByTarget[matchup.id] || new Set();
+      const placeholderIncomingSources = new Set(
+        placeholderSlots.flatMap((placeholder) => {
+          const source = matchups.find((item) => item.id !== matchup.id && getTournamentWinnerPlaceholder(item) === placeholder);
+          return source ? [source.id] : [];
+        }),
+      );
+      const unmatchedExplicitIncomingSources = [...explicitIncomingSources].filter((sourceId) => !placeholderIncomingSources.has(sourceId));
+      const occupiedWinnerSlots = [
+        matchup.teamOneId || matchup.teamOneSeed || matchup.teamOnePlaceholder,
+        matchup.teamTwoId || matchup.teamTwoSeed || matchup.teamTwoPlaceholder,
+      ].filter(Boolean).length;
+      const effectiveWinnerIncomingCount = occupiedWinnerSlots >= 2
+        ? occupiedWinnerSlots
+        : Math.max(occupiedWinnerSlots, placeholderIncomingSources.size + unmatchedExplicitIncomingSources.length);
       if (!matchup.teamOneId && !matchup.teamOneSeed && !matchup.teamOnePlaceholder) issues.push(`${label} has Seed TBD in the top slot.`);
       if (!matchup.teamTwoId && !matchup.teamTwoSeed && !matchup.teamTwoPlaceholder) issues.push(`${label} has Seed TBD in the bottom slot.`);
-      if ((winnerIncomingSources[matchup.id]?.size || 0) > 2) issues.push(`${label} has more than two winners advancing into it.`);
+      if (effectiveWinnerIncomingCount > 2) issues.push(`${label} has more than two winners advancing into it.`);
       if (!isChampionship && !winnerTargetForMatchup(matchup)) issues.push(`${label} needs a winner advancement connection.`);
       const isWinnerBracketMatchup = !getTournamentMatchupLoserLaneId(matchup, tournament);
       if (hasLoserBracket && !isChampionship && isWinnerBracketMatchup && (!matchup.loserNextMatchupId || !matchupIds.has(matchup.loserNextMatchupId))) {
@@ -11021,7 +12069,8 @@ export default function WiffleScoringPrototype() {
         const normalized = normalizeSeasonRecord(year);
         const activeSessionId = normalized.sessionsEnabled ? normalized.currentSessionId || normalized.sessions?.[0]?.id || "" : "";
         const mainField = getMainField(league.fields || []);
-        const games = makeScheduledGamesFromTournament(tournament, activeSessionId, timingOptions, selectedLeague, leagues);
+        const scheduledTournament = makeScheduledTournamentInstance(tournament);
+        const games = makeScheduledGamesFromTournament(scheduledTournament, activeSessionId, timingOptions, selectedLeague, leagues);
         const visibleWeekCount = (normalized.scheduleWeeks || []).filter((week) => !normalized.sessionsEnabled || week.sessionId === activeSessionId).length;
         return {
           ...normalized,
@@ -11035,6 +12084,7 @@ export default function WiffleScoringPrototype() {
               sessionId: activeSessionId,
               isTournament: true,
               sourceTournamentId: tournament.id,
+              scheduledTournament,
               tournamentSeedTiming: "later",
               games,
             },
@@ -12477,7 +13527,7 @@ export default function WiffleScoringPrototype() {
                 <Button variant={activePage === "leaders" ? "primary" : "outline"} onClick={() => goToPage("leaders")}>Leaders</Button>
                 <Button variant={activePage === "splits" ? "primary" : "outline"} onClick={() => goToPage("splits")}>Splits</Button>
                 <Button variant={activePage === "stats" ? "primary" : "outline"} onClick={() => goToPage("stats")}>Stats & Log</Button>
-                <Button variant={activePage === "history" ? "primary" : "outline"} onClick={() => goToPage("history")}>Previous Games</Button>
+                <Button variant={activePage === "history" ? "primary" : "outline"} onClick={() => goToPage("history")}>Results</Button>
                 <Button variant={activePage === "rules" ? "primary" : "outline"} onClick={() => goToPage("rules")}>Rule Book</Button>
                 <span className="shrink-0 rounded-full bg-slate-900 px-3 py-1 text-xs font-bold uppercase text-white">{displayedGameStatus}</span>
               </div>
@@ -12512,7 +13562,7 @@ export default function WiffleScoringPrototype() {
                   <div className="text-xs font-black uppercase tracking-[0.3em] text-slate-500">Game Complete</div>
                   <h2 className="mt-2 text-3xl font-black">Set up a new game?</h2>
                   <p className="mx-auto mt-2 max-w-2xl text-sm font-semibold text-slate-600">
-                    The previous game is final and has been saved to Previous Games. Start a new setup to clear the final game from the Games page and choose new teams, rules, rosters, and orders.
+                    The previous game is final and has been saved to Results. Start a new setup to clear the final game from the Games page and choose new teams, rules, rosters, and orders.
                   </p>
                   <div className="mt-5 flex justify-center">
                     <Button variant="primary" onClick={startNewGame}>New Game</Button>
@@ -12525,7 +13575,7 @@ export default function WiffleScoringPrototype() {
                   <div className="text-xs font-black uppercase tracking-[0.3em] text-amber-600">Game Paused</div>
                   <h2 className="mt-2 text-3xl font-black">Set up a new game?</h2>
                   <p className="mx-auto mt-2 max-w-2xl text-sm font-semibold text-slate-600">
-                    The current game is paused and saved in Previous Games. Resume it from Games or start a new setup to choose new teams, rules, rosters, and orders.
+                    The current game is paused and saved in Results. Resume it from Games or start a new setup to choose new teams, rules, rosters, and orders.
                   </p>
                   <div className="mt-5 flex flex-wrap justify-center gap-2">
                     <Button variant="outline" onClick={resumePausedGame}>Resume Paused Game</Button>
@@ -12898,7 +13948,7 @@ export default function WiffleScoringPrototype() {
                                     <label className="text-xs font-semibold uppercase text-slate-500">Away Team</label>
                                     {useExhibitionLeagueTeams ? (
                                       <select className="mt-1 w-full rounded-xl border px-3 py-2 text-sm font-semibold" value={awayLeagueTeamId} onChange={(event) => applyScheduledTournamentSideToGameSlot("away", selectedScheduledGame, event.target.value)}>
-                                        <option value="">Select home team</option>
+                                        <option value="">Select away team</option>
                                         {(setupLeague?.teams || []).map((team) => <option key={`exhibition-away-${team.id}`} value={team.id} disabled={team.id === homeLeagueTeamId}>{team.name}</option>)}
                                       </select>
                                     ) : (
@@ -13098,6 +14148,25 @@ export default function WiffleScoringPrototype() {
                               </div>
                             ) : !selectedScheduledGame ? (
                               <div className="grid gap-3 md:grid-cols-2">
+                                {setupWizardLeagueMode === "tournament" && (
+                                  <div className="md:col-span-2">
+                                    <label className="text-xs font-semibold uppercase text-slate-500">League</label>
+                                    <select
+                                      className="mt-1 w-full rounded-xl border bg-white px-3 py-2 text-sm font-semibold"
+                                      value={setupLeague?.id || ""}
+                                      onChange={(event) => {
+                                        handleSetupLeagueChange(event.target.value);
+                                        setSetupWizardLeagueMode("tournament");
+                                        setSetupWizardLeagueDetailsConfirmed(true);
+                                        setSetupWizardLeagueRulesConfirmed(true);
+                                        setLeagueGameMode("tournament");
+                                        setUseLeagueSchedule(true);
+                                      }}
+                                    >
+                                      {leagues.map((league) => <option key={`wizard-tournament-league-${league.id}`} value={league.id}>{league.name}</option>)}
+                                    </select>
+                                  </div>
+                                )}
                                 <div>
                                   <label className="text-xs font-semibold uppercase text-slate-500">{setupWizardLeagueMode === "tournament" ? "Tournament Week" : "Scheduled Week"}</label>
                                   <select className="mt-1 w-full rounded-xl border bg-white px-3 py-2 text-sm font-semibold" value={selectedScheduledWeekId} onChange={(event) => { setUseLeagueSchedule(true); setSelectedScheduledWeekId(event.target.value); setSelectedScheduledGameId(""); setSetupWizardLeagueRostersConfirmed(false); setSetupWizardLeagueRulesConfirmed(true); setSetupWizardLeagueLineupsConfirmed(false); }}>
@@ -13117,10 +14186,14 @@ export default function WiffleScoringPrototype() {
                                       const home = setupLeague?.teams?.find((team) => team.id === scheduledGame.homeTeamId)?.name || scheduledGame.homeTeamName || "Home";
                                       const seriesTeamOne = setupLeague?.teams?.find((team) => team.id === scheduledGame.seriesTeamOneId)?.name || scheduledGame.seriesTeamOneName || "Team TBD";
                                       const seriesTeamTwo = setupLeague?.teams?.find((team) => team.id === scheduledGame.seriesTeamTwoId)?.name || scheduledGame.seriesTeamTwoName || "Team TBD";
-                                      const label = scheduledGame.isTournament && scheduledGame.seriesLength
-                                        ? `${scheduledGame.name} · ${seriesTeamOne} vs ${seriesTeamTwo} · Best of ${scheduledGame.seriesLength} · ${formatTimeDisplay(scheduledGame.time || defaultScheduleTimeValue())}`
+                                      const label = scheduledGame.isTournament && (scheduledGame.seriesLength || scheduledGame.seriesHomeAwayMode === "game_time")
+                                        ? `${scheduledGame.name} · ${seriesTeamOne} vs ${seriesTeamTwo} · ${scheduledGame.seriesLength ? `${scheduledGame.seriesSummary ? `${scheduledGame.seriesSummary.sideOneWins}-${scheduledGame.seriesSummary.sideTwoWins} series · ` : ""}Best of ${scheduledGame.seriesLength} · ` : ""}${formatTimeDisplay(scheduledGame.time || defaultScheduleTimeValue())}`
                                         : `${scheduledGame.name} · ${away} vs ${home} · ${formatTimeDisplay(scheduledGame.time || defaultScheduleTimeValue())}`;
-                                      const unavailableLabel = scheduledGame.unavailableStatus ? ` · Unavailable: ${scheduledGame.unavailableStatus.status} · ${scheduledGame.unavailableStatus.score}` : " · Unavailable";
+                                      const unavailableLabel = scheduledGame.unavailableStatus
+                                        ? ` · Unavailable: ${scheduledGame.unavailableStatus.status} · ${scheduledGame.unavailableStatus.score}`
+                                        : scheduledGame.unavailableReason
+                                          ? ` · Unavailable: ${scheduledGame.unavailableReason}`
+                                          : " · Unavailable";
                                       return <option key={scheduledGame.id} value={scheduledGame.id} disabled={scheduledGame.unavailable && !setupIdentityLocked}>{label}{scheduledGame.unavailable ? unavailableLabel : ""}</option>;
                                     })}
                                   </select>
@@ -13131,12 +14204,12 @@ export default function WiffleScoringPrototype() {
                               <div className="mt-4 rounded-xl border bg-white p-3">
                                 <div className="text-xs font-semibold uppercase text-slate-500">Home/Away</div>
                                 <div className="mt-3">
-                                  <div className="mb-2 rounded-xl border border-blue-200 bg-blue-50 p-3 text-sm font-bold text-blue-900">Pick home and away for this series game before confirming rosters.</div>
+                                  <div className="mb-2 rounded-xl border border-blue-200 bg-blue-50 p-3 text-sm font-bold text-blue-900">Pick home and away for this tournament matchup before confirming rosters.</div>
                                   <div className="grid gap-3 md:grid-cols-2">
                                     <div>
                                       <label className="text-xs font-semibold uppercase text-slate-500">Away Team</label>
                                       <select className="mt-1 w-full rounded-xl border px-3 py-2 text-sm font-semibold" value={awayLeagueTeamId} onChange={(event) => applyScheduledTournamentSideToGameSlot("away", selectedScheduledGame, event.target.value)}>
-                                        <option value="">Select home team</option>
+                                        <option value="">Select away team</option>
                                         {getScheduledTournamentSeriesSides(selectedScheduledGame).map((side) => (
                                           <option key={`away-series-${side.key}`} value={side.key} disabled={side.key === homeLeagueTeamId}>{side.name}</option>
                                         ))}
@@ -13337,10 +14410,14 @@ export default function WiffleScoringPrototype() {
                               const home = setupLeague?.teams?.find((team) => team.id === scheduledGame.homeTeamId)?.name || scheduledGame.homeTeamName || "Home";
                               const seriesTeamOne = setupLeague?.teams?.find((team) => team.id === scheduledGame.seriesTeamOneId)?.name || scheduledGame.seriesTeamOneName || "Team TBD";
                               const seriesTeamTwo = setupLeague?.teams?.find((team) => team.id === scheduledGame.seriesTeamTwoId)?.name || scheduledGame.seriesTeamTwoName || "Team TBD";
-                              const label = scheduledGame.isTournament && scheduledGame.seriesLength
-                                ? `${scheduledGame.name} · ${seriesTeamOne} vs ${seriesTeamTwo} · Best of ${scheduledGame.seriesLength} · ${formatTimeDisplay(scheduledGame.time || defaultScheduleTimeValue())}`
+                              const label = scheduledGame.isTournament && (scheduledGame.seriesLength || scheduledGame.seriesHomeAwayMode === "game_time")
+                                ? `${scheduledGame.name} · ${seriesTeamOne} vs ${seriesTeamTwo} · ${scheduledGame.seriesLength ? `${scheduledGame.seriesSummary ? `${scheduledGame.seriesSummary.sideOneWins}-${scheduledGame.seriesSummary.sideTwoWins} series · ` : ""}Best of ${scheduledGame.seriesLength} · ` : ""}${formatTimeDisplay(scheduledGame.time || defaultScheduleTimeValue())}`
                                 : `${scheduledGame.name} · ${away} vs ${home} · ${formatTimeDisplay(scheduledGame.time || defaultScheduleTimeValue())}`;
-                              const unavailableLabel = scheduledGame.unavailableStatus ? ` · Unavailable: ${scheduledGame.unavailableStatus.status} · ${scheduledGame.unavailableStatus.score}` : " · Unavailable";
+                              const unavailableLabel = scheduledGame.unavailableStatus
+                                ? ` · Unavailable: ${scheduledGame.unavailableStatus.status} · ${scheduledGame.unavailableStatus.score}`
+                                : scheduledGame.unavailableReason
+                                  ? ` · Unavailable: ${scheduledGame.unavailableReason}`
+                                  : " · Unavailable";
                               return <option key={scheduledGame.id} value={scheduledGame.id} disabled={scheduledGame.unavailable && !setupIdentityLocked}>{label}{scheduledGame.unavailable ? unavailableLabel : ""}</option>;
                             })}
                           </select>
@@ -14069,6 +15146,7 @@ export default function WiffleScoringPrototype() {
                 pitchingStats={game.pitchingStats}
                 subIndex={currentSubIndex}
                 onSelectRunner={setSelectedBaseRunner}
+                seriesSummaryText={selectedScheduledGameSeriesText}
                 tournamentButton={activeGameTournament ? (
                   <button
                     type="button"
@@ -14130,7 +15208,15 @@ export default function WiffleScoringPrototype() {
             )}
             {game.status === "final" && (
               <div className="animate-pulse rounded-2xl border-4 border-slate-900 bg-white p-4 text-center shadow-lg sm:rounded-3xl sm:p-6">
-                <div className="text-sm font-black uppercase tracking-[0.35em] text-slate-500">Final</div>
+                {tournamentChampionJustCrowned ? (
+                  <div className="rounded-2xl border border-green-200 bg-green-50 p-4">
+                    <div className="text-sm font-black uppercase tracking-[0.35em] text-green-700">Tournament Champion</div>
+                    <div className="mt-2 text-3xl font-black text-green-950 sm:text-4xl md:text-6xl">{activeGameTournamentWinnerLabel}</div>
+                    <div className="mt-1 text-sm font-bold text-green-800">{activeGameTournament?.name || "Tournament"} is complete</div>
+                  </div>
+                ) : (
+                  <div className="text-sm font-black uppercase tracking-[0.35em] text-slate-500">Final</div>
+                )}
                 <div className="mt-2 text-3xl font-black sm:text-4xl md:text-6xl">
                   {scoreDisplayWinner === "away" ? scoreDisplayAwayTeam : scoreDisplayWinner === "home" ? scoreDisplayHomeTeam : "Tie Game"} {scoreDisplayWinner ? "Wins!" : ""}
                 </div>
@@ -14138,6 +15224,8 @@ export default function WiffleScoringPrototype() {
                 {game.finalReason && <div className="mt-2 text-sm font-semibold text-slate-500">{game.finalReason}</div>}
                 <div className="mt-4 flex flex-wrap justify-center gap-2">
                   <Button variant="danger" onClick={undoLast} disabled={events.length === 0}>↶ Undo Last Play</Button>
+                  {canPlayNextSeriesGame && <Button variant="primary" onClick={playNextSeriesGameFromFinal}>Play Next Game in Series</Button>}
+                  {!canPlayNextSeriesGame && nextScheduledGameAfterFinal && <Button variant="primary" onClick={startNextScheduledGameFromFinal}>Start Next Scheduled Game</Button>}
                   <Button variant="primary" onClick={startNewGame}>Start New Game</Button>
                 </div>
                 <p className="mt-2 text-xs text-slate-500">Undo will reopen the game as live and remove the final play/out/event.</p>
@@ -14148,10 +15236,10 @@ export default function WiffleScoringPrototype() {
                 <div className="text-sm font-black uppercase tracking-[0.35em] text-amber-600">Paused</div>
                 <div className="mt-2 text-3xl font-black sm:text-4xl md:text-6xl">Game Paused</div>
                 <div className="mt-2 text-xl font-black sm:text-2xl md:text-3xl">{scoreDisplayAwayTeam} {scoreDisplayAwayScore} — {scoreDisplayHomeTeam} {scoreDisplayHomeScore}</div>
-                <p className="mx-auto mt-2 max-w-xl text-sm font-semibold text-slate-500">This game is saved in Previous Games and can be resumed when you are ready.</p>
+                <p className="mx-auto mt-2 max-w-xl text-sm font-semibold text-slate-500">This game is saved in Results and can be resumed when you are ready.</p>
                 <div className="mt-4 flex flex-wrap justify-center gap-2">
                   <Button variant="primary" onClick={resumePausedGame}>Resume Game</Button>
-                  <Button variant="outline" onClick={() => goToPage("history")}>View Previous Games</Button>
+                  <Button variant="outline" onClick={() => goToPage("history")}>View Results</Button>
                 </div>
               </div>
             )}
@@ -14218,6 +15306,11 @@ export default function WiffleScoringPrototype() {
                         <div className="text-4xl font-black tracking-tight text-white sm:text-5xl md:text-6xl">{scoreDisplayHomeScore}</div>
                       </div>
                     </div>
+                    {selectedScheduledGameSeriesText && (
+                      <div className="mb-3 rounded-xl bg-white/10 px-3 py-2 text-center text-xs font-black uppercase tracking-wide text-slate-200">
+                        {selectedScheduledGameSeriesText}
+                      </div>
+                    )}
                       <div className="grid grid-cols-3 gap-2">
                         <div><div className="text-[10px] uppercase text-slate-300">Inning</div><div className="text-base font-black sm:text-lg">{game.half === "top" ? "Top" : "Bot"} {game.inning}</div></div>
                         <div><div className="text-[10px] uppercase text-slate-300">Outs</div><div className="text-base font-black sm:text-lg">{game.outs}</div></div>
@@ -14278,7 +15371,7 @@ export default function WiffleScoringPrototype() {
                             <label className="text-xs font-semibold uppercase text-amber-700">Select pitcher for {defensiveTeamName}</label>
                             <select className="mt-1 w-full rounded-xl border px-3 py-2 text-sm font-semibold" value="" onChange={(event) => setExtraPitcher(defensiveTeam, game.inning, event.target.value)}>
                               <option value="">Select pitcher</option>
-                              {currentPitcherOptions.map((player) => <option key={`current-pitcher-${player}`} value={player}>{formatPlayerName(player, subPlayers[defensiveTeam])}</option>)}
+                              {currentPitcherOptions.map((player) => <option key={`current-pitcher-${player}`} value={player}>{pitcherOptionLabel(player, defensiveTeam)}</option>)}
                             </select>
                           </div>
                         )}
@@ -14326,7 +15419,7 @@ export default function WiffleScoringPrototype() {
                           <div className="mt-4 rounded-xl border bg-amber-50 p-3">
                             <label className="text-xs font-semibold uppercase text-amber-700">Extra Innings Pitcher</label>
                             <select className="mt-1 w-full rounded-xl border px-3 py-2 text-sm" value={defensiveExtraPitcher || currentPitcher} onChange={(event) => setExtraPitcher(defensiveTeam, game.inning, event.target.value)}>
-                              {currentPitcherOptions.map((player) => <option key={player} value={player}>{formatPlayerName(player, subPlayers[defensiveTeam])}</option>)}
+                              {currentPitcherOptions.map((player) => <option key={player} value={player}>{pitcherOptionLabel(player, defensiveTeam)}</option>)}
                             </select>
                             <p className="mt-1 text-xs text-amber-700">Appears only after the 4th. This controls the pitcher for the current extra inning.</p>
                           </div>
@@ -14581,16 +15674,363 @@ export default function WiffleScoringPrototype() {
                 <div className="text-xs font-black uppercase tracking-wide text-slate-500">Tournament Bracket</div>
                 <h2 className="truncate text-xl font-black">{activeGameTournament.name || "Tournament"}</h2>
               </div>
-              <Button variant="outline" onClick={() => setGameTournamentBracketOpen(false)}>Exit</Button>
+              <div className="flex flex-wrap items-center justify-end gap-2">
+                <div className="flex rounded-full border bg-slate-50 p-1">
+                  <button type="button" className={`rounded-full px-3 py-1 text-xs font-black uppercase ${gameTournamentBracketView === "bracket" ? "bg-slate-900 text-white" : "text-slate-500"}`} onClick={() => setGameTournamentBracketView("bracket")}>Bracket</button>
+                  <button type="button" className={`rounded-full px-3 py-1 text-xs font-black uppercase ${gameTournamentBracketView === "stats" ? "bg-slate-900 text-white" : "text-slate-500"}`} onClick={() => setGameTournamentBracketView("stats")}>Stats</button>
+                  {activeGameTournament.type === "round_robin" && <button type="button" className={`rounded-full px-3 py-1 text-xs font-black uppercase ${gameTournamentBracketView === "standings" ? "bg-slate-900 text-white" : "text-slate-500"}`} onClick={() => setGameTournamentBracketView("standings")}>Standings</button>}
+                </div>
+                <Button variant="outline" onClick={() => setGameTournamentBracketOpen(false)}>Exit</Button>
+              </div>
             </div>
-            <ReadOnlyTournamentBracketCanvas
-              tournament={activeGameTournament}
-              league={activeGameTournamentContext?.league || selectedLeague}
-              leagues={leagues}
-              previousGames={previousGames}
-              heightClassName="h-[calc(100vh-5.5rem)] max-h-none"
-              showLoserConnectors
-            />
+            {gameTournamentBracketView === "standings" && activeGameTournament.type === "round_robin" ? (
+              <div className="h-[calc(100vh-5.5rem)] overflow-auto rounded-2xl border bg-white p-3">
+                <div className="mb-3 rounded-xl border bg-slate-50 p-3 text-sm font-bold text-slate-600">Round-robin standings from completed tournament games.</div>
+                <div className="overflow-auto rounded-xl border">
+                  <table className="min-w-full text-left text-sm">
+                    <thead className="bg-slate-50 text-xs font-black uppercase text-slate-500"><tr><th className="px-3 py-2">Team</th><th className="px-2 py-2">W</th><th className="px-2 py-2">L</th><th className="px-2 py-2">RD</th></tr></thead>
+                    <tbody>
+                      {buildRoundRobinStandings(activeGameTournamentContext?.league || selectedLeague, activeGameTournamentContext?.season || {}, activeGameTournament, previousGames).map((row) => (
+                        <tr key={`active-rr-standings-${row.teamId}`} className="border-t"><td className="px-3 py-2 font-black">{row.teamName}</td><td className="px-2 py-2">{row.W}</td><td className="px-2 py-2">{row.L}</td><td className="px-2 py-2">{row.RD}</td></tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            ) : gameTournamentBracketView === "stats" ? (
+              <div className="h-[calc(100vh-5.5rem)] overflow-auto rounded-2xl border bg-white p-3">
+                <div className="mb-3 grid gap-2 md:grid-cols-3 md:items-end">
+                  <div>
+                    <label className="text-xs font-black uppercase text-slate-500">Group</label>
+                    <select className="mt-1 w-full rounded-xl border px-3 py-2 text-sm font-semibold" value={tournamentStatsGroup} onChange={(event) => setTournamentStatsGroup(event.target.value)}>
+                      <option value="player">Player</option>
+                      <option value="team">Team</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="text-xs font-black uppercase text-slate-500">Stats</label>
+                    <select className="mt-1 w-full rounded-xl border px-3 py-2 text-sm font-semibold" value={tournamentStatsType} onChange={(event) => { const nextType = event.target.value; setTournamentStatsType(nextType); setTournamentStatsSort(nextType === "pitching" ? "IP" : "H"); }}>
+                      <option value="hitting">Hitting</option>
+                      <option value="pitching">Pitching</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="text-xs font-black uppercase text-slate-500">Sort</label>
+                    <select className="mt-1 w-full rounded-xl border px-3 py-2 text-sm font-semibold" value={tournamentStatsSortOptions.includes(tournamentStatsSort) ? tournamentStatsSort : tournamentStatsSortOptions[0]} onChange={(event) => setTournamentStatsSort(event.target.value)}>
+                      {tournamentStatsSortOptions.map((option) => <option key={`tournament-sort-${option}`} value={option}>{option}</option>)}
+                    </select>
+                  </div>
+                </div>
+                <div className="mb-3 rounded-xl border bg-slate-50 p-3 text-sm font-bold text-slate-600">
+                  {activeTournamentSavedGames.length} game{activeTournamentSavedGames.length === 1 ? "" : "s"} included.
+                </div>
+                <div className="overflow-auto rounded-xl border">
+                  <table className="min-w-full text-left text-sm">
+                    <thead className="bg-slate-50 text-xs font-black uppercase text-slate-500">
+                      {tournamentStatsType === "pitching" ? (
+                        <tr><th className="sticky left-0 bg-slate-50 px-3 py-2">{tournamentStatsGroup === "team" ? "Team" : "Player"}</th><th className="px-2 py-2">IP</th><th className="px-2 py-2">ERA</th><th className="px-2 py-2">WHIP</th><th className="px-2 py-2">H</th><th className="px-2 py-2">R</th><th className="px-2 py-2">BB</th><th className="px-2 py-2">K</th><th className="px-2 py-2">HR</th></tr>
+                      ) : (
+                        <tr><th className="sticky left-0 bg-slate-50 px-3 py-2">{tournamentStatsGroup === "team" ? "Team" : "Player"}</th><th className="px-2 py-2">PA</th><th className="px-2 py-2">AB</th><th className="px-2 py-2">H</th><th className="px-2 py-2">2B</th><th className="px-2 py-2">3B</th><th className="px-2 py-2">HR</th><th className="px-2 py-2">R</th><th className="px-2 py-2">RBI</th><th className="px-2 py-2">BB</th><th className="px-2 py-2">K</th><th className="px-2 py-2">AVG</th><th className="px-2 py-2">OPS</th></tr>
+                      )}
+                    </thead>
+                    <tbody>
+                      {tournamentStatsRows.map(([label, stat]) => (
+                        tournamentStatsType === "pitching" ? (
+                          <tr key={`tournament-pitch-${label}`} className="border-t">
+                            <td className="sticky left-0 bg-white px-3 py-2 font-black">{label}</td><td className="px-2 py-2">{formatInningsPitched(stat.OUTS)}</td><td className="px-2 py-2">{era(stat, gameInnings)}</td><td className="px-2 py-2">{whip(stat)}</td><td className="px-2 py-2">{stat.H}</td><td className="px-2 py-2">{stat.R}</td><td className="px-2 py-2">{stat.BB}</td><td className="px-2 py-2">{stat.K}</td><td className="px-2 py-2">{stat.HR}</td>
+                          </tr>
+                        ) : (
+                          <tr key={`tournament-hit-${label}`} className="border-t">
+                            <td className="sticky left-0 bg-white px-3 py-2 font-black">{label}</td><td className="px-2 py-2">{stat.PA}</td><td className="px-2 py-2">{stat.AB}</td><td className="px-2 py-2">{stat.H}</td><td className="px-2 py-2">{stat.D2}</td><td className="px-2 py-2">{stat.D3}</td><td className="px-2 py-2">{stat.HR}</td><td className="px-2 py-2">{stat.R}</td><td className="px-2 py-2">{stat.RBI}</td><td className="px-2 py-2">{stat.BB}</td><td className="px-2 py-2">{stat.K}</td><td className="px-2 py-2">{average(stat.H, stat.AB)}</td><td className="px-2 py-2">{ops(stat)}</td>
+                          </tr>
+                        )
+                      ))}
+                      {tournamentStatsRows.length === 0 && <tr><td className="px-3 py-4 text-sm font-semibold text-slate-500" colSpan={tournamentStatsType === "pitching" ? 9 : 13}>No completed tournament stats match this view yet.</td></tr>}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            ) : (
+              <ReadOnlyTournamentBracketCanvas
+                tournament={activeGameTournament}
+                league={activeGameTournamentContext?.league || selectedLeague}
+                leagues={leagues}
+                previousGames={previousGames}
+                scheduledGames={activeGameTournamentContext?.week?.games || []}
+                heightClassName="h-[calc(100vh-5.5rem)] max-h-none"
+                showLoserConnectors
+                fitToContainer
+                onMatchupClick={openLiveTournamentMatchupAction}
+              />
+            )}
+          </div>
+        ), document.body)}
+
+        {historyTournamentViewer && typeof document !== "undefined" && createPortal((
+          <div className="fixed inset-0 bg-white p-3 text-slate-900" style={{ zIndex: 2147483647 }} onClick={(event) => event.stopPropagation()}>
+            <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+              <div className="min-w-0">
+                <div className="text-xs font-black uppercase tracking-wide text-slate-500">Tournament</div>
+                <h2 className="truncate text-xl font-black">{historyTournamentViewer.title || "Tournament"}</h2>
+              </div>
+              <div className="flex flex-wrap items-center justify-end gap-2">
+                <div className="flex rounded-full border bg-slate-50 p-1">
+                  <button type="button" className={`rounded-full px-3 py-1 text-xs font-black uppercase ${historyTournamentViewer.view === "bracket" ? "bg-slate-900 text-white" : "text-slate-500"}`} onClick={() => setHistoryTournamentViewer((prev) => ({ ...prev, view: "bracket" }))}>Bracket</button>
+                  <button type="button" className={`rounded-full px-3 py-1 text-xs font-black uppercase ${historyTournamentViewer.view === "stats" ? "bg-slate-900 text-white" : "text-slate-500"}`} onClick={() => setHistoryTournamentViewer((prev) => ({ ...prev, view: "stats" }))}>Stats</button>
+                  {historyTournamentViewer.tournament?.type === "round_robin" && <button type="button" className={`rounded-full px-3 py-1 text-xs font-black uppercase ${historyTournamentViewer.view === "standings" ? "bg-slate-900 text-white" : "text-slate-500"}`} onClick={() => setHistoryTournamentViewer((prev) => ({ ...prev, view: "standings" }))}>Standings</button>}
+                </div>
+                <Button variant="outline" onClick={() => { setHistoryTournamentViewer(null); setHistoryTournamentStats(null); }}>Exit</Button>
+              </div>
+            </div>
+            {historyTournamentViewer.view === "standings" && historyTournamentViewer.tournament?.type === "round_robin" ? (
+              <div className="h-[calc(100vh-5.5rem)] overflow-auto rounded-2xl border bg-white p-3">
+                <div className="mb-3 rounded-xl border bg-slate-50 p-3 text-sm font-bold text-slate-600">Round-robin standings from completed tournament games.</div>
+                <div className="overflow-auto rounded-xl border">
+                  <table className="min-w-full text-left text-sm">
+                    <thead className="bg-slate-50 text-xs font-black uppercase text-slate-500"><tr><th className="px-3 py-2">Team</th><th className="px-2 py-2">W</th><th className="px-2 py-2">L</th><th className="px-2 py-2">RD</th></tr></thead>
+                    <tbody>
+                      {buildRoundRobinStandings(historyTournamentViewer.league || {}, historyTournamentViewer.season || {}, historyTournamentViewer.tournament, previousGames).map((row) => (
+                        <tr key={`history-rr-standings-${row.teamId}`} className="border-t"><td className="px-3 py-2 font-black">{row.teamName}</td><td className="px-2 py-2">{row.W}</td><td className="px-2 py-2">{row.L}</td><td className="px-2 py-2">{row.RD}</td></tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            ) : historyTournamentViewer.view === "stats" ? (
+              <div className="h-[calc(100vh-5.5rem)] overflow-auto rounded-2xl border bg-white p-3">
+                <div className="mb-3 grid gap-2 md:grid-cols-3 md:items-end">
+                  <div>
+                    <label className="text-xs font-black uppercase text-slate-500">Group</label>
+                    <select className="mt-1 w-full rounded-xl border px-3 py-2 text-sm font-semibold" value={tournamentStatsGroup} onChange={(event) => setTournamentStatsGroup(event.target.value)}>
+                      <option value="player">Player</option>
+                      <option value="team">Team</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="text-xs font-black uppercase text-slate-500">Stats</label>
+                    <select className="mt-1 w-full rounded-xl border px-3 py-2 text-sm font-semibold" value={tournamentStatsType} onChange={(event) => { const nextType = event.target.value; setTournamentStatsType(nextType); setTournamentStatsSort(nextType === "pitching" ? "IP" : "H"); }}>
+                      <option value="hitting">Hitting</option>
+                      <option value="pitching">Pitching</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="text-xs font-black uppercase text-slate-500">Sort</label>
+                    <select className="mt-1 w-full rounded-xl border px-3 py-2 text-sm font-semibold" value={tournamentStatsSortOptions.includes(tournamentStatsSort) ? tournamentStatsSort : tournamentStatsSortOptions[0]} onChange={(event) => setTournamentStatsSort(event.target.value)}>
+                      {tournamentStatsSortOptions.map((option) => <option key={`viewer-tournament-sort-${option}`} value={option}>{option}</option>)}
+                    </select>
+                  </div>
+                </div>
+                <div className="mb-3 rounded-xl border bg-slate-50 p-3 text-sm font-bold text-slate-600">
+                  {(historyTournamentStats?.games || []).length} completed game{(historyTournamentStats?.games || []).length === 1 ? "" : "s"} included.
+                </div>
+                <div className="overflow-auto rounded-xl border">
+                  <table className="min-w-full text-left text-sm">
+                    <thead className="bg-slate-50 text-xs font-black uppercase text-slate-500">
+                      {tournamentStatsType === "pitching" ? (
+                        <tr><th className="sticky left-0 bg-slate-50 px-3 py-2">{tournamentStatsGroup === "team" ? "Team" : "Player"}</th><th className="px-2 py-2">IP</th><th className="px-2 py-2">ERA</th><th className="px-2 py-2">WHIP</th><th className="px-2 py-2">H</th><th className="px-2 py-2">R</th><th className="px-2 py-2">BB</th><th className="px-2 py-2">K</th><th className="px-2 py-2">HR</th></tr>
+                      ) : (
+                        <tr><th className="sticky left-0 bg-slate-50 px-3 py-2">{tournamentStatsGroup === "team" ? "Team" : "Player"}</th><th className="px-2 py-2">PA</th><th className="px-2 py-2">AB</th><th className="px-2 py-2">H</th><th className="px-2 py-2">2B</th><th className="px-2 py-2">3B</th><th className="px-2 py-2">HR</th><th className="px-2 py-2">R</th><th className="px-2 py-2">RBI</th><th className="px-2 py-2">BB</th><th className="px-2 py-2">K</th><th className="px-2 py-2">AVG</th><th className="px-2 py-2">OPS</th></tr>
+                      )}
+                    </thead>
+                    <tbody>
+                      {historyTournamentStatsRows.map(([label, stat]) => (
+                        tournamentStatsType === "pitching" ? (
+                          <tr key={`viewer-tournament-pitch-${label}`} className="border-t">
+                            <td className="sticky left-0 bg-white px-3 py-2 font-black">{label}</td><td className="px-2 py-2">{formatInningsPitched(stat.OUTS)}</td><td className="px-2 py-2">{era(stat, gameInnings)}</td><td className="px-2 py-2">{whip(stat)}</td><td className="px-2 py-2">{stat.H}</td><td className="px-2 py-2">{stat.R}</td><td className="px-2 py-2">{stat.BB}</td><td className="px-2 py-2">{stat.K}</td><td className="px-2 py-2">{stat.HR}</td>
+                          </tr>
+                        ) : (
+                          <tr key={`viewer-tournament-hit-${label}`} className="border-t">
+                            <td className="sticky left-0 bg-white px-3 py-2 font-black">{label}</td><td className="px-2 py-2">{stat.PA}</td><td className="px-2 py-2">{stat.AB}</td><td className="px-2 py-2">{stat.H}</td><td className="px-2 py-2">{stat.D2}</td><td className="px-2 py-2">{stat.D3}</td><td className="px-2 py-2">{stat.HR}</td><td className="px-2 py-2">{stat.R}</td><td className="px-2 py-2">{stat.RBI}</td><td className="px-2 py-2">{stat.BB}</td><td className="px-2 py-2">{stat.K}</td><td className="px-2 py-2">{average(stat.H, stat.AB)}</td><td className="px-2 py-2">{ops(stat)}</td>
+                          </tr>
+                        )
+                      ))}
+                      {historyTournamentStatsRows.length === 0 && <tr><td className="px-3 py-4 text-sm font-semibold text-slate-500" colSpan={tournamentStatsType === "pitching" ? 9 : 13}>No completed tournament stats match this view yet.</td></tr>}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            ) : (
+              <ReadOnlyTournamentBracketCanvas
+                tournament={historyTournamentViewer.tournament}
+                league={historyTournamentViewer.league}
+                leagues={leagues}
+                previousGames={previousGames}
+                scheduledGames={historyTournamentViewer.week?.games || []}
+                heightClassName="h-[calc(100vh-5.5rem)] max-h-none"
+                showLoserConnectors
+                fitToContainer
+                onMatchupClick={(matchup) => openHistoryTournamentMatchupResults(historyTournamentViewer.group, matchup)}
+              />
+            )}
+          </div>
+        ), document.body)}
+
+        {historyTournamentStats && !historyTournamentViewer && typeof document !== "undefined" && createPortal((
+          <div className="fixed inset-0 bg-white p-3 text-slate-900" style={{ zIndex: 2147483647 }} onClick={(event) => event.stopPropagation()}>
+            <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+              <div className="min-w-0">
+                <div className="text-xs font-black uppercase tracking-wide text-slate-500">Tournament Stats</div>
+                <h2 className="truncate text-xl font-black">{historyTournamentStats.title || "Tournament"}</h2>
+              </div>
+              <Button variant="outline" onClick={() => setHistoryTournamentStats(null)}>Exit</Button>
+            </div>
+            <div className="h-[calc(100vh-5.5rem)] overflow-auto rounded-2xl border bg-white p-3">
+              <div className="mb-3 grid gap-2 md:grid-cols-3 md:items-end">
+                <div>
+                  <label className="text-xs font-black uppercase text-slate-500">Group</label>
+                  <select className="mt-1 w-full rounded-xl border px-3 py-2 text-sm font-semibold" value={tournamentStatsGroup} onChange={(event) => setTournamentStatsGroup(event.target.value)}>
+                    <option value="player">Player</option>
+                    <option value="team">Team</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="text-xs font-black uppercase text-slate-500">Stats</label>
+                  <select className="mt-1 w-full rounded-xl border px-3 py-2 text-sm font-semibold" value={tournamentStatsType} onChange={(event) => { const nextType = event.target.value; setTournamentStatsType(nextType); setTournamentStatsSort(nextType === "pitching" ? "IP" : "H"); }}>
+                    <option value="hitting">Hitting</option>
+                    <option value="pitching">Pitching</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="text-xs font-black uppercase text-slate-500">Sort</label>
+                  <select className="mt-1 w-full rounded-xl border px-3 py-2 text-sm font-semibold" value={tournamentStatsSortOptions.includes(tournamentStatsSort) ? tournamentStatsSort : tournamentStatsSortOptions[0]} onChange={(event) => setTournamentStatsSort(event.target.value)}>
+                    {tournamentStatsSortOptions.map((option) => <option key={`history-tournament-sort-${option}`} value={option}>{option}</option>)}
+                  </select>
+                </div>
+              </div>
+              <div className="mb-3 rounded-xl border bg-slate-50 p-3 text-sm font-bold text-slate-600">
+                {(historyTournamentStats.games || []).length} completed game{(historyTournamentStats.games || []).length === 1 ? "" : "s"} included.
+              </div>
+              <div className="overflow-auto rounded-xl border">
+                <table className="min-w-full text-left text-sm">
+                  <thead className="bg-slate-50 text-xs font-black uppercase text-slate-500">
+                    {tournamentStatsType === "pitching" ? (
+                      <tr><th className="sticky left-0 bg-slate-50 px-3 py-2">{tournamentStatsGroup === "team" ? "Team" : "Player"}</th><th className="px-2 py-2">IP</th><th className="px-2 py-2">ERA</th><th className="px-2 py-2">WHIP</th><th className="px-2 py-2">H</th><th className="px-2 py-2">R</th><th className="px-2 py-2">BB</th><th className="px-2 py-2">K</th><th className="px-2 py-2">HR</th></tr>
+                    ) : (
+                      <tr><th className="sticky left-0 bg-slate-50 px-3 py-2">{tournamentStatsGroup === "team" ? "Team" : "Player"}</th><th className="px-2 py-2">PA</th><th className="px-2 py-2">AB</th><th className="px-2 py-2">H</th><th className="px-2 py-2">2B</th><th className="px-2 py-2">3B</th><th className="px-2 py-2">HR</th><th className="px-2 py-2">R</th><th className="px-2 py-2">RBI</th><th className="px-2 py-2">BB</th><th className="px-2 py-2">K</th><th className="px-2 py-2">AVG</th><th className="px-2 py-2">OPS</th></tr>
+                    )}
+                  </thead>
+                  <tbody>
+                    {historyTournamentStatsRows.map(([label, stat]) => (
+                      tournamentStatsType === "pitching" ? (
+                        <tr key={`history-tournament-pitch-${label}`} className="border-t">
+                          <td className="sticky left-0 bg-white px-3 py-2 font-black">{label}</td><td className="px-2 py-2">{formatInningsPitched(stat.OUTS)}</td><td className="px-2 py-2">{era(stat, gameInnings)}</td><td className="px-2 py-2">{whip(stat)}</td><td className="px-2 py-2">{stat.H}</td><td className="px-2 py-2">{stat.R}</td><td className="px-2 py-2">{stat.BB}</td><td className="px-2 py-2">{stat.K}</td><td className="px-2 py-2">{stat.HR}</td>
+                        </tr>
+                      ) : (
+                        <tr key={`history-tournament-hit-${label}`} className="border-t">
+                          <td className="sticky left-0 bg-white px-3 py-2 font-black">{label}</td><td className="px-2 py-2">{stat.PA}</td><td className="px-2 py-2">{stat.AB}</td><td className="px-2 py-2">{stat.H}</td><td className="px-2 py-2">{stat.D2}</td><td className="px-2 py-2">{stat.D3}</td><td className="px-2 py-2">{stat.HR}</td><td className="px-2 py-2">{stat.R}</td><td className="px-2 py-2">{stat.RBI}</td><td className="px-2 py-2">{stat.BB}</td><td className="px-2 py-2">{stat.K}</td><td className="px-2 py-2">{average(stat.H, stat.AB)}</td><td className="px-2 py-2">{ops(stat)}</td>
+                        </tr>
+                      )
+                    ))}
+                    {historyTournamentStatsRows.length === 0 && <tr><td className="px-3 py-4 text-sm font-semibold text-slate-500" colSpan={tournamentStatsType === "pitching" ? 9 : 13}>No completed tournament stats match this view yet.</td></tr>}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        ), document.body)}
+
+        {tournamentMatchupAction && typeof document !== "undefined" && createPortal((
+          <div className="fixed inset-0 flex items-center justify-center bg-slate-900/60 p-4" style={{ zIndex: 2147483647 }} onClick={(event) => event.stopPropagation()}>
+            <div className="max-h-[88vh] w-full max-w-lg overflow-auto rounded-3xl bg-white p-5 shadow-xl">
+              <div className="text-xs font-black uppercase tracking-wide text-blue-600">Tournament Matchup</div>
+              <h2 className="mt-1 text-2xl font-black">Open matchup</h2>
+              <div className="mt-3 rounded-xl border bg-slate-50 p-3 text-sm font-bold text-slate-700">
+                {getTournamentSideLabel(tournamentMatchupAction.context?.league, tournamentMatchupAction.context?.tournament, tournamentMatchupAction.matchup, "one", leagues)}
+                <span className="px-2 text-slate-400">vs</span>
+                {getTournamentSideLabel(tournamentMatchupAction.context?.league, tournamentMatchupAction.context?.tournament, tournamentMatchupAction.matchup, "two", leagues)}
+              </div>
+              {(tournamentMatchupAction.liveGames || []).length > 0 && (
+                <div className="mt-4 space-y-2">
+                  <div className="text-xs font-black uppercase text-slate-500">Current Game</div>
+                  {tournamentMatchupAction.liveGames.map((savedGame) => (
+                    <div key={`matchup-action-live-${savedGame.id}`} className="rounded-xl border bg-white p-3">
+                      <div className="text-sm font-black">{savedGame.awayTeam} {savedGame.awayScore} - {savedGame.homeScore} {savedGame.homeTeam}</div>
+                      <div className="mt-1 text-xs font-bold uppercase text-slate-500">{savedGame.status === "paused" ? "Paused" : "Live"}</div>
+                      <div className="mt-3 flex flex-wrap gap-2">
+                        <Button variant="primary" onClick={() => { setTournamentMatchupAction(null); setGameTournamentBracketOpen(false); openSavedGame(savedGame); }}>Score Game</Button>
+                        <Button variant="outline" onClick={() => { setTournamentMatchupAction(null); setGameTournamentBracketOpen(false); loadSavedGame(savedGame, { broadcast: false }); setGamesPageMode("view"); setActivePage("score"); window.setTimeout(() => setFullscreenGameViewOpen(true), 50); }}>View Game</Button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {(tournamentMatchupAction.finalGames || []).length > 0 && (
+                <div className="mt-4 space-y-2">
+                  <div className="text-xs font-black uppercase text-slate-500">Completed Games</div>
+                  {tournamentMatchupAction.finalGames.map((savedGame, index) => (
+                    <button key={`matchup-action-final-${savedGame.id}`} type="button" className="w-full rounded-xl border bg-slate-50 p-3 text-left text-sm font-bold hover:bg-white" onClick={() => { setTournamentMatchupAction(null); setTournamentGameDetail(savedGame); }}>
+                      Game {index + 1}: {savedGame.awayTeam} {savedGame.awayScore} - {savedGame.homeScore} {savedGame.homeTeam}
+                    </button>
+                  ))}
+                </div>
+              )}
+              {tournamentMatchupAction.canStart && (
+                <div className="mt-4 rounded-xl border border-green-200 bg-green-50 p-3">
+                  <div className="text-sm font-black text-green-900">This matchup is ready to start.</div>
+                  <Button className="mt-3 w-full" variant="primary" onClick={startTournamentMatchupFromAction}>Start Game</Button>
+                </div>
+              )}
+              {!tournamentMatchupAction.canStart && (tournamentMatchupAction.liveGames || []).length === 0 && (tournamentMatchupAction.finalGames || []).length === 0 && (
+                <div className="mt-4 rounded-xl border bg-slate-50 p-3 text-sm font-semibold text-slate-500">This matchup is not ready yet.</div>
+              )}
+              <div className="mt-5 flex justify-end">
+                <Button variant="outline" onClick={() => setTournamentMatchupAction(null)}>Cancel</Button>
+              </div>
+            </div>
+          </div>
+        ), document.body)}
+
+        {tournamentGamePicker && typeof document !== "undefined" && createPortal((
+          <div className="fixed inset-0 flex items-center justify-center bg-slate-900/60 p-4" style={{ zIndex: 2147483647 }} onClick={(event) => event.stopPropagation()}>
+            <div className="max-h-[85vh] w-full max-w-lg overflow-auto rounded-3xl bg-white p-5 shadow-xl">
+              <div className="text-xs font-black uppercase tracking-wide text-slate-500">Tournament Matchup</div>
+              <h2 className="mt-1 text-2xl font-black">Choose a game to view</h2>
+              <div className="mt-4 space-y-2">
+                {(tournamentGamePicker.games || []).map((savedGame, index) => (
+                  <button
+                    key={savedGame.id}
+                    type="button"
+                    className="w-full rounded-xl border bg-slate-50 px-4 py-3 text-left text-sm font-bold hover:bg-white"
+                    onClick={() => { setTournamentGameDetail(savedGame); setTournamentGamePicker(null); }}
+                  >
+                    Game {index + 1}: {savedGame.awayTeam} {savedGame.awayScore} - {savedGame.homeScore} {savedGame.homeTeam}
+                  </button>
+                ))}
+              </div>
+              <div className="mt-5 flex justify-end">
+                <Button variant="outline" onClick={() => setTournamentGamePicker(null)}>Cancel</Button>
+              </div>
+            </div>
+          </div>
+        ), document.body)}
+
+        {tournamentGameDetail && typeof document !== "undefined" && createPortal((
+          <div className="fixed inset-0 flex items-center justify-center bg-slate-900/60 p-3" style={{ zIndex: 2147483647 }} onClick={(event) => event.stopPropagation()}>
+            <div className="max-h-[92vh] w-full max-w-6xl overflow-auto rounded-3xl bg-white p-4 shadow-xl sm:p-5">
+              <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <div className="text-xs font-black uppercase tracking-wide text-slate-500">Tournament Game</div>
+                  <h2 className="text-2xl font-black">{tournamentGameDetail.awayTeam} {tournamentGameDetail.awayScore} - {tournamentGameDetail.homeScore} {tournamentGameDetail.homeTeam}</h2>
+                </div>
+                <Button variant="outline" onClick={() => setTournamentGameDetail(null)}>Close</Button>
+              </div>
+              <div className="space-y-4">
+                <SavedLineScore savedGame={tournamentGameDetail} />
+                <TeamStatsSection
+                  awayTeam={tournamentGameDetail.awayTeam}
+                  homeTeam={tournamentGameDetail.homeTeam}
+                  awayPlayers={tournamentGameDetail.teamPlayers?.away || []}
+                  homePlayers={tournamentGameDetail.teamPlayers?.home || []}
+                  battingStats={tournamentGameDetail.stats}
+                  pitchingStats={tournamentGameDetail.pitchingStats}
+                  subIndex={buildSubIndexFromSavedGames([tournamentGameDetail], "career")}
+                />
+                <div className="rounded-2xl border bg-white p-4">
+                  <h3 className="mb-3 text-lg font-black">Game Log</h3>
+                  <EventLogList events={tournamentGameDetail.events || []} awayTeam={tournamentGameDetail.awayTeam} homeTeam={tournamentGameDetail.homeTeam} />
+                </div>
+              </div>
+            </div>
           </div>
         ), document.body)}
 
@@ -15327,7 +16767,12 @@ export default function WiffleScoringPrototype() {
                     const rawVisibleGames = (week.games || []).filter((scheduledGame) => !selectedCurrentSeason.sessionsEnabled || scheduledGame.sessionId === (selectedCurrentSeason.currentSessionId || selectedCurrentSeason.sessions[0]?.id || ""));
                     const weekFieldName = (selectedLeague.fields || []).find((field) => field.id === week.fieldId)?.name || "No field";
                     const weekHasPendingChanges = Boolean(dirtyScheduleWeekIds[week.id]);
-                    const scheduleTournament = (selectedLeagueTournaments || []).find((tournament) => tournament.id === week.sourceTournamentId) || null;
+                    const weekHasSavedResults = scheduleWeekHasSavedResults(week, previousGames);
+                    const rawScheduleTournament = week.scheduledTournament?.id
+                      ? week.scheduledTournament
+                      : (selectedLeagueTournaments || []).find((tournament) => tournament.id === week.sourceTournamentId) || getWeekTournament(week, selectedLeague);
+                    const scheduleTournament = rawScheduleTournament ? getTournamentWithCompletedGames(selectedLeague, selectedCurrentSeason, rawScheduleTournament, previousGames, leagues) : null;
+                    const scheduleTournamentIsApplied = Boolean(week.scheduledTournament?.id);
                     const scheduleTournamentTeamOptions = scheduleTournament ? getTournamentTeamOptionsFromLeagues(leagues, scheduleTournament, scheduleTournament.leagueIds?.length ? selectedLeague : {}) : [];
                     const scheduleTournamentColumns = scheduleTournament ? getTournamentRoundColumns(scheduleTournament.matchups || [], scheduleTournament.type === "custom" ? scheduleTournament.customRounds || [] : []) : [];
                     const visibleGames = scheduleTournament
@@ -15338,10 +16783,11 @@ export default function WiffleScoringPrototype() {
                       const home = selectedLeague.teams?.find((team) => team.id === scheduledGame.homeTeamId)?.name || scheduledGame.homeTeamName || "Home TBD";
                       const seriesTeamOne = selectedLeague.teams?.find((team) => team.id === scheduledGame.seriesTeamOneId)?.name || scheduledGame.seriesTeamOneName || "Team TBD";
                       const seriesTeamTwo = selectedLeague.teams?.find((team) => team.id === scheduledGame.seriesTeamTwoId)?.name || scheduledGame.seriesTeamTwoName || "Team TBD";
+                      const tournamentNeedsGameTimeHomeAway = Boolean(week.isTournament && scheduledGame.seriesHomeAwayMode === "game_time");
                       return {
                         id: scheduledGame.id || `${week.id}-${gameIndex}`,
-                        label: week.isTournament && scheduledGame.seriesLength
-                          ? `${formatTimeDisplay(scheduledGame.time || defaultScheduleTimeValue())} · ${scheduledGame.name || `Series ${gameIndex + 1}`} · ${seriesTeamOne} vs ${seriesTeamTwo} · Best of ${scheduledGame.seriesLength}`
+                        label: week.isTournament && (scheduledGame.seriesLength || tournamentNeedsGameTimeHomeAway)
+                          ? `${formatTimeDisplay(scheduledGame.time || defaultScheduleTimeValue())} · ${scheduledGame.name || `${scheduledGame.seriesLength ? "Series" : "Matchup"} ${gameIndex + 1}`} · ${seriesTeamOne} vs ${seriesTeamTwo}${scheduledGame.seriesLength ? ` · Best of ${scheduledGame.seriesLength}` : ""}`
                           : `${formatTimeDisplay(scheduledGame.time || defaultScheduleTimeValue())} · ${away} vs ${home}`,
                       };
                     });
@@ -15367,11 +16813,11 @@ export default function WiffleScoringPrototype() {
                             <div className="mt-1 flex flex-wrap gap-2 text-xs font-bold text-slate-500">
                               <span>{week.date || "No date"}</span>
                               <span>{weekFieldName}</span>
-                              <span>{visibleGames.length} game{visibleGames.length === 1 ? "" : "s"}</span>
+                              <span>{visibleGames.length} {week.isTournament ? `matchup${visibleGames.length === 1 ? "" : "s"}` : `game${visibleGames.length === 1 ? "" : "s"}`}</span>
                             </div>
                             <div className="mt-2 grid gap-1.5 text-[11px] font-semibold text-slate-600 sm:grid-cols-2 xl:grid-cols-3">
                               {quickGames.map((summary) => <span key={summary.id} className="min-w-0 rounded-lg bg-white px-2 py-1.5">{summary.label}</span>)}
-                              {visibleGames.length === 0 && <span className="rounded-full bg-white px-2 py-1">No games yet</span>}
+                              {visibleGames.length === 0 && <span className="rounded-full bg-white px-2 py-1">No {week.isTournament ? "matchups" : "games"} yet</span>}
                             </div>
                           </div>
                           <div className="flex shrink-0 flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center lg:justify-end">
@@ -15421,10 +16867,11 @@ export default function WiffleScoringPrototype() {
                           </select>
                         </div>
                         <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap lg:col-span-3">
-                          <Button variant="outline" onClick={() => addScheduledGame(selectedCurrentSeason.id, week.id)} disabled={!week.date || !week.fieldId}>{week.isTournament ? "+ Add Game or Series" : "+ Add Game"}</Button>
-                          <Button variant="outline" onClick={() => removeScheduleWeek(selectedCurrentSeason.id, week.id)}>Remove Week</Button>
+                          <Button variant="outline" onClick={() => addScheduledGame(selectedCurrentSeason.id, week.id)} disabled={!week.date || !week.fieldId}>{week.isTournament ? "+ Add Matchup or Series" : "+ Add Game"}</Button>
+                          <Button variant="outline" disabled={weekHasSavedResults} onClick={() => removeScheduleWeek(selectedCurrentSeason.id, week.id)}>Remove Week</Button>
                         </div>
                         {(!week.date || !week.fieldId) && <p className="text-xs font-semibold text-red-600 lg:col-span-3">Week date and field are required before games can be added or used in setup.</p>}
+                        {weekHasSavedResults && <p className="text-xs font-semibold text-amber-700 lg:col-span-3">This week has saved results. Erase those games from Results before removing the week.</p>}
                       </div>
 
                       {week.isTournament && (
@@ -15450,7 +16897,7 @@ export default function WiffleScoringPrototype() {
                                 <option value="">Select tournament</option>
                                 {(selectedLeagueTournaments || []).map((tournament) => (
                                   <option key={tournament.id} value={tournament.id}>
-                                    {tournament.name || "Untitled Tournament"} · {tournamentTypeLabel(tournament.type)} · {(tournament.participants || []).length} seed slot{(tournament.participants || []).length === 1 ? "" : "s"}
+                                    {tournament.name || "Untitled Tournament"} · {tournamentTypeLabel(tournament.type)} · {(tournament.participants || []).length} seed slot{(tournament.participants || []).length === 1 ? "" : "s"}{tournament.sourceLeagueName ? ` · ${tournament.sourceLeagueName}` : ""}
                                   </option>
                                 ))}
                               </select>
@@ -15495,7 +16942,23 @@ export default function WiffleScoringPrototype() {
                                 </div>
                               </div>
 
-                              {(week.tournamentSeedTiming || "later") === "now" && (
+                              {(week.tournamentSeedTiming || "later") === "later" && scheduleTournamentIsApplied && (
+                                <div className="rounded-xl border border-amber-200 bg-amber-50 p-3">
+                                  <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                                    <div>
+                                      <div className="text-sm font-black text-amber-950">Seeds are not selected yet</div>
+                                      <p className="text-xs font-semibold text-amber-800">Tournament matchups stay unavailable until each seed slot has a team assigned.</p>
+                                    </div>
+                                    <Button variant="outline" onClick={() => updateScheduleWeek(selectedCurrentSeason.id, week.id, "tournamentSeedTiming", "now")}>Select Seeds</Button>
+                                  </div>
+                                </div>
+                              )}
+
+                              {(week.tournamentSeedTiming || "later") === "now" && !scheduleTournamentIsApplied && (
+                                <p className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm font-bold text-amber-900">Apply the tournament to this week before assigning teams to seeds. The tournament page version will stay as the reusable template.</p>
+                              )}
+
+                              {(week.tournamentSeedTiming || "later") === "now" && scheduleTournamentIsApplied && (
                                 <div className="rounded-xl border bg-white p-3">
                                   <div className="mb-2 text-sm font-black">Tournament Seeds</div>
                                   {scheduleTournamentTeamOptions.length > 0 ? (
@@ -15511,7 +16974,7 @@ export default function WiffleScoringPrototype() {
                                               <tr key={participant.id} className="border-t">
                                                 <td className="px-2 py-2 font-black">Bracket {participant.bracket || 1}, Seed {participant.seed || "-"}</td>
                                                 <td className="px-2 py-2">
-                                                  <select className="w-full rounded-xl border px-3 py-2 text-sm" value={participant.teamId || ""} onChange={(event) => updateTournamentParticipant(scheduleTournament.id, participant.id, "teamId", event.target.value)}>
+                                                  <select className="w-full rounded-xl border px-3 py-2 text-sm" value={participant.teamId || ""} onChange={(event) => updateScheduledTournamentParticipant(selectedCurrentSeason.id, week.id, participant.id, "teamId", event.target.value)}>
                                                     <option value="">Assign later</option>
                                                     {scheduleTournamentTeamOptions.map((team) => {
                                                       const disabled = selectedTeamIds.has(team.id);
@@ -15532,7 +16995,7 @@ export default function WiffleScoringPrototype() {
                                         const customTeamPlayersBySeed = Object.fromEntries((scheduleTournament.participants || []).map((item) => [item.id, cleanRoster(item.customPlayers || [])]));
                                         const updateCustomPlayers = (updater) => {
                                           const nextPlayers = typeof updater === "function" ? updater(cleanRoster(participant.customPlayers || [])) : updater;
-                                          updateTournamentParticipant(scheduleTournament.id, participant.id, "customPlayers", nextPlayers);
+                                          updateScheduledTournamentParticipant(selectedCurrentSeason.id, week.id, participant.id, "customPlayers", nextPlayers);
                                         };
                                         return (
                                           <div key={participant.id} className="rounded-xl border bg-slate-50 p-3">
@@ -15540,7 +17003,7 @@ export default function WiffleScoringPrototype() {
                                               <div className="text-sm font-black text-slate-700">Bracket {participant.bracket || 1}, Seed {participant.seed || "-"}</div>
                                               <div>
                                                 <label className="text-xs font-semibold uppercase text-slate-500">Team Name</label>
-                                                <input className="mt-1 w-full rounded-xl border px-3 py-2 text-sm" value={participant.customTeamName || ""} onChange={(event) => updateTournamentParticipant(scheduleTournament.id, participant.id, "customTeamName", event.target.value)} placeholder={`Custom team for seed ${participant.seed || "-"}`} />
+                                                <input className="mt-1 w-full rounded-xl border px-3 py-2 text-sm" value={participant.customTeamName || ""} onChange={(event) => updateScheduledTournamentParticipant(selectedCurrentSeason.id, week.id, participant.id, "customTeamName", event.target.value)} placeholder={`Custom team for seed ${participant.seed || "-"}`} />
                                               </div>
                                             </div>
                                             <div className="mt-3">
@@ -15575,7 +17038,7 @@ export default function WiffleScoringPrototype() {
                                   <div className="text-sm font-black">Tournament Bracket</div>
                                   <span className="rounded-full bg-slate-100 px-2 py-1 text-xs font-black uppercase text-slate-500">{(scheduleTournament.matchups || []).length} matchup{(scheduleTournament.matchups || []).length === 1 ? "" : "s"}</span>
                                 </div>
-                                <ReadOnlyTournamentBracketCanvas tournament={scheduleTournament} league={selectedLeague} leagues={leagues} previousGames={previousGames} heightClassName="max-h-[34rem]" />
+                                <ReadOnlyTournamentBracketCanvas tournament={scheduleTournament} league={selectedLeague} leagues={leagues} previousGames={previousGames} scheduledGames={visibleGames} heightClassName="max-h-[34rem]" fitToContainer />
                               </div>
                             </div>
                           )}
@@ -15588,6 +17051,7 @@ export default function WiffleScoringPrototype() {
                             const away = selectedLeague.teams?.find((team) => team.id === scheduledGame.awayTeamId)?.name || scheduledGame.awayTeamName || "Away TBD";
                             const home = selectedLeague.teams?.find((team) => team.id === scheduledGame.homeTeamId)?.name || scheduledGame.homeTeamName || "Home TBD";
                             const scheduledItemIsSeries = Boolean(week.isTournament && scheduledGame.seriesLength);
+                            const scheduledItemNeedsGameTimeHomeAway = Boolean(week.isTournament && scheduledGame.seriesHomeAwayMode === "game_time");
                             const seriesTeamOne = selectedLeague.teams?.find((team) => team.id === scheduledGame.seriesTeamOneId)?.name || scheduledGame.seriesTeamOneName || "Team 1 TBD";
                             const seriesTeamTwo = selectedLeague.teams?.find((team) => team.id === scheduledGame.seriesTeamTwoId)?.name || scheduledGame.seriesTeamTwoName || "Team 2 TBD";
                             return (
@@ -15605,10 +17069,10 @@ export default function WiffleScoringPrototype() {
                               >
                                 <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
                                   <div className="min-w-0">
-                                    <div className="truncate text-sm font-black">{scheduledGame.name || `${scheduledItemIsSeries ? "Series" : "Game"} ${gameIndex + 1}`}</div>
+                                    <div className="truncate text-sm font-black">{scheduledGame.name || `${scheduledItemIsSeries ? "Series" : week.isTournament ? "Matchup" : "Game"} ${gameIndex + 1}`}</div>
                                     <div className="mt-1 text-xs font-semibold text-slate-500">
-                                      {scheduledItemIsSeries
-                                        ? `${formatTimeDisplay(scheduledGame.time || defaultScheduleTimeValue())} · ${seriesTeamOne} vs ${seriesTeamTwo} · Best of ${scheduledGame.seriesLength}`
+                                      {scheduledItemIsSeries || scheduledItemNeedsGameTimeHomeAway
+                                        ? `${formatTimeDisplay(scheduledGame.time || defaultScheduleTimeValue())} · ${seriesTeamOne} vs ${seriesTeamTwo}${scheduledGame.seriesLength ? ` · Best of ${scheduledGame.seriesLength}` : ""}`
                                         : `${formatTimeDisplay(scheduledGame.time || defaultScheduleTimeValue())} · ${away} vs ${home}`}
                                     </div>
                                   </div>
@@ -15620,8 +17084,8 @@ export default function WiffleScoringPrototype() {
                               </summary>
                               <div className={`grid gap-2 border-t p-3 sm:grid-cols-2 ${scheduledItemIsSeries ? "lg:grid-cols-[minmax(0,1fr)_8rem_8rem]" : "lg:grid-cols-[minmax(0,1fr)_8rem_8rem_minmax(0,1fr)_minmax(0,1fr)]"} lg:items-end`}>
                                 <div>
-                                  <label className="text-xs font-semibold uppercase text-slate-500">{scheduledItemIsSeries ? "Series Name" : "Game Name"}</label>
-                                  <input className="mt-1 w-full rounded-xl border px-3 py-2 text-sm" value={scheduledGame.name || `${scheduledItemIsSeries ? "Series" : "Game"} ${gameIndex + 1}`} onChange={(event) => updateScheduledGame(selectedCurrentSeason.id, week.id, scheduledGame.id, "name", event.target.value)} />
+                                  <label className="text-xs font-semibold uppercase text-slate-500">{scheduledItemIsSeries ? "Series Name" : week.isTournament ? "Matchup Name" : "Game Name"}</label>
+                                  <input className="mt-1 w-full rounded-xl border px-3 py-2 text-sm" value={scheduledGame.name || `${scheduledItemIsSeries ? "Series" : week.isTournament ? "Matchup" : "Game"} ${gameIndex + 1}`} onChange={(event) => updateScheduledGame(selectedCurrentSeason.id, week.id, scheduledGame.id, "name", event.target.value)} />
                                 </div>
                                 <div>
                                   <label className="text-xs font-semibold uppercase text-slate-500">Time</label>
@@ -15697,14 +17161,14 @@ export default function WiffleScoringPrototype() {
                                   </div>
                                 )}
                                 <div className={`sm:col-span-2 ${scheduledItemIsSeries ? "lg:col-span-3" : "lg:col-span-5"} flex flex-col gap-2 sm:flex-row sm:flex-wrap`}>
-                                  <Button variant="outline" onClick={() => addScheduledGame(selectedCurrentSeason.id, week.id)} disabled={!week.date || !week.fieldId}>{week.isTournament ? "+ Add Game or Series" : "+ Add Game"}</Button>
-                                  <Button variant="outline" onClick={() => removeScheduledGame(selectedCurrentSeason.id, week.id, scheduledGame.id)}>{scheduledItemIsSeries ? "Remove Series" : "Remove Game"}</Button>
+                                  <Button variant="outline" onClick={() => addScheduledGame(selectedCurrentSeason.id, week.id)} disabled={!week.date || !week.fieldId}>{week.isTournament ? "+ Add Matchup or Series" : "+ Add Game"}</Button>
+                                  <Button variant="outline" onClick={() => removeScheduledGame(selectedCurrentSeason.id, week.id, scheduledGame.id)}>{scheduledItemIsSeries ? "Remove Series" : week.isTournament ? "Remove Matchup" : "Remove Game"}</Button>
                                 </div>
                               </div>
                             </details>
                           );
                           })}
-                        {visibleGames.length === 0 && <p className="rounded-xl border bg-white p-3 text-sm text-slate-500">No games scheduled for this {selectedCurrentSeason.sessionsEnabled ? "session" : "week"} yet.</p>}
+                        {visibleGames.length === 0 && <p className="rounded-xl border bg-white p-3 text-sm text-slate-500">No {week.isTournament ? "matchups" : "games"} scheduled for this {selectedCurrentSeason.sessionsEnabled ? "session" : "week"} yet.</p>}
                       </div>
                       {weekHasPendingChanges && (
                         <div className="mt-4 flex justify-end border-t pt-4">
@@ -15794,6 +17258,9 @@ export default function WiffleScoringPrototype() {
                           </div>
                           <div className="mt-3 text-xs font-semibold text-slate-500">
                             {tournamentTypeLabel(tournament.type)} · {(tournament.matchups || []).length} matchup{(tournament.matchups || []).length === 1 ? "" : "s"}
+                          </div>
+                          <div className="mt-1 truncate text-xs font-semibold text-slate-500">
+                            Associated: {leagues.filter((league) => (tournament.leagueIds || []).includes(league.id)).map((league) => league.name).join(", ") || "None"}
                           </div>
                           <div className="mt-2 flex flex-wrap gap-2">
                             <span className="rounded-full bg-white px-2 py-1 text-[10px] font-black uppercase text-slate-500">{tournament.status || "setup"}</span>
@@ -16593,6 +18060,11 @@ export default function WiffleScoringPrototype() {
                                   {winnerLayout && (
                                     <>
                                       <h3 className="absolute border-b border-slate-200 pb-2 text-center text-xs font-black uppercase tracking-wide text-slate-500" style={{ left: `${winnerLayout.x}px`, top: `${isSingleEliminationMeetMiddle ? winnerLayout.y - 58 : 0}px`, width: `${winnerColumnWidth}px` }}>Winner</h3>
+                                      {winnerLabel !== "Winner TBD" && (
+                                        <div className="absolute rounded-full bg-green-100 px-2 py-1 text-[10px] font-black uppercase tracking-wide text-green-800" style={{ left: `${winnerLayout.x}px`, top: `${winnerLayout.y - 60}px` }}>
+                                          Complete
+                                        </div>
+                                      )}
                                       <div className="absolute flex h-8 items-center gap-2 pr-1 text-[13px] font-black text-green-800" style={{ left: `${winnerLayout.x}px`, top: `${winnerLayout.y - 32}px`, width: `${winnerColumnWidth}px` }}>
                                         <span className="truncate">{winnerLabel}</span>
                                       </div>
@@ -19400,7 +20872,7 @@ export default function WiffleScoringPrototype() {
                 >
                   <option value="">Select pitcher</option>
                   {cleanRoster(teamPlayers[pendingPitcherChange.teamKey] || []).map((player) => (
-                    <option key={`pitcher-change-${player}`} value={player}>{formatPlayerName(player, subPlayers[pendingPitcherChange.teamKey])}</option>
+                    <option key={`pitcher-change-${player}`} value={player}>{pitcherOptionLabel(player, pendingPitcherChange.teamKey)}</option>
                   ))}
                 </select>
               </div>
@@ -19474,7 +20946,7 @@ export default function WiffleScoringPrototype() {
                   >
                     <option value="">Select pitcher</option>
                     {cleanRoster(teamPlayers[pendingInningNotification.nextDefensiveTeam] || []).map((player) => (
-                      <option key={`next-pitcher-${player}`} value={player}>{formatPlayerName(player, subPlayers[pendingInningNotification.nextDefensiveTeam])}</option>
+                      <option key={`next-pitcher-${player}`} value={player}>{pitcherOptionLabel(player, pendingInningNotification.nextDefensiveTeam)}</option>
                     ))}
                   </select>
                 </div>
@@ -19708,7 +21180,7 @@ export default function WiffleScoringPrototype() {
                           </select>
                         </div>
                         )}
-                        {type !== "double_elimination" && (
+                        {type !== "double_elimination" && type !== "round_robin" && (
                         <div>
                           <label className="text-xs font-semibold uppercase text-slate-500">Final Bracket Matchups</label>
                           <select className="mt-1 w-full rounded-xl border px-3 py-2 text-sm font-semibold" value={tournamentSetupWizard.defaultFinalSeriesLength || ""} onChange={(event) => updateTournamentSetupWizard("defaultFinalSeriesLength", event.target.value)}>
@@ -19719,7 +21191,7 @@ export default function WiffleScoringPrototype() {
                           </select>
                         </div>
                         )}
-                        {type !== "double_elimination" && (
+                        {type !== "double_elimination" && type !== "round_robin" && (
                         <div>
                           <label className="text-xs font-semibold uppercase text-slate-500">Championship Matchup</label>
                           <select className="mt-1 w-full rounded-xl border px-3 py-2 text-sm font-semibold" value={tournamentSetupWizard.defaultChampionshipSeriesLength || ""} onChange={(event) => updateTournamentSetupWizard("defaultChampionshipSeriesLength", event.target.value)}>
@@ -19751,13 +21223,9 @@ export default function WiffleScoringPrototype() {
                         <div>Seed slots: <span className="font-black text-slate-900">{totalSeeds}</span></div>
                         {type === "round_robin" && <div>Format: <span className="font-black text-slate-900">{tournamentSetupWizard.roundRobinRounds === "double" ? "Double round" : "Single round"}</span></div>}
                         {type !== "round_robin" && <div>Flow: <span className="font-black text-slate-900">{(type === "double_elimination" ? "left_to_right" : tournamentSetupWizard.bracketFlow || "left_to_right").split("_").join(" ")}</span></div>}
-                        {type !== "double_elimination" && (
-                          <>
-                        <div>Standard series: <span className="font-black text-slate-900">{seriesLabel(tournamentSetupWizard.defaultSeriesLength || "")}</span></div>
-                        <div>Final bracket series: <span className="font-black text-slate-900">{seriesLabel(tournamentSetupWizard.defaultFinalSeriesLength || "")}</span></div>
-                        <div>Championship series: <span className="font-black text-slate-900">{seriesLabel(tournamentSetupWizard.defaultChampionshipSeriesLength || "")}</span></div>
-                          </>
-                        )}
+                        {type !== "double_elimination" && <div>Standard series: <span className="font-black text-slate-900">{seriesLabel(tournamentSetupWizard.defaultSeriesLength || "")}</span></div>}
+                        {type !== "double_elimination" && type !== "round_robin" && <div>Final bracket series: <span className="font-black text-slate-900">{seriesLabel(tournamentSetupWizard.defaultFinalSeriesLength || "")}</span></div>}
+                        {type !== "double_elimination" && type !== "round_robin" && <div>Championship series: <span className="font-black text-slate-900">{seriesLabel(tournamentSetupWizard.defaultChampionshipSeriesLength || "")}</span></div>}
                         <div>Home/Away: <span className="font-black text-slate-900">{tournamentSetupWizard.defaultHomeAwayMode === "higher_seed_home" ? "Higher seed is home" : "Determine at game time"}</span></div>
                       </div>
                     </div>
@@ -19808,13 +21276,13 @@ export default function WiffleScoringPrototype() {
         {pendingGameDelete && (
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4">
             <div className="w-full max-w-md rounded-3xl bg-white p-5 shadow-xl">
-              <div className="text-xs font-black uppercase tracking-wide text-red-600">Erase Previous Game</div>
+              <div className="text-xs font-black uppercase tracking-wide text-red-600">Erase Result</div>
               <h2 className="mt-1 text-2xl font-black">Erase this game?</h2>
               <div className="mt-3 rounded-xl border bg-slate-50 p-3 text-sm font-semibold text-slate-700">
                 {pendingGameDelete.awayTeam} {pendingGameDelete.awayScore} - {pendingGameDelete.homeTeam} {pendingGameDelete.homeScore}
               </div>
               <p className="mt-3 rounded-xl border border-red-200 bg-red-50 p-3 text-sm font-semibold text-red-700">
-                Erasing this game will remove all record of it from Previous Games, stats, standings, leaderboards, and player totals. This cannot be undone.
+                Erasing this game will remove all record of it from Results, stats, standings, leaderboards, and player totals. This cannot be undone.
               </p>
               <div className="mt-5 flex flex-wrap justify-end gap-2">
                 <Button variant="outline" onClick={() => setPendingGameDelete(null)}>Cancel</Button>
@@ -19859,129 +21327,225 @@ export default function WiffleScoringPrototype() {
               <div className="p-5">
                 <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
                   <div>
-                    <h2 className="text-xl font-bold">Previous Games</h2>
+                    <h2 className="text-xl font-bold">Results</h2>
                     <p className="text-sm text-slate-500">Final games are saved automatically. You can also save a live game and resume it later during the current browser session.</p>
                   </div>
                   <Button variant="primary" onClick={startNewGame}>Start New Game</Button>
                 </div>
+                <div className="mt-4 grid gap-2 sm:grid-cols-[12rem_1fr] sm:items-center">
+                  <label className="text-xs font-black uppercase text-slate-500">Filter by league</label>
+                  <select className="w-full rounded-xl border bg-white px-3 py-2 text-sm font-bold" value={historyLeagueFilter} onChange={(event) => setHistoryLeagueFilter(event.target.value)}>
+                    <option value="all">All</option>
+                    <option value="exhibition">Exhibition Only</option>
+                    {historyLeagueOptions.map((league) => <option key={league.id} value={league.id}>{league.name || "Untitled League"}</option>)}
+                  </select>
+                </div>
               </div>
             </Card>
 
-            {previousGames.length === 0 ? (
+            {previousGames.filter((savedGame) => savedGame.status !== "cancelled").length === 0 ? (
               <Card>
-                <div className="p-5 text-sm text-slate-500">No saved games yet. Finish a game, save a live game, or press Start New Game to archive the current game here.</div>
+                <div className="p-5 text-sm text-slate-500">No results yet. Finish a game, save a live game, or press Start New Game to archive the current game here.</div>
+              </Card>
+            ) : filteredHistoryGroups.length === 0 ? (
+              <Card>
+                <div className="p-5 text-sm text-slate-500">No results match this filter.</div>
               </Card>
             ) : (
-              previousGames.map((savedGame) => (
-                <Card key={savedGame.id}>
-                  <div className="p-5">
-                    <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-                      <div>
-                        <div className="text-xs font-semibold uppercase text-slate-500">{savedGame.gameDate || "No date"} {savedGame.gameTime || ""} · {savedGame.gameLocation || "No location"}</div>
-                        <div className="mt-1 text-2xl font-black">{savedGame.awayTeam} {savedGame.awayScore} — {savedGame.homeTeam} {savedGame.homeScore}</div>
-                        <div className="mt-1 text-sm text-slate-500">Saved {savedGame.savedAt} · {savedGame.eventCount} events · {savedGame.innings} inning(s)</div>
+              filteredHistoryGroups.map((group) => {
+                const groupOpen = expandedHistoryGroupId === group.id;
+                const finalCount = (group.games || []).filter((item) => item.status === "final").length;
+                const liveCount = (group.games || []).filter((item) => item.status !== "final").length;
+                const hydratedTournament = group.type === "tournament"
+                  ? getTournamentWithCompletedGames(group.league, group.season, group.tournament, previousGames, leagues)
+                  : null;
+                const displayLeagueId = group.games?.find((savedGame) => savedGame.savedSetup?.setupLeagueId && savedGame.savedSetup.setupLeagueId !== "custom")?.savedSetup?.setupLeagueId || "";
+                const displayLeagueName = group.league?.name || (leagues || []).find((league) => league.id === displayLeagueId)?.name || displayLeagueId || "";
+                const displayWeekDate = group.week?.date || group.games?.find((savedGame) => savedGame.gameDate)?.gameDate || "";
+                const completedScheduleGames = group.games || [];
+                const schedulePreviewItems = group.type === "week" && group.week
+                  ? (group.week.games || []).map((scheduledGame) => {
+                    const savedGames = completedScheduleGames.filter((savedGame) => savedGame.savedSetup?.selectedScheduledGameId === scheduledGame.id);
+                    const latestSaved = savedGames[savedGames.length - 1] || null;
+                    return {
+                      id: scheduledGame.id,
+                      label: latestSaved
+                        ? `${latestSaved.awayTeam} ${latestSaved.awayScore}-${latestSaved.homeScore} ${latestSaved.homeTeam}`
+                        : `${scheduledGame.awayTeamName || group.league?.teams?.find((team) => team.id === scheduledGame.awayTeamId)?.name || "Away"} vs ${scheduledGame.homeTeamName || group.league?.teams?.find((team) => team.id === scheduledGame.homeTeamId)?.name || "Home"}`,
+                      meta: latestSaved ? "Final" : scheduledGame.time || "Scheduled",
+                    };
+                  })
+                  : completedScheduleGames.slice(0, 4).map((savedGame) => ({
+                    id: savedGame.id,
+                    label: `${savedGame.awayTeam} ${savedGame.awayScore}-${savedGame.homeScore} ${savedGame.homeTeam}`,
+                    meta: savedGame.status === "final" ? "Final" : savedGame.status === "paused" ? "Paused" : "Live",
+                  }));
+                return (
+                <Card key={group.id}>
+                  <div className="min-w-0 overflow-hidden p-4 sm:p-5">
+                    <div className="grid min-w-0 gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(18rem,0.8fr)_auto] lg:items-center">
+                      <div className="min-w-0">
+                        <div className="text-xs font-semibold uppercase text-slate-500">{group.type === "tournament" ? "Tournament" : group.type === "week" ? "Scheduled Week" : "Saved Game"}</div>
+                        <div className="mt-1 break-words text-2xl font-black">{group.title}</div>
+                        <div className="mt-1 flex flex-wrap gap-x-2 gap-y-1 text-sm text-slate-500">
+                          {displayLeagueName && <span>{displayLeagueName}</span>}
+                          {displayWeekDate && <span>{displayWeekDate}</span>}
+                          <span>{group.subtitle}</span>
+                          <span>{group.games.length} saved game{group.games.length === 1 ? "" : "s"}</span>
+                          {finalCount ? <span>{finalCount} final</span> : null}
+                          {liveCount ? <span>{liveCount} live/paused</span> : null}
+                        </div>
                       </div>
-                      <div className="flex flex-col gap-2 rounded-2xl bg-slate-100 px-4 py-3 text-center">
-                        <div>
-                          <div className="text-xs font-semibold uppercase text-slate-500">{savedGame.status === "final" ? "Winner" : "Status"}</div>
-                          <div className="text-lg font-black">{savedGame.status === "final" ? (savedGame.winner === "away" ? savedGame.awayTeam : savedGame.winner === "home" ? savedGame.homeTeam : "Tie") : savedGame.status === "paused" ? "Paused" : "Saved Live"}</div>
-                        </div>
-                        <Button variant="primary" onClick={() => openSavedGame(savedGame)}>{savedGame.status === "final" ? "View Game" : "Resume Game"}</Button>
-                      </div>
-                    </div>
-
-                    <div className="mt-3">
-                      <button type="button" className="text-sm font-bold text-slate-900 underline" onClick={() => setExpandedGameId(expandedGameId === savedGame.id ? null : savedGame.id)}>
-                        {expandedGameId === savedGame.id ? "Hide details" : "View more details"}
-                      </button>
-                    </div>
-
-                    {expandedGameId === savedGame.id && (
-                      <div className="mt-4 space-y-4 rounded-2xl border bg-white p-4">
-                        <SavedLineScore savedGame={savedGame} />
-                        <TeamStatsSection
-                          awayTeam={savedGame.awayTeam}
-                          homeTeam={savedGame.homeTeam}
-                          awayPlayers={savedGame.teamPlayers?.away || []}
-                          homePlayers={savedGame.teamPlayers?.home || []}
-                          battingStats={savedGame.stats}
-                          pitchingStats={savedGame.pitchingStats}
-                          subIndex={buildSubIndexFromSavedGames([savedGame], "career")}
-                        />
-                        <div>
-                          <h3 className="mb-2 text-lg font-bold">Power Play / Whammy Splits</h3>
-                          <div className="overflow-auto">
-                            <table className="w-full text-left text-sm">
-                              <thead className="text-xs uppercase text-slate-500"><tr><th className="py-2">Player</th><th>Sub</th><th>PA</th><th>AB</th><th>H</th><th>AVG</th><th>BB</th><th>K</th><th>R</th><th>HR</th><th>RBI</th><th>Whammy</th></tr></thead>
-                              <tbody>
-                                {(savedGame.taggedHittingSplits || []).map((stat) => {
-                                  const savedSubIndex = buildSubIndexFromSavedGames([savedGame], "career");
-                                  return (
-                                    <tr key={stat.player} className="border-t">
-                                      <td className="py-2 font-medium">{stat.player}</td>
-                                      <td>{savedSubIndex[stat.player] ? "Yes" : "No"}</td>
-                                      <td>{stat.PA}</td>
-                                      <td>{stat.AB}</td>
-                                      <td>{stat.H}</td>
-                                      <td>{average(stat.H, stat.AB)}</td>
-                                      <td>{stat.BB}</td>
-                                      <td>{stat.K}</td>
-                                      <td>{stat.R}</td>
-                                      <td>{stat.HR}</td>
-                                      <td>{stat.RBI}</td>
-                                      <td>{stat.WHAMMY}</td>
-                                    </tr>
-                                  );
-                                })}
-                                {(!savedGame.taggedHittingSplits || savedGame.taggedHittingSplits.length === 0) && <tr><td className="py-3 text-slate-500" colSpan="12">No Power Play or Whammy stats.</td></tr>}
-                              </tbody>
-                            </table>
-                          </div>
-                        </div>
-                        <div>
-                          <h3 className="mb-2 text-lg font-bold">Pudwhacker Splits</h3>
-                          <div className="overflow-auto">
-                            <table className="w-full text-left text-sm">
-                              <thead className="text-xs uppercase text-slate-500"><tr><th className="py-2">Player</th><th>Sub</th><th>PA</th><th>AB</th><th>H</th><th>AVG</th><th>BB</th><th>K</th><th>R</th><th>HR</th><th>RBI</th><th>Pudwhacker</th></tr></thead>
-                              <tbody>
-                                {(savedGame.pudwhackerSplits || []).map((stat) => {
-                                  const savedSubIndex = buildSubIndexFromSavedGames([savedGame], "career");
-                                  return (
-                                    <tr key={stat.player} className="border-t">
-                                      <td className="py-2 font-medium">{stat.player}</td>
-                                      <td>{savedSubIndex[stat.player] ? "Yes" : "No"}</td>
-                                      <td>{stat.PA}</td>
-                                      <td>{stat.AB}</td>
-                                      <td>{stat.H}</td>
-                                      <td>{average(stat.H, stat.AB)}</td>
-                                      <td>{stat.BB}</td>
-                                      <td>{stat.K}</td>
-                                      <td>{stat.R}</td>
-                                      <td>{stat.HR}</td>
-                                      <td>{stat.RBI}</td>
-                                      <td>{stat.PUDWHACKER}</td>
-                                    </tr>
-                                  );
-                                })}
-                                {(!savedGame.pudwhackerSplits || savedGame.pudwhackerSplits.length === 0) && <tr><td className="py-3 text-slate-500" colSpan="12">No Pudwhacker stats.</td></tr>}
-                              </tbody>
-                            </table>
-                          </div>
-                        </div>
-                        <div className="border-t pt-4">
-                          <div className="flex flex-col gap-2 rounded-xl border border-red-200 bg-red-50 p-3 sm:flex-row sm:items-center sm:justify-between">
-                            <div>
-                              <div className="text-sm font-black text-red-800">Erase this saved game</div>
-                              <div className="text-xs font-semibold text-red-700">This removes the game from stats, standings, leaderboards, and player totals.</div>
+                      <div className="min-w-0 overflow-hidden rounded-2xl border bg-slate-50 p-2 sm:p-3">
+                        {group.type === "tournament" && hydratedTournament ? (
+                          <div className="min-w-0">
+                            <div className="mb-2 flex items-center justify-between gap-2">
+                              <span className="text-xs font-black uppercase text-slate-500">Bracket Preview</span>
+                              <div className="flex flex-wrap items-center justify-end gap-2">
+                                <span className="rounded-full bg-white px-2 py-0.5 text-[10px] font-black uppercase text-slate-500">{hydratedTournament.matchups?.length || 0} matchups</span>
+                                <button
+                                  type="button"
+                                  className="text-[10px] font-black uppercase text-slate-500 underline-offset-4 transition hover:text-slate-900 hover:underline"
+                                  onClick={() => {
+                                    setHistoryTournamentStats({ title: hydratedTournament.name || group.title || "Tournament", games: (group.games || []).filter((savedGame) => savedGame.status === "final") });
+                                    setHistoryTournamentViewer({ title: hydratedTournament.name || group.title || "Tournament", view: "stats", tournament: hydratedTournament, league: group.league, season: group.season, week: group.week, group });
+                                  }}
+                                >
+                                  Stats
+                                </button>
+                                <button
+                                  type="button"
+                                  className="text-[10px] font-black uppercase text-slate-500 underline-offset-4 transition hover:text-slate-900 hover:underline"
+                                  onClick={() => {
+                                    setHistoryTournamentStats({ title: hydratedTournament.name || group.title || "Tournament", games: (group.games || []).filter((savedGame) => savedGame.status === "final") });
+                                    setHistoryTournamentViewer({ title: hydratedTournament.name || group.title || "Tournament", view: "bracket", tournament: hydratedTournament, league: group.league, season: group.season, week: group.week, group });
+                                  }}
+                                >
+                                  Full Screen
+                                </button>
+                              </div>
                             </div>
-                            <Button variant="danger" onClick={() => requestDeleteSavedGame(savedGame)}>Erase Game</Button>
+                            <ReadOnlyTournamentBracketCanvas
+                              tournament={hydratedTournament}
+                              league={group.league}
+                              leagues={leagues}
+                              previousGames={previousGames}
+                              scheduledGames={group.week?.games || []}
+                              heightClassName="h-64 sm:h-80"
+                              className="max-w-full p-1"
+                              showLoserConnectors
+                              fitToContainer
+                              showZoomControls
+                              onMatchupClick={(matchup) => openHistoryTournamentMatchupResults(group, matchup)}
+                            />
+                          </div>
+                        ) : (
+                          <div>
+                            <div className="mb-2 flex items-center justify-between gap-2">
+                              <span className="text-xs font-black uppercase text-slate-500">{group.type === "week" ? "Schedule Preview" : "Game Preview"}</span>
+                              <span className="rounded-full bg-white px-2 py-0.5 text-[10px] font-black uppercase text-slate-500">{schedulePreviewItems.length} shown</span>
+                            </div>
+                            <div className="space-y-1">
+                              {schedulePreviewItems.slice(0, 4).map((item) => (
+                                <div key={`schedule-preview-${group.id}-${item.id}`} className="flex items-center justify-between gap-2 rounded-lg bg-white px-2 py-1 text-xs font-bold">
+                                  <span className="min-w-0 truncate">{item.label}</span>
+                                  <span className="shrink-0 text-[10px] uppercase text-slate-400">{item.meta}</span>
+                                </div>
+                              ))}
+                              {schedulePreviewItems.length === 0 && <div className="rounded-lg bg-white px-2 py-1 text-xs font-semibold text-slate-400">No games to preview.</div>}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                      <div className="flex flex-col gap-2 text-center md:min-w-36">
+                        <Button variant="primary" onClick={() => setExpandedHistoryGroupId(groupOpen ? "" : group.id)}>{groupOpen ? "Hide" : "Open"}</Button>
+                      </div>
+                    </div>
+
+                    {groupOpen && (
+                      <div className="mt-4 rounded-2xl border bg-white p-4">
+                        {group.type === "tournament" && hydratedTournament ? (
+                          <div className="space-y-3">
+                            <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                              <div>
+                                <h3 className="text-lg font-black">Tournament Games</h3>
+                                <p className="text-sm font-semibold text-slate-500">Use the bracket preview above to open completed matchup stats and logs.</p>
+                              </div>
+                              <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-black uppercase text-slate-500">{group.games.length} saved game{group.games.length === 1 ? "" : "s"}</span>
+                            </div>
+                            <div className="grid gap-2 md:grid-cols-2">
+                              {group.games.map((savedGame) => (
+                                <div key={`tournament-history-${savedGame.id}`} className="rounded-xl border bg-slate-50 p-3">
+                                  <div className="text-xs font-black uppercase text-slate-500">{savedGame.gameDate || "No date"} {savedGame.gameTime || ""}</div>
+                                  <div className="mt-1 text-sm font-black">{savedGame.awayTeam} {savedGame.awayScore} - {savedGame.homeScore} {savedGame.homeTeam}</div>
+                                  <div className="mt-2 flex flex-wrap gap-2">
+                                    <Button variant="outline" onClick={() => setTournamentGameDetail(savedGame)}>Stats</Button>
+                                    {savedGame.status !== "final" && <Button variant="primary" onClick={() => openSavedGame(savedGame)}>Resume</Button>}
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        ) : (
+                          <div className="space-y-2">
+                            {(group.games || []).map((savedGame) => (
+                              <button
+                                key={`week-history-${savedGame.id}`}
+                                type="button"
+                                className="w-full rounded-xl border bg-slate-50 p-3 text-left transition hover:bg-white hover:shadow-sm"
+                                onClick={() => setTournamentGameDetail(savedGame)}
+                              >
+                                <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                                  <div>
+                                    <div className="text-xs font-black uppercase text-slate-500">{savedGame.gameDate || "No date"} {savedGame.gameTime || ""} · {savedGame.gameLocation || "No location"}</div>
+                                    <div className="mt-1 text-lg font-black">{savedGame.awayTeam} {savedGame.awayScore} - {savedGame.homeScore} {savedGame.homeTeam}</div>
+                                    <div className="mt-1 text-sm font-semibold text-slate-500">Saved {savedGame.savedAt} · {savedGame.eventCount} events · {savedGame.innings} inning(s)</div>
+                                  </div>
+                                  <div className="flex flex-wrap gap-2">
+                                    <span className="rounded-full bg-white px-3 py-1 text-xs font-black uppercase text-slate-500">{savedGame.status === "final" ? "Final" : savedGame.status === "paused" ? "Paused" : "Live"}</span>
+                                    {savedGame.status !== "final" && (
+                                      <span
+                                        role="button"
+                                        tabIndex={0}
+                                        className="rounded-full bg-slate-900 px-3 py-1 text-xs font-black uppercase text-white"
+                                        onClick={(event) => { event.stopPropagation(); openSavedGame(savedGame); }}
+                                        onKeyDown={(event) => {
+                                          if (event.key === "Enter" || event.key === " ") {
+                                            event.preventDefault();
+                                            event.stopPropagation();
+                                            openSavedGame(savedGame);
+                                          }
+                                        }}
+                                      >
+                                        Resume
+                                      </span>
+                                    )}
+                                  </div>
+                                </div>
+                              </button>
+                            ))}
+                          </div>
+                        )}
+                        <div className="mt-4 border-t pt-4">
+                          <div className="text-xs font-black uppercase text-slate-500">Saved Games</div>
+                          <div className="mt-2 grid gap-2 md:grid-cols-2">
+                            {(group.games || []).map((savedGame) => (
+                              <div key={`erase-history-${group.id}-${savedGame.id}`} className="flex items-center justify-between gap-2 rounded-xl border border-red-100 bg-red-50 p-3">
+                                <div className="min-w-0">
+                                  <div className="truncate text-sm font-black text-red-900">{savedGame.awayTeam} {savedGame.awayScore} - {savedGame.homeScore} {savedGame.homeTeam}</div>
+                                  <div className="text-xs font-semibold text-red-700">{savedGame.savedAt}</div>
+                                </div>
+                                <Button variant="danger" onClick={() => requestDeleteSavedGame(savedGame)}>Erase</Button>
+                              </div>
+                            ))}
                           </div>
                         </div>
                       </div>
                     )}
                   </div>
                 </Card>
-              ))
+                );
+              })
             )}
           </div>
         )}

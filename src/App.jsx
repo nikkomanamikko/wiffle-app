@@ -2933,11 +2933,319 @@ function safeExportName(value, fallback = "wiffle-game") {
   return cleanValue || fallback;
 }
 
+function battingCsvValues(player, stat = {}) {
+  const singles = Math.max(0, (stat.H || 0) - (stat.D2 || 0) - (stat.D3 || 0) - (stat.HR || 0));
+  return [player, stat.GP || 1, stat.PA || 0, stat.AB || 0, stat.R || 0, stat.H || 0, singles, stat.D2 || 0, stat.D3 || 0, stat.HR || 0, stat.RBI || 0, stat.BB || 0, stat.K || 0, stat.LOB || 0, average(stat.H || 0, stat.AB || 0), obp(stat), slg(stat), ops(stat), hrPerPa(stat), soPerPa(stat)];
+}
+
+function tournamentBattingCsvValues(player, stat = {}) {
+  return battingCsvValues(player, stat).slice(0, 18);
+}
+
+function pitchingCsvValues(player, stat = {}) {
+  return [player, stat.GP || 1, formatInningsPitched(stat.OUTS || 0), stat.H || 0, stat.BB || 0, stat.K || 0, stat.HR || 0, stat.R || 0, stat.UER || 0, stat.ER ?? stat.R ?? 0, era(stat), whip(stat), kToBb(stat), pitcherLobPercent(stat)];
+}
+
+function makeTeamStatSections({ awayTeam = "Away", homeTeam = "Home", teamPlayers = emptyGameRosters, battingStats = {}, pitchingStats = {} } = {}) {
+  const teams = [
+    { key: "away", name: awayTeam || "Away", players: teamPlayers.away || [] },
+    { key: "home", name: homeTeam || "Home", players: teamPlayers.home || [] },
+  ];
+  return teams.map((team) => {
+    const playerSet = new Set((team.players || []).map((player) => String(player || "").trim()).filter(Boolean));
+    const teamBattingStats = Object.fromEntries(Object.entries(battingStats || {}).filter(([player]) => playerSet.has(player)));
+    const teamPitchingStats = Object.fromEntries(Object.entries(pitchingStats || {}).filter(([player]) => playerSet.has(player)));
+    return {
+      ...team,
+      battingStats: teamBattingStats,
+      pitchingStats: teamPitchingStats,
+      battingTotal: aggregateBattingStats(teamBattingStats),
+      pitchingTotal: aggregatePitchingStats(teamPitchingStats),
+    };
+  });
+}
+
+function scoringSummarySentenceForExport(event = {}) {
+  if (event.type === "play") {
+    const sentence = `${event.batter || "Batter"} ${String(event.result || "play").toLowerCase()}.`;
+    if (Array.isArray(event.scored) && event.scored.length > 0) return `${sentence} Scored: ${event.scored.join(", ")}.`;
+    return sentence;
+  }
+  if (event.type === "score_adjustment") return `${Number(event.runs) > 0 ? "Added" : "Removed"} ${Math.abs(Number(event.runs) || 0)} run${Math.abs(Number(event.runs) || 0) === 1 ? "" : "s"}${event.note ? `: ${event.note}` : ""}.`;
+  return event.note || event.result || event.type || "Scoring play";
+}
+
+function buildScoringSummaryExportRows(events = [], awayTeam = "Away", homeTeam = "Home") {
+  let awayScore = 0;
+  let homeScore = 0;
+  const rows = [];
+  (events || []).forEach((event) => {
+    const runValue = Number(event.runs) || 0;
+    if (event.team === "away") awayScore += runValue;
+    if (event.team === "home") homeScore += runValue;
+    const isScoringEvent = (event.type === "play" || event.type === "score_adjustment") && runValue !== 0;
+    if (!isScoringEvent) return;
+    rows.push({
+      inning: event.inning ? `${event.half === "top" ? "Top" : "Bottom"} ${event.inning}${getOrdinalSuffix(event.inning)}` : "Game",
+      team: event.team === "away" ? awayTeam : homeTeam,
+      play: scoringSummarySentenceForExport(event),
+      awayScore,
+      homeScore,
+    });
+  });
+  return rows;
+}
+
+function battingHtmlRow(player, stat = {}, isTotal = false) {
+  const cells = battingCsvValues(player, stat).map((value) => `<td>${escapeHtml(value)}</td>`).join("");
+  return `<tr${isTotal ? ' class="total"' : ""}>${cells}</tr>`;
+}
+
+function tournamentBattingHtmlRow(player, stat = {}, isTotal = false) {
+  const cells = tournamentBattingCsvValues(player, stat).map((value) => `<td>${escapeHtml(value)}</td>`).join("");
+  return `<tr${isTotal ? ' class="total"' : ""}>${cells}</tr>`;
+}
+
+function pitchingHtmlRow(player, stat = {}, isTotal = false) {
+  const cells = pitchingCsvValues(player, stat).map((value) => `<td>${escapeHtml(value)}</td>`).join("");
+  return `<tr${isTotal ? ' class="total"' : ""}>${cells}</tr>`;
+}
+
+function scoringSummaryHtmlRows(rows = [], awayTeam = "Away", homeTeam = "Home") {
+  return rows.map((row) => `<tr><td>${escapeHtml(row.inning)}</td><td>${escapeHtml(row.team)}</td><td>${escapeHtml(row.play)}</td><td>${row.awayScore}</td><td>${row.homeScore}</td></tr>`).join("")
+    || `<tr><td colspan="5">No scoring plays.</td></tr>`;
+}
+
+function getTournamentReportMatchupRows(tournament = {}, league = {}, leagues = [], scheduledGames = []) {
+  const scheduledGameByMatchupId = new Map((scheduledGames || []).filter((game) => game.tournamentMatchupId).map((game) => [game.tournamentMatchupId, game]));
+  return [...(tournament.matchups || [])]
+    .sort((a, b) => (Number(a.generatedGameNumber) || 9999) - (Number(b.generatedGameNumber) || 9999) || (Number(a.round) || 0) - (Number(b.round) || 0))
+    .map((matchup, index) => {
+      const scheduledGame = scheduledGameByMatchupId.get(matchup.id) || {};
+      const sideOne = getTournamentSideLabel(league, tournament, matchup, "one", leagues);
+      const sideTwo = getTournamentSideLabel(league, tournament, matchup, "two", leagues);
+      const completedGames = matchup.completedGameSummaries || [];
+      const score = matchup.seriesLength
+        ? `${Number(matchup.seriesSideOneWins) || 0}-${Number(matchup.seriesSideTwoWins) || 0} series`
+        : completedGames[0]
+          ? `${completedGames[0].sideOneScore}-${completedGames[0].sideTwoScore}`
+          : "";
+      const winner = matchup.winnerTeamId
+        ? tournamentTeamLabel(league, tournament, matchup.winnerTeamId, tournamentSeedLabel(matchup.winnerSeed, "Winner"), leagues)
+        : matchup.winnerSeed
+          ? tournamentSeedLabel(matchup.winnerSeed, "Winner")
+          : "";
+      return {
+        number: Number(matchup.generatedGameNumber) || index + 1,
+        round: matchup.round || "",
+        bracket: matchup.bracketName || (matchup.isLoserBracket ? "Loser's Bracket" : matchup.isChampionship ? "Championship" : `Bracket ${matchup.bracket || 1}`),
+        series: seriesLabel(matchup.seriesLength),
+        time: scheduledGame.time ? formatTimeDisplay(scheduledGame.time) : "",
+        sideOne,
+        sideTwo,
+        score,
+        winner,
+        winnerTo: matchup.nextMatchupId ? `Matchup ${(tournament.matchups || []).find((item) => item.id === matchup.nextMatchupId)?.generatedGameNumber || ""}` : "",
+        loserTo: matchup.loserNextMatchupId ? `Matchup ${(tournament.matchups || []).find((item) => item.id === matchup.loserNextMatchupId)?.generatedGameNumber || ""}` : "",
+      };
+    });
+}
+
+function buildTournamentReportStandings(savedGames = []) {
+  const rows = {};
+  const ensureRow = (teamName) => {
+    const cleanName = String(teamName || "Team").trim() || "Team";
+    if (!rows[cleanName]) rows[cleanName] = { teamName: cleanName, GP: 0, W: 0, L: 0, RF: 0, RA: 0, RD: 0 };
+    return rows[cleanName];
+  };
+
+  (savedGames || []).filter((game) => game.status === "final").forEach((game) => {
+    const away = ensureRow(game.awayTeam || "Away");
+    const home = ensureRow(game.homeTeam || "Home");
+    const awayScore = Number(game.awayScore) || 0;
+    const homeScore = Number(game.homeScore) || 0;
+    away.GP += 1;
+    home.GP += 1;
+    away.RF += awayScore;
+    away.RA += homeScore;
+    home.RF += homeScore;
+    home.RA += awayScore;
+    if (awayScore > homeScore) {
+      away.W += 1;
+      home.L += 1;
+    } else if (homeScore > awayScore) {
+      home.W += 1;
+      away.L += 1;
+    }
+  });
+
+  return Object.values(rows)
+    .map((row) => ({ ...row, RD: row.RF - row.RA }))
+    .sort((a, b) => b.W - a.W || a.L - b.L || b.RD - a.RD || b.RF - a.RF || a.teamName.localeCompare(b.teamName));
+}
+
+function buildTournamentReportTeamStats(savedGames = []) {
+  const teams = {};
+  const ensureTeam = (teamName) => {
+    const cleanName = String(teamName || "Team").trim() || "Team";
+    if (!teams[cleanName]) teams[cleanName] = { name: cleanName, batting: {}, pitching: {} };
+    return teams[cleanName];
+  };
+
+  (savedGames || []).filter((game) => game.status === "final").forEach((game) => {
+    const away = ensureTeam(game.awayTeam || "Away");
+    const home = ensureTeam(game.homeTeam || "Home");
+    addBattingStats(away.batting, statsForPlayers(game.stats || {}, game.teamPlayers?.away || []));
+    addPitchingStats(away.pitching, statsForPlayers(game.pitchingStats || {}, game.teamPlayers?.away || []));
+    addBattingStats(home.batting, statsForPlayers(game.stats || {}, game.teamPlayers?.home || []));
+    addPitchingStats(home.pitching, statsForPlayers(game.pitchingStats || {}, game.teamPlayers?.home || []));
+  });
+
+  return Object.values(teams).sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function averageStatObjects(stats = [], emptyFactory = emptyStats) {
+  const rows = (stats || []).filter(Boolean);
+  const averageStat = emptyFactory();
+  if (rows.length === 0) return averageStat;
+  Object.keys(averageStat).forEach((key) => {
+    const total = rows.reduce((sum, stat) => sum + (Number(stat?.[key]) || 0), 0);
+    averageStat[key] = Number((total / rows.length).toFixed(1));
+  });
+  return averageStat;
+}
+
+function buildTournamentReportAverages(teamStats = []) {
+  const battingTotals = (teamStats || []).map((team) => aggregateBattingStats(team.batting || {}));
+  const pitchingTotals = (teamStats || []).map((team) => aggregatePitchingStats(team.pitching || {}));
+  return {
+    batting: averageStatObjects(battingTotals, emptyStats),
+    pitching: averageStatObjects(pitchingTotals, emptyPitchingStats),
+  };
+}
+
+function exportTournamentReportCsv({ tournament = {}, games = [], league = {}, leagues = [], scheduledGames = [], title = "Tournament" } = {}) {
+  const finalGames = (games || []).filter((game) => game.status === "final");
+  const rows = [];
+  rows.push(makeCsvRow(["Tournament Report"]));
+  rows.push(makeCsvRow(["Name", title || tournament.name || "Tournament"]));
+  rows.push(makeCsvRow(["Type", tournamentTypeLabel(tournament.type)]));
+  rows.push(makeCsvRow(["League", league?.name || ""]));
+  rows.push(makeCsvRow(["Completed Games", finalGames.length]));
+  rows.push("");
+
+  rows.push(makeCsvRow(["Bracket Printout"]));
+  rows.push(makeCsvRow(["Matchup", "Round", "Bracket", "Series", "Time", "Side 1", "Side 2", "Score/Series", "Winner", "Winner To", "Loser To"]));
+  getTournamentReportMatchupRows(tournament, league, leagues, scheduledGames).forEach((row) => {
+    rows.push(makeCsvRow([row.number, row.round, row.bracket, row.series, row.time, row.sideOne, row.sideTwo, row.score, row.winner, row.winnerTo, row.loserTo]));
+  });
+  rows.push("");
+
+  rows.push(makeCsvRow(["Standings"]));
+  rows.push(makeCsvRow(["Team", "GP", "W", "L", "RF", "RA", "RD"]));
+  buildTournamentReportStandings(finalGames).forEach((row) => rows.push(makeCsvRow([row.teamName, row.GP, row.W, row.L, row.RF, row.RA, row.RD])));
+  rows.push("");
+
+  const teamStats = buildTournamentReportTeamStats(finalGames);
+  const tournamentAverages = buildTournamentReportAverages(teamStats);
+  rows.push(makeCsvRow(["Player Batting Stats by Team"]));
+  rows.push(makeCsvRow(["Player", "GP", "PA", "AB", "Runs", "Hits", "1B", "2B", "3B", "HR", "RBI", "BB", "SO", "LOB", "AVG", "OBP", "SLG", "OPS"]));
+  teamStats.forEach((team) => {
+    rows.push(makeCsvRow([team.name]));
+    Object.entries(team.batting || {}).forEach(([player, stat]) => rows.push(makeCsvRow(tournamentBattingCsvValues(player, stat))));
+    rows.push(makeCsvRow(tournamentBattingCsvValues("Team Total", aggregateBattingStats(team.batting))));
+    rows.push("");
+  });
+  if (teamStats.length) rows.push(makeCsvRow(tournamentBattingCsvValues("Average", tournamentAverages.batting)));
+  rows.push("");
+
+  rows.push(makeCsvRow(["Player Pitching Stats by Team"]));
+  rows.push(makeCsvRow(["Pitcher", "GP", "IP", "HA", "BB", "K", "HRA", "R", "UER", "ER", "ERA", "WHIP", "K:BB", "LOB%"]));
+  teamStats.forEach((team) => {
+    rows.push(makeCsvRow([team.name]));
+    Object.entries(team.pitching || {}).forEach(([player, stat]) => rows.push(makeCsvRow(pitchingCsvValues(player, stat))));
+    rows.push(makeCsvRow(pitchingCsvValues("Team Total", aggregatePitchingStats(team.pitching))));
+    rows.push("");
+  });
+  if (teamStats.length) rows.push(makeCsvRow(pitchingCsvValues("Average", tournamentAverages.pitching)));
+
+  downloadTextFile(`${safeExportName(title || tournament.name, "tournament-report")}-report.csv`, rows.join("\n"), "text/csv;charset=utf-8");
+}
+
+function printTournamentReport({ tournament = {}, games = [], league = {}, leagues = [], scheduledGames = [], title = "Tournament", bracketNode = null } = {}) {
+  const finalGames = (games || []).filter((game) => game.status === "final");
+  let bracketMarkup = "";
+  let bracketHeight = 0;
+  let cssText = "";
+  if (typeof document !== "undefined") {
+    cssText = [...document.styleSheets].map((sheet) => {
+      try {
+        return [...sheet.cssRules].map((rule) => rule.cssText).join("\n");
+      } catch {
+        return "";
+      }
+    }).join("\n").replace(/<\/style/gi, "<\\/style");
+  }
+  if (bracketNode) {
+    const sourceWidth = Math.max(1, Math.ceil(bracketNode.scrollWidth || bracketNode.offsetWidth || 1200));
+    const sourceHeight = Math.max(1, Math.ceil(bracketNode.scrollHeight || bracketNode.offsetHeight || 760));
+    const scale = Math.min(1, 960 / sourceWidth, 640 / sourceHeight);
+    const clone = bracketNode.cloneNode(true);
+    clone.querySelectorAll("button").forEach((button) => { button.style.display = "none"; });
+    clone.style.position = "relative";
+    clone.style.left = "0";
+    clone.style.top = "0";
+    clone.style.width = `${sourceWidth}px`;
+    clone.style.maxWidth = "none";
+    clone.style.height = `${sourceHeight}px`;
+    clone.style.overflow = "visible";
+    bracketHeight = Math.max(180, Math.ceil(sourceHeight * scale));
+    bracketMarkup = `<div class="report-bracket-scale" style="width:${sourceWidth}px;height:${sourceHeight}px;transform:scale(${scale});transform-origin:top left;">${clone.outerHTML}</div>`;
+  }
+  const matchupRows = getTournamentReportMatchupRows(tournament, league, leagues, scheduledGames)
+    .map((row) => `<tr><td>${row.number}</td><td>${escapeHtml(row.round)}</td><td>${escapeHtml(row.bracket)}</td><td>${escapeHtml(row.series)}</td><td>${escapeHtml(row.time)}</td><td>${escapeHtml(row.sideOne)}</td><td>${escapeHtml(row.sideTwo)}</td><td>${escapeHtml(row.score)}</td><td>${escapeHtml(row.winner)}</td></tr>`)
+    .join("");
+  const standingsRows = buildTournamentReportStandings(finalGames)
+    .map((row) => `<tr><td>${escapeHtml(row.teamName)}</td><td>${row.GP}</td><td>${row.W}</td><td>${row.L}</td><td>${row.RF}</td><td>${row.RA}</td><td>${row.RD}</td></tr>`)
+    .join("") || `<tr><td colspan="7">No completed games yet.</td></tr>`;
+  const teamStats = buildTournamentReportTeamStats(finalGames);
+  const tournamentAverages = buildTournamentReportAverages(teamStats);
+  const battingRows = [
+    teamStats.map((team) => `<tr class="team-heading"><td colspan="18">${escapeHtml(team.name)}</td></tr>${Object.entries(team.batting || {}).map(([player, stat]) => tournamentBattingHtmlRow(player, stat)).join("")}${tournamentBattingHtmlRow("Team Total", aggregateBattingStats(team.batting), true)}`).join(""),
+    teamStats.length ? tournamentBattingHtmlRow("Average", tournamentAverages.batting, true) : "",
+  ].join("");
+  const pitchingRows = [
+    teamStats.map((team) => `<tr class="team-heading"><td colspan="14">${escapeHtml(team.name)}</td></tr>${Object.entries(team.pitching || {}).map(([player, stat]) => pitchingHtmlRow(player, stat)).join("")}${pitchingHtmlRow("Team Total", aggregatePitchingStats(team.pitching), true)}`).join(""),
+    teamStats.length ? pitchingHtmlRow("Average", tournamentAverages.pitching, true) : "",
+  ].join("");
+  const printWindow = window.open("", "_blank");
+  if (!printWindow) return;
+  printWindow.document.write(`
+    <html><head><title>${escapeHtml(title || tournament.name || "Tournament Report")}</title><style>
+    ${cssText}
+    @page{size:landscape;margin:0.35in}
+    body{font-family:Arial,sans-serif;color:#111827;padding:18px;background:white} h1{margin-bottom:4px}.meta{color:#64748b;font-weight:700;margin-bottom:18px} table{width:100%;border-collapse:collapse;margin:12px 0 24px;font-size:11px} th,td{border:1px solid #d1d5db;padding:5px;text-align:left;vertical-align:top} th{background:#f3f4f6}.team-heading td{background:#e5e7eb;font-weight:800}.total td{font-weight:800;background:#f9fafb}.report-bracket{width:100%;max-width:100%;height:auto;overflow:hidden;border:1px solid #cbd5e1;border-radius:16px;padding:8px;margin:12px 0 24px;page-break-inside:avoid}.report-bracket-scale{display:block}.report-bracket .fixed{position:static!important}
+    </style></head><body>
+    <h1>${escapeHtml(title || tournament.name || "Tournament Report")}</h1>
+    <div class="meta">${escapeHtml(tournamentTypeLabel(tournament.type))}${league?.name ? ` · ${escapeHtml(league.name)}` : ""} · ${finalGames.length} completed game${finalGames.length === 1 ? "" : "s"}</div>
+    ${bracketMarkup ? `<h2>Bracket</h2><div class="report-bracket" style="height:${bracketHeight}px">${bracketMarkup}</div>` : ""}
+    <h2>Bracket Printout</h2><table><thead><tr><th>#</th><th>Round</th><th>Bracket</th><th>Series</th><th>Time</th><th>Side 1</th><th>Side 2</th><th>Score/Series</th><th>Winner</th></tr></thead><tbody>${matchupRows || `<tr><td colspan="9">No matchups.</td></tr>`}</tbody></table>
+    <h2>Standings</h2><table><thead><tr><th>Team</th><th>GP</th><th>W</th><th>L</th><th>RF</th><th>RA</th><th>RD</th></tr></thead><tbody>${standingsRows}</tbody></table>
+    <h2>Player Batting Stats by Team</h2><table><thead><tr><th>Player</th><th>GP</th><th>PA</th><th>AB</th><th>Runs</th><th>Hits</th><th>1B</th><th>2B</th><th>3B</th><th>HR</th><th>RBI</th><th>BB</th><th>SO</th><th>LOB</th><th>AVG</th><th>OBP</th><th>SLG</th><th>OPS</th></tr></thead><tbody>${battingRows || `<tr><td colspan="18">No batting stats.</td></tr>`}</tbody></table>
+    <h2>Player Pitching Stats by Team</h2><table><thead><tr><th>Pitcher</th><th>GP</th><th>IP</th><th>HA</th><th>BB</th><th>K</th><th>HRA</th><th>R</th><th>UER</th><th>ER</th><th>ERA</th><th>WHIP</th><th>K:BB</th><th>LOB%</th></tr></thead><tbody>${pitchingRows || `<tr><td colspan="14">No pitching stats.</td></tr>`}</tbody></table>
+    <script>window.onload=()=>window.print();</script>
+    </body></html>
+  `);
+  printWindow.document.close();
+}
+
 function exportGameCsv(savedGame = {}) {
   const lineScore = savedGame.lineScore || {};
   const teamPlayers = savedGame.teamPlayers || emptyGameRosters;
   const savedSetup = savedGame.savedSetup || {};
   const subIndex = buildSubIndexFromSavedGames([savedGame], "career");
+  const teamStatSections = makeTeamStatSections({ awayTeam: savedGame.awayTeam || "Away", homeTeam: savedGame.homeTeam || "Home", teamPlayers, battingStats: savedGame.stats || {}, pitchingStats: savedGame.pitchingStats || {} });
+  const scoringSummaryRows = buildScoringSummaryExportRows(savedGame.events || [], savedGame.awayTeam || "Away", savedGame.homeTeam || "Home");
   const rows = [];
   rows.push(makeCsvRow(["Game Summary"]));
   rows.push(makeCsvRow(["Date", savedGame.gameDate || ""]));
@@ -2954,6 +3262,12 @@ function exportGameCsv(savedGame = {}) {
   rows.push(makeCsvRow([savedGame.homeTeam || "Home", ...(lineScore.homeRunsByInning || []), lineScore.homeRunsTotal ?? savedGame.homeScore ?? 0, lineScore.homeHits ?? 0]));
   rows.push("");
 
+  rows.push(makeCsvRow(["Scoring Summary"]));
+  rows.push(makeCsvRow(["Inning", "Team", "Play", savedGame.awayTeam || "Away", savedGame.homeTeam || "Home"]));
+  scoringSummaryRows.forEach((row) => rows.push(makeCsvRow([row.inning, row.team, row.play, row.awayScore, row.homeScore])));
+  if (scoringSummaryRows.length === 0) rows.push(makeCsvRow(["No scoring plays."]));
+  rows.push("");
+
   rows.push(makeCsvRow(["Team Players"]));
   rows.push(makeCsvRow(["Team", "Player", "Sub"]));
   ["away", "home"].forEach((teamKey) => {
@@ -2961,18 +3275,23 @@ function exportGameCsv(savedGame = {}) {
   });
   rows.push("");
 
-  rows.push(makeCsvRow(["Batting Stats"]));
+  rows.push(makeCsvRow(["Batting Stats by Team"]));
   rows.push(makeCsvRow(["Player", "GP", "PA", "AB", "Runs", "Hits", "1B", "2B", "3B", "HR", "RBI", "BB", "SO", "LOB", "AVG", "OBP", "SLG", "OPS", "HR-PA", "SO-PA"]));
-  Object.entries(savedGame.stats || {}).forEach(([player, stat]) => {
-    const singles = Math.max(0, (stat.H || 0) - (stat.D2 || 0) - (stat.D3 || 0) - (stat.HR || 0));
-    rows.push(makeCsvRow([player, stat.GP || 1, stat.PA || 0, stat.AB || 0, stat.R || 0, stat.H || 0, singles, stat.D2 || 0, stat.D3 || 0, stat.HR || 0, stat.RBI || 0, stat.BB || 0, stat.K || 0, stat.LOB || 0, average(stat.H || 0, stat.AB || 0), obp(stat), slg(stat), ops(stat), hrPerPa(stat), soPerPa(stat)]));
+  teamStatSections.forEach((team) => {
+    rows.push(makeCsvRow([team.name]));
+    Object.entries(team.battingStats || {}).forEach(([player, stat]) => rows.push(makeCsvRow(battingCsvValues(player, stat))));
+    rows.push(makeCsvRow(battingCsvValues(`${team.name} Total`, team.battingTotal)));
+    rows.push("");
   });
-  rows.push("");
 
-  rows.push(makeCsvRow(["Pitching Stats"]));
+  rows.push(makeCsvRow(["Pitching Stats by Team"]));
   rows.push(makeCsvRow(["Pitcher", "GP", "IP", "HA", "BB", "K", "HRA", "R", "UER", "ER", "ERA", "WHIP", "K:BB", "LOB%"]));
-  Object.entries(savedGame.pitchingStats || {}).forEach(([player, stat]) => rows.push(makeCsvRow([player, stat.GP || 1, formatInningsPitched(stat.OUTS || 0), stat.H || 0, stat.BB || 0, stat.K || 0, stat.HR || 0, stat.R || 0, stat.UER || 0, stat.ER ?? stat.R ?? 0, era(stat), whip(stat), kToBb(stat), pitcherLobPercent(stat)])));
-  rows.push("");
+  teamStatSections.forEach((team) => {
+    rows.push(makeCsvRow([team.name]));
+    Object.entries(team.pitchingStats || {}).forEach(([player, stat]) => rows.push(makeCsvRow(pitchingCsvValues(player, stat))));
+    rows.push(makeCsvRow(pitchingCsvValues(`${team.name} Total`, team.pitchingTotal)));
+    rows.push("");
+  });
 
   rows.push(makeCsvRow(["Power Play / Whammy Splits"]));
   rows.push(makeCsvRow(["Player", "Sub", "PA", "AB", "H", "AVG", "BB", "K", "R", "HR", "RBI", "Whammy"]));
@@ -2999,25 +3318,25 @@ function printGameReport(savedGame = {}) {
   const teamPlayers = savedGame.teamPlayers || emptyGameRosters;
   const savedSetup = savedGame.savedSetup || {};
   const playerRows = ["away", "home"].flatMap((teamKey) => (teamPlayers[teamKey] || []).map((player) => `<tr><td>${escapeHtml(teamKey === "away" ? savedGame.awayTeam || "Away" : savedGame.homeTeam || "Home")}</td><td>${escapeHtml(player)}</td><td>${savedSetup.subPlayers?.[teamKey]?.[player] ? "Yes" : "No"}</td></tr>`)).join("");
-  const battingRows = Object.entries(savedGame.stats || {}).map(([player, stat]) => {
-    const singles = Math.max(0, (stat.H || 0) - (stat.D2 || 0) - (stat.D3 || 0) - (stat.HR || 0));
-    return `<tr><td>${escapeHtml(player)}</td><td>${stat.GP || 1}</td><td>${stat.PA || 0}</td><td>${stat.AB || 0}</td><td>${stat.R || 0}</td><td>${stat.H || 0}</td><td>${singles}</td><td>${stat.D2 || 0}</td><td>${stat.D3 || 0}</td><td>${stat.HR || 0}</td><td>${stat.RBI || 0}</td><td>${stat.BB || 0}</td><td>${stat.K || 0}</td><td>${stat.LOB || 0}</td><td>${average(stat.H || 0, stat.AB || 0)}</td><td>${obp(stat)}</td><td>${slg(stat)}</td><td>${ops(stat)}</td></tr>`;
-  }).join("");
-  const pitchingRows = Object.entries(savedGame.pitchingStats || {}).map(([player, stat]) => `<tr><td>${escapeHtml(player)}</td><td>${stat.GP || 1}</td><td>${formatInningsPitched(stat.OUTS || 0)}</td><td>${stat.H || 0}</td><td>${stat.BB || 0}</td><td>${stat.K || 0}</td><td>${stat.HR || 0}</td><td>${stat.R || 0}</td><td>${stat.UER || 0}</td><td>${stat.ER ?? stat.R ?? 0}</td><td>${era(stat)}</td><td>${whip(stat)}</td><td>${kToBb(stat)}</td></tr>`).join("");
+  const teamStatSections = makeTeamStatSections({ awayTeam: savedGame.awayTeam || "Away", homeTeam: savedGame.homeTeam || "Home", teamPlayers, battingStats: savedGame.stats || {}, pitchingStats: savedGame.pitchingStats || {} });
+  const scoringSummaryRows = buildScoringSummaryExportRows(savedGame.events || [], savedGame.awayTeam || "Away", savedGame.homeTeam || "Home");
+  const battingRows = teamStatSections.map((team) => `<tr class="team-heading"><td colspan="20">${escapeHtml(team.name)}</td></tr>${Object.entries(team.battingStats || {}).map(([player, stat]) => battingHtmlRow(player, stat)).join("")}${battingHtmlRow(`${team.name} Total`, team.battingTotal, true)}`).join("");
+  const pitchingRows = teamStatSections.map((team) => `<tr class="team-heading"><td colspan="14">${escapeHtml(team.name)}</td></tr>${Object.entries(team.pitchingStats || {}).map(([player, stat]) => pitchingHtmlRow(player, stat)).join("")}${pitchingHtmlRow(`${team.name} Total`, team.pitchingTotal, true)}`).join("");
   const eventRows = (savedGame.events || []).map((event, index) => `<tr><td>${index + 1}</td><td>${escapeHtml(event.type)}</td><td>${event.inning ? `${event.half === "top" ? "Top" : "Bottom"} ${event.inning}` : ""}</td><td>${escapeHtml(event.batter || "")}</td><td>${escapeHtml(event.pitcher || "")}</td><td>${escapeHtml(event.result || "")}</td><td>${escapeHtml(modifierLabel(event.modifier))}</td><td>${event.runs ?? ""}</td><td>${event.rbi ?? ""}</td><td>${event.outs ?? ""}</td><td>${escapeHtml(event.note || "")}</td></tr>`).join("");
   const printWindow = window.open("", "_blank");
   if (!printWindow) return;
   printWindow.document.write(`
     <html><head><title>Wiffle Game Report</title><style>
-    body{font-family:Arial,sans-serif;color:#111827;padding:24px} table{width:100%;border-collapse:collapse;margin:12px 0 24px;font-size:12px} th,td{border:1px solid #d1d5db;padding:6px;text-align:left} th{background:#f3f4f6}.score{font-size:28px;font-weight:800;margin:8px 0 16px}
+    body{font-family:Arial,sans-serif;color:#111827;padding:24px} table{width:100%;border-collapse:collapse;margin:12px 0 24px;font-size:12px} th,td{border:1px solid #d1d5db;padding:6px;text-align:left} th{background:#f3f4f6}.score{font-size:28px;font-weight:800;margin:8px 0 16px}.team-heading td{background:#e5e7eb;font-weight:800}.total td{font-weight:800;background:#f9fafb}
     </style></head><body>
     <h1>Wiffle Game Report</h1>
     <div>${escapeHtml(savedGame.gameDate || "No date")} ${escapeHtml(savedGame.gameTime || "")} · ${escapeHtml(savedGame.gameLocation || "No location")}</div>
     <div class="score">${escapeHtml(savedGame.awayTeam || "Away")} ${savedGame.awayScore ?? 0} — ${escapeHtml(savedGame.homeTeam || "Home")} ${savedGame.homeScore ?? 0}</div>
     <h2>Line Score</h2><table><thead><tr><th>Team</th>${(lineScore.inningNumbers || []).map((inning) => `<th>${inning}</th>`).join("")}<th>R</th><th>H</th></tr></thead><tbody><tr><td>${escapeHtml(savedGame.awayTeam || "Away")}</td>${(lineScore.awayRunsByInning || []).map((run) => `<td>${run}</td>`).join("")}<td>${lineScore.awayRunsTotal ?? savedGame.awayScore ?? 0}</td><td>${lineScore.awayHits ?? 0}</td></tr><tr><td>${escapeHtml(savedGame.homeTeam || "Home")}</td>${(lineScore.homeRunsByInning || []).map((run) => `<td>${run}</td>`).join("")}<td>${lineScore.homeRunsTotal ?? savedGame.homeScore ?? 0}</td><td>${lineScore.homeHits ?? 0}</td></tr></tbody></table>
+    <h2>Scoring Summary</h2><table><thead><tr><th>Inning</th><th>Team</th><th>Play</th><th>${escapeHtml(savedGame.awayTeam || "Away")}</th><th>${escapeHtml(savedGame.homeTeam || "Home")}</th></tr></thead><tbody>${scoringSummaryHtmlRows(scoringSummaryRows, savedGame.awayTeam || "Away", savedGame.homeTeam || "Home")}</tbody></table>
     <h2>Team Players</h2><table><thead><tr><th>Team</th><th>Player</th><th>Sub</th></tr></thead><tbody>${playerRows}</tbody></table>
-    <h2>Batting Stats</h2><table><thead><tr><th>Player</th><th>GP</th><th>PA</th><th>AB</th><th>Runs</th><th>Hits</th><th>1B</th><th>2B</th><th>3B</th><th>HR</th><th>RBI</th><th>BB</th><th>SO</th><th>LOB</th><th>AVG</th><th>OBP</th><th>SLG</th><th>OPS</th></tr></thead><tbody>${battingRows}</tbody></table>
-    <h2>Pitching Stats</h2><table><thead><tr><th>Pitcher</th><th>GP</th><th>IP</th><th>HA</th><th>BB</th><th>K</th><th>HRA</th><th>R</th><th>UER</th><th>ER</th><th>ERA</th><th>WHIP</th><th>K:BB</th></tr></thead><tbody>${pitchingRows}</tbody></table>
+    <h2>Batting Stats by Team</h2><table><thead><tr><th>Player</th><th>GP</th><th>PA</th><th>AB</th><th>Runs</th><th>Hits</th><th>1B</th><th>2B</th><th>3B</th><th>HR</th><th>RBI</th><th>BB</th><th>SO</th><th>LOB</th><th>AVG</th><th>OBP</th><th>SLG</th><th>OPS</th><th>HR-PA</th><th>SO-PA</th></tr></thead><tbody>${battingRows}</tbody></table>
+    <h2>Pitching Stats by Team</h2><table><thead><tr><th>Pitcher</th><th>GP</th><th>IP</th><th>HA</th><th>BB</th><th>K</th><th>HRA</th><th>R</th><th>UER</th><th>ER</th><th>ERA</th><th>WHIP</th><th>K:BB</th><th>LOB%</th></tr></thead><tbody>${pitchingRows}</tbody></table>
     <h2>Event Log</h2><table><thead><tr><th>#</th><th>Type</th><th>Inning</th><th>Batter</th><th>Pitcher</th><th>Result</th><th>Tag</th><th>Runs</th><th>RBI</th><th>Outs</th><th>Note</th></tr></thead><tbody>${eventRows}</tbody></table>
     <script>window.onload=()=>window.print();</script>
     </body></html>
@@ -6118,6 +6437,7 @@ function FullscreenGameView({
   onSelectRunner,
   tournamentButton = null,
   seriesSummaryText = "",
+  onOpenGameLog,
   onClose,
 }) {
   const awayBattingStats = statsForPlayers(battingStats, teamPlayers.away || []);
@@ -6131,7 +6451,7 @@ function FullscreenGameView({
   }
 
   return (
-    <div className="fixed inset-0 text-white" style={{ position: "fixed", top: 0, right: 0, bottom: 0, left: 0, zIndex: 2147483647, pointerEvents: "auto" }} onClick={(event) => event.stopPropagation()}>
+    <div className="fixed inset-0 text-white" style={{ position: "fixed", top: 0, right: 0, bottom: 0, left: 0, zIndex: 2147483000, pointerEvents: "auto" }} onClick={(event) => event.stopPropagation()}>
       <div className="fixed inset-x-0 top-0 bg-slate-950" style={{ bottom: "-120vh" }} aria-hidden="true" />
       <div
         className="fixed inset-0 overflow-y-auto overscroll-contain text-white"
@@ -6145,6 +6465,15 @@ function FullscreenGameView({
           </div>
           <div className="flex flex-wrap justify-end gap-2">
             {tournamentButton}
+            {onOpenGameLog && (
+              <button
+                type="button"
+                className="rounded-full border border-white/20 px-3 py-1.5 text-xs font-black uppercase text-white transition hover:bg-white hover:text-slate-950 sm:px-4 sm:py-2 sm:text-sm"
+                onClick={onOpenGameLog}
+              >
+                View Game Log
+              </button>
+            )}
             <button
               type="button"
               className="rounded-full border border-white/20 px-3 py-1.5 text-xs font-black uppercase text-white transition hover:bg-white hover:text-slate-950 sm:px-4 sm:py-2 sm:text-sm"
@@ -6569,6 +6898,95 @@ function LeagueTeamEditor({ team, teamIndex, playersPerTeam, divisions = [], pla
   );
 }
 
+function TournamentStatsTable({ rows = [], type = "hitting", group = "player", sortKey = "H", onSort }) {
+  const columnCount = type === "pitching" ? 9 : 13;
+  const headerClassName = "whitespace-nowrap px-2 py-2 text-left transition hover:bg-slate-100";
+  const SortHeader = ({ value, children, sticky = false }) => (
+    <th className={`${headerClassName} ${sticky ? "sticky left-0 z-30 bg-slate-50 px-3" : "bg-slate-50"}`}>
+      <button type="button" className="inline-flex items-center gap-1 font-black uppercase" onClick={() => onSort?.(value)}>
+        <span>{children}</span>
+        {sortKey === value && <span className="text-[10px] text-slate-900">↓</span>}
+      </button>
+    </th>
+  );
+
+  return (
+    <div className="max-h-[calc(100vh-18rem)] overflow-auto rounded-xl border pb-16">
+      <table className="min-w-full text-left text-sm">
+        <thead className="sticky top-0 z-20 bg-slate-50 text-xs font-black uppercase text-slate-500 shadow-sm">
+          {type === "pitching" ? (
+            <tr>
+              <SortHeader value="Name" sticky>{group === "team" ? "Team / Player" : "Player"}</SortHeader>
+              <SortHeader value="IP">IP</SortHeader>
+              <SortHeader value="ERA">ERA</SortHeader>
+              <SortHeader value="WHIP">WHIP</SortHeader>
+              <SortHeader value="H">H</SortHeader>
+              <SortHeader value="R">R</SortHeader>
+              <SortHeader value="BB">BB</SortHeader>
+              <SortHeader value="K">K</SortHeader>
+              <SortHeader value="HR">HR</SortHeader>
+            </tr>
+          ) : (
+            <tr>
+              <SortHeader value="Name" sticky>{group === "team" ? "Team / Player" : "Player"}</SortHeader>
+              <SortHeader value="PA">PA</SortHeader>
+              <SortHeader value="AB">AB</SortHeader>
+              <SortHeader value="H">H</SortHeader>
+              <SortHeader value="2B">2B</SortHeader>
+              <SortHeader value="3B">3B</SortHeader>
+              <SortHeader value="HR">HR</SortHeader>
+              <SortHeader value="R">R</SortHeader>
+              <SortHeader value="RBI">RBI</SortHeader>
+              <SortHeader value="BB">BB</SortHeader>
+              <SortHeader value="K">K</SortHeader>
+              <SortHeader value="AVG">AVG</SortHeader>
+              <SortHeader value="OPS">OPS</SortHeader>
+            </tr>
+          )}
+        </thead>
+        <tbody>
+          {rows.map(([label, stat, rowType], index) => {
+            if (rowType === "heading") {
+              return <tr key={`tournament-stats-heading-${label}-${index}`} className="border-t bg-slate-100"><td className="px-3 py-2 text-xs font-black uppercase tracking-wide text-slate-600" colSpan={columnCount}>{label}</td></tr>;
+            }
+            const isTotal = rowType === "total";
+            return type === "pitching" ? (
+              <tr key={`tournament-pitch-${label}-${index}`} className={`border-t ${isTotal ? "bg-slate-50 font-black" : ""}`}>
+                <td className={`sticky left-0 px-3 py-2 ${isTotal ? "bg-slate-50" : "bg-white"} font-black`}>{label}</td>
+                <td className="px-2 py-2">{formatInningsPitched(stat.OUTS)}</td>
+                <td className="px-2 py-2">{era(stat)}</td>
+                <td className="px-2 py-2">{whip(stat)}</td>
+                <td className="px-2 py-2">{stat.H}</td>
+                <td className="px-2 py-2">{stat.R}</td>
+                <td className="px-2 py-2">{stat.BB}</td>
+                <td className="px-2 py-2">{stat.K}</td>
+                <td className="px-2 py-2">{stat.HR}</td>
+              </tr>
+            ) : (
+              <tr key={`tournament-hit-${label}-${index}`} className={`border-t ${isTotal ? "bg-slate-50 font-black" : ""}`}>
+                <td className={`sticky left-0 px-3 py-2 ${isTotal ? "bg-slate-50" : "bg-white"} font-black`}>{label}</td>
+                <td className="px-2 py-2">{stat.PA}</td>
+                <td className="px-2 py-2">{stat.AB}</td>
+                <td className="px-2 py-2">{stat.H}</td>
+                <td className="px-2 py-2">{stat.D2}</td>
+                <td className="px-2 py-2">{stat.D3}</td>
+                <td className="px-2 py-2">{stat.HR}</td>
+                <td className="px-2 py-2">{stat.R}</td>
+                <td className="px-2 py-2">{stat.RBI}</td>
+                <td className="px-2 py-2">{stat.BB}</td>
+                <td className="px-2 py-2">{stat.K}</td>
+                <td className="px-2 py-2">{average(stat.H, stat.AB)}</td>
+                <td className="px-2 py-2">{ops(stat)}</td>
+              </tr>
+            );
+          })}
+          {rows.length === 0 && <tr><td className="px-3 py-4 text-sm font-semibold text-slate-500" colSpan={columnCount}>No completed tournament stats match this view yet.</td></tr>}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 export default function WiffleScoringPrototype() {
   const storageHydratedRef = useRef(false);
   const setupSignatureInitializedRef = useRef(false);
@@ -6632,12 +7050,14 @@ export default function WiffleScoringPrototype() {
   const [tournamentMatchupAction, setTournamentMatchupAction] = useState(null);
   const [historyTournamentStats, setHistoryTournamentStats] = useState(null);
   const [historyTournamentViewer, setHistoryTournamentViewer] = useState(null);
+  const [pendingTournamentReportExport, setPendingTournamentReportExport] = useState(null);
   const [pendingTournamentStartSetup, setPendingTournamentStartSetup] = useState(null);
   const [tournamentStatsGroup, setTournamentStatsGroup] = useState("player");
   const [tournamentStatsType, setTournamentStatsType] = useState("hitting");
   const [tournamentStatsSort, setTournamentStatsSort] = useState("H");
   const [tournamentStatsSearch, setTournamentStatsSearch] = useState("");
   const [gameLogModalOpen, setGameLogModalOpen] = useState(false);
+  const [resumeFullscreenAfterGameLog, setResumeFullscreenAfterGameLog] = useState(false);
   const [selectedBaseRunner, setSelectedBaseRunner] = useState(null);
   const [pendingPitcherChange, setPendingPitcherChange] = useState(null);
   const scoringFeedbackTimeoutRef = useRef(null);
@@ -6717,6 +7137,7 @@ export default function WiffleScoringPrototype() {
   const tournamentCanvasScrollRef = useRef(null);
   const tournamentCanvasPanRef = useRef(null);
   const tournamentCanvasExportRef = useRef(null);
+  const historyTournamentReportBracketRef = useRef(null);
   const [tournamentCanvasFullscreen, setTournamentCanvasFullscreen] = useState(false);
   const fitTournamentCanvasToView = () => {
     const scrollContainer = tournamentCanvasScrollRef.current;
@@ -6778,6 +7199,9 @@ export default function WiffleScoringPrototype() {
   const [draftAwardError, setDraftAwardError] = useState("");
   const [mockDraftMode, setMockDraftMode] = useState(false);
   const [mockDrafts, setMockDrafts] = useState({});
+  const [mockDraftManualAdds, setMockDraftManualAdds] = useState({});
+  const [mockDraftManualAddTeamId, setMockDraftManualAddTeamId] = useState("");
+  const [draftOrderExpanded, setDraftOrderExpanded] = useState(false);
   const [draftStartedOverrides, setDraftStartedOverrides] = useState({});
   const [pendingRealDraftStart, setPendingRealDraftStart] = useState(false);
   const [pendingDraftAward, setPendingDraftAward] = useState(null);
@@ -7482,27 +7906,6 @@ export default function WiffleScoringPrototype() {
     ? ["Name", "IP", "ERA", "WHIP", "R", "H", "BB", "K", "HR"]
     : ["Name", "PA", "AB", "H", "2B", "3B", "HR", "R", "RBI", "BB", "K", "AVG", "OPS"];
   const buildTournamentStatsRows = (sourceGames = []) => {
-    const rows = {};
-    const addTeamStats = (savedGame, slot) => {
-      const teamName = String(savedGame?.[slot === "away" ? "awayTeam" : "homeTeam"] || slot).trim() || slot;
-      const players = savedGame?.teamPlayers?.[slot] || [];
-      const sourceStats = tournamentStatsType === "pitching"
-        ? aggregatePitchingStats(statsForPlayers(savedGame.pitchingStats, players))
-        : aggregateBattingStats(statsForPlayers(savedGame.stats, players));
-      if (tournamentStatsType === "pitching") addPitchingStats(rows, { [teamName]: sourceStats });
-      else addBattingStats(rows, { [teamName]: sourceStats });
-    };
-
-    (sourceGames || []).forEach((savedGame) => {
-      if (tournamentStatsGroup === "team") {
-        addTeamStats(savedGame, "away");
-        addTeamStats(savedGame, "home");
-        return;
-      }
-      if (tournamentStatsType === "pitching") addPitchingStats(rows, savedGame.pitchingStats || {});
-      else addBattingStats(rows, savedGame.stats || {});
-    });
-
     const searchValue = String(tournamentStatsSearch || "").trim().toLowerCase();
     const sortKey = tournamentStatsSort;
     const getSortValue = (label, stat) => {
@@ -7516,8 +7919,7 @@ export default function WiffleScoringPrototype() {
       if (sortKey === "3B") return safeNumber(stat.D3);
       return safeNumber(stat[sortKey]);
     };
-
-    return Object.entries(rows)
+    const sortStatRows = (entries) => entries
       .filter(([label]) => !searchValue || String(label || "").toLowerCase().includes(searchValue))
       .sort(([labelA, statA], [labelB, statB]) => {
         if (sortKey === "Name") return String(labelA).localeCompare(String(labelB));
@@ -7526,6 +7928,52 @@ export default function WiffleScoringPrototype() {
         if (sortKey === "ERA") return valueA - valueB || String(labelA).localeCompare(String(labelB));
         return valueB - valueA || String(labelA).localeCompare(String(labelB));
       });
+
+    if (tournamentStatsGroup === "team") {
+      const teams = {};
+      const ensureTeam = (teamName) => {
+        const cleanName = String(teamName || "Team").trim() || "Team";
+        if (!teams[cleanName]) teams[cleanName] = { name: cleanName, batting: {}, pitching: {} };
+        return teams[cleanName];
+      };
+      (sourceGames || []).forEach((savedGame) => {
+        ["away", "home"].forEach((slot) => {
+          const team = ensureTeam(savedGame?.[slot === "away" ? "awayTeam" : "homeTeam"] || slot);
+          const players = savedGame?.teamPlayers?.[slot] || [];
+          addBattingStats(team.batting, statsForPlayers(savedGame.stats || {}, players));
+          addPitchingStats(team.pitching, statsForPlayers(savedGame.pitchingStats || {}, players));
+        });
+      });
+      const sortedTeams = Object.values(teams).sort((a, b) => a.name.localeCompare(b.name));
+      const rows = sortedTeams.flatMap((team) => {
+        const stats = tournamentStatsType === "pitching" ? team.pitching : team.batting;
+        const total = tournamentStatsType === "pitching" ? aggregatePitchingStats(stats) : aggregateBattingStats(stats);
+        const playerRows = sortStatRows(Object.entries(stats || {})).map(([player, stat]) => [player, stat, "player"]);
+        return [[team.name, null, "heading"], ...playerRows, ["Team Total", total, "total"]];
+      });
+      if (sortedTeams.length > 0) {
+        const averageStats = tournamentStatsType === "pitching"
+          ? averageStatObjects(sortedTeams.map((team) => aggregatePitchingStats(team.pitching || {})), emptyPitchingStats)
+          : averageStatObjects(sortedTeams.map((team) => aggregateBattingStats(team.batting || {})), emptyStats);
+        rows.push(["Tournament Average", averageStats, "total"]);
+      }
+      return rows;
+    }
+
+    const rows = {};
+    (sourceGames || []).forEach((savedGame) => {
+      if (tournamentStatsType === "pitching") addPitchingStats(rows, savedGame.pitchingStats || {});
+      else addBattingStats(rows, savedGame.stats || {});
+    });
+
+    const playerRows = sortStatRows(Object.entries(rows)).map(([label, stat]) => [label, stat, "player"]);
+    if (playerRows.length > 0) {
+      const averageStats = tournamentStatsType === "pitching"
+        ? averageStatObjects(playerRows.map(([, stat]) => stat), emptyPitchingStats)
+        : averageStatObjects(playerRows.map(([, stat]) => stat), emptyStats);
+      playerRows.push(["Player Average", averageStats, "total"]);
+    }
+    return playerRows;
   };
   const tournamentStatsRows = useMemo(() => buildTournamentStatsRows(activeTournamentSavedGames), [activeTournamentSavedGames, tournamentStatsGroup, tournamentStatsType, tournamentStatsSort, tournamentStatsSearch, gameInnings]);
   const historyTournamentStatsRows = useMemo(() => buildTournamentStatsRows(historyTournamentStats?.games || []), [historyTournamentStats?.games, tournamentStatsGroup, tournamentStatsType, tournamentStatsSort, tournamentStatsSearch, gameInnings]);
@@ -9998,7 +10446,7 @@ export default function WiffleScoringPrototype() {
   }
 
   function updateDraftCaptainValue(teamId, value) {
-    if (draftStarted) return;
+    if (draftStarted && !mockDraftMode) return;
     const safeValue = normalizeCaptainValueInput(value, true);
     updateDraftSettings(activeDraftSessionId, (draft) => ({
       ...draft,
@@ -10009,6 +10457,89 @@ export default function WiffleScoringPrototype() {
       ...league,
       teams: (league.teams || []).map((team) => (team.id === teamId ? { ...team, captainValue: safeValue } : team)),
     }));
+  }
+
+  function getDraftCaptainName(team = {}) {
+    if (mockDraftMode && activeDraftSettings?.captainNames && activeDraftSettings.captainNames[team.id] != null) {
+      return activeDraftSettings.captainNames[team.id];
+    }
+    return team.captain || "";
+  }
+
+  function updateMockDraftCaptain(teamId, captainName) {
+    if (!mockDraftMode) return;
+    const cleanCaptain = String(captainName || "").trim();
+    updateDraftSettings(activeDraftSessionId, (draft) => ({
+      ...draft,
+      captainNames: { ...(draft.captainNames || {}), [teamId]: cleanCaptain },
+    }));
+  }
+
+  function updateMockDraftManualAdd(teamId, field, value) {
+    setMockDraftManualAdds((prev) => ({
+      ...prev,
+      [teamId]: {
+        player: prev[teamId]?.player || "",
+        amount: prev[teamId]?.amount || "1",
+        [field]: value,
+      },
+    }));
+  }
+
+  function addMockDraftPlayerToTeam(teamId) {
+    if (!mockDraftMode || !teamId) return false;
+    const draftAdd = mockDraftManualAdds[teamId] || {};
+    const cleanPlayer = String(draftAdd.player || "").trim();
+    const safeAmount = Math.max(1, Number(draftAdd.amount) || 1);
+    if (!cleanPlayer) {
+      setDraftAwardError("Select a player before adding them to the mock draft roster.");
+      return false;
+    }
+    updateDraftSettings(activeDraftSessionId, (draft) => {
+      const draftedPlayers = Object.fromEntries(
+        Object.entries(draft.draftedPlayers || {}).map(([id, players]) => [id, (players || []).filter((player) => player !== cleanPlayer)]),
+      );
+      draftedPlayers[teamId] = [...new Set([...(draftedPlayers[teamId] || []), cleanPlayer])];
+      return {
+        ...draft,
+        enabled: true,
+        started: Boolean(draft.started),
+        draftedPlayers,
+        playerValues: { ...(draft.playerValues || {}), [cleanPlayer]: safeAmount },
+      };
+    });
+    setMockDraftManualAdds((prev) => ({ ...prev, [teamId]: { player: "", amount: "1" } }));
+    setDraftAwardError("");
+    return true;
+  }
+
+  function removeMockDraftPlayerFromTeam(teamId, playerName) {
+    if (!mockDraftMode || !teamId) return;
+    const cleanPlayer = String(playerName || "").trim();
+    updateDraftSettings(activeDraftSessionId, (draft) => ({
+      ...draft,
+      draftedPlayers: {
+        ...(draft.draftedPlayers || {}),
+        [teamId]: (draft.draftedPlayers?.[teamId] || []).filter((player) => player !== cleanPlayer),
+      },
+    }));
+  }
+
+  function updateMockDraftPlayerValue(playerName, value) {
+    if (!mockDraftMode) return;
+    const cleanPlayer = String(playerName || "").trim();
+    if (!cleanPlayer) return;
+    updateDraftSettings(activeDraftSessionId, (draft) => ({
+      ...draft,
+      playerValues: { ...(draft.playerValues || {}), [cleanPlayer]: Math.max(1, Number(value) || 1) },
+    }));
+  }
+
+  function openMockDraftManualAdd(teamId) {
+    setMockDraftManualAddTeamId(teamId || "");
+    if (teamId && !mockDraftManualAdds[teamId]) {
+      setMockDraftManualAdds((prev) => ({ ...prev, [teamId]: { player: "", amount: "1" } }));
+    }
   }
 
   function cancelDraftBid() {
@@ -13785,6 +14316,8 @@ export default function WiffleScoringPrototype() {
   }
 
   function exportCsv() {
+    const liveTeamStatSections = makeTeamStatSections({ awayTeam, homeTeam, teamPlayers, battingStats: game.stats, pitchingStats: game.pitchingStats });
+    const liveScoringSummaryRows = buildScoringSummaryExportRows(events, awayTeam, homeTeam);
     const rows = [];
     rows.push(makeCsvRow(["Game Summary"]));
     rows.push(makeCsvRow(["Date", gameDate]));
@@ -13801,6 +14334,12 @@ export default function WiffleScoringPrototype() {
     rows.push(makeCsvRow([homeTeam, ...lineScore.homeRunsByInning, lineScore.homeRunsTotal, lineScore.homeHits]));
     rows.push("");
 
+    rows.push(makeCsvRow(["Scoring Summary"]));
+    rows.push(makeCsvRow(["Inning", "Team", "Play", awayTeam, homeTeam]));
+    liveScoringSummaryRows.forEach((row) => rows.push(makeCsvRow([row.inning, row.team, row.play, row.awayScore, row.homeScore])));
+    if (liveScoringSummaryRows.length === 0) rows.push(makeCsvRow(["No scoring plays."]));
+    rows.push("");
+
     rows.push(makeCsvRow(["Team Players"]));
     rows.push(makeCsvRow(["Team", "Player", "Sub"]));
     ["away", "home"].forEach((teamKey) => {
@@ -13808,15 +14347,23 @@ export default function WiffleScoringPrototype() {
     });
     rows.push("");
 
-    rows.push(makeCsvRow(["Batting Stats"]));
-    rows.push(makeCsvRow(["Player", "GP", "PA", "AB", "Runs", "Hits", "2B", "3B", "HR", "RBI", "BB", "SO", "LOB", "AVG", "OBP", "SLG", "OPS", "HR-PA", "SO-PA"]));
-    Object.entries(game.stats).forEach(([player, stat]) => rows.push(makeCsvRow([player, stat.GP || 1, stat.PA || 0, stat.AB || 0, stat.R || 0, stat.H || 0, stat.D2 || 0, stat.D3 || 0, stat.HR || 0, stat.RBI || 0, stat.BB || 0, stat.K || 0, stat.LOB || 0, average(stat.H || 0, stat.AB || 0), obp(stat), slg(stat), ops(stat), hrPerPa(stat), soPerPa(stat)])));
-    rows.push("");
+    rows.push(makeCsvRow(["Batting Stats by Team"]));
+    rows.push(makeCsvRow(["Player", "GP", "PA", "AB", "Runs", "Hits", "1B", "2B", "3B", "HR", "RBI", "BB", "SO", "LOB", "AVG", "OBP", "SLG", "OPS", "HR-PA", "SO-PA"]));
+    liveTeamStatSections.forEach((team) => {
+      rows.push(makeCsvRow([team.name]));
+      Object.entries(team.battingStats || {}).forEach(([player, stat]) => rows.push(makeCsvRow(battingCsvValues(player, stat))));
+      rows.push(makeCsvRow(battingCsvValues(`${team.name} Total`, team.battingTotal)));
+      rows.push("");
+    });
 
-    rows.push(makeCsvRow(["Pitching Stats"]));
-    rows.push(makeCsvRow(["Pitcher", "GP", "IP", "HA", "BB", "HRA", "R", "UER", "ER", "ERA", "WHIP", "K:BB", "LOB%"]));
-    Object.entries(game.pitchingStats).forEach(([player, stat]) => rows.push(makeCsvRow([player, stat.GP || 1, formatInningsPitched(stat.OUTS || 0), stat.H || 0, stat.BB || 0, stat.HR || 0, stat.R || 0, stat.UER || 0, stat.ER ?? stat.R ?? 0, era(stat), whip(stat), kToBb(stat), pitcherLobPercent(stat)])));
-    rows.push("");
+    rows.push(makeCsvRow(["Pitching Stats by Team"]));
+    rows.push(makeCsvRow(["Pitcher", "GP", "IP", "HA", "BB", "K", "HRA", "R", "UER", "ER", "ERA", "WHIP", "K:BB", "LOB%"]));
+    liveTeamStatSections.forEach((team) => {
+      rows.push(makeCsvRow([team.name]));
+      Object.entries(team.pitchingStats || {}).forEach(([player, stat]) => rows.push(makeCsvRow(pitchingCsvValues(player, stat))));
+      rows.push(makeCsvRow(pitchingCsvValues(`${team.name} Total`, team.pitchingTotal)));
+      rows.push("");
+    });
 
     rows.push(makeCsvRow(["Power Play / Whammy Splits"]));
     rows.push(makeCsvRow(["Player", "Sub", "PA", "AB", "H", "AVG", "BB", "K", "R", "HR", "RBI", "Whammy"]));
@@ -13841,8 +14388,10 @@ export default function WiffleScoringPrototype() {
   function printPdfReport() {
     const teamDisplay = (teamKey) => (teamKey === "away" ? awayTeam : homeTeam);
     const playerRows = ["away", "home"].flatMap((teamKey) => teamPlayers[teamKey].map((player) => `<tr><td>${escapeHtml(teamDisplay(teamKey))}</td><td>${escapeHtml(player)}</td><td>${subPlayers[teamKey]?.[player] ? "Yes" : "No"}</td></tr>`)).join("");
-    const battingRows = Object.entries(game.stats).map(([player, stat]) => `<tr><td>${escapeHtml(player)}</td><td>${stat.GP || 1}</td><td>${stat.PA || 0}</td><td>${stat.AB || 0}</td><td>${stat.R || 0}</td><td>${stat.H || 0}</td><td>${stat.D2 || 0}</td><td>${stat.D3 || 0}</td><td>${stat.HR || 0}</td><td>${stat.RBI || 0}</td><td>${stat.BB || 0}</td><td>${stat.K || 0}</td><td>${stat.LOB || 0}</td><td>${average(stat.H || 0, stat.AB || 0)}</td><td>${obp(stat)}</td><td>${slg(stat)}</td><td>${ops(stat)}</td><td>${hrPerPa(stat)}</td><td>${soPerPa(stat)}</td></tr>`).join("");
-    const pitchingRows = Object.entries(game.pitchingStats).map(([player, stat]) => `<tr><td>${escapeHtml(player)}</td><td>${stat.GP || 1}</td><td>${formatInningsPitched(stat.OUTS || 0)}</td><td>${stat.H || 0}</td><td>${stat.BB || 0}</td><td>${stat.HR || 0}</td><td>${stat.R || 0}</td><td>${stat.UER || 0}</td><td>${stat.ER ?? stat.R ?? 0}</td><td>${era(stat)}</td><td>${whip(stat)}</td><td>${kToBb(stat)}</td><td>${pitcherLobPercent(stat)}</td></tr>`).join("");
+    const liveTeamStatSections = makeTeamStatSections({ awayTeam, homeTeam, teamPlayers, battingStats: game.stats, pitchingStats: game.pitchingStats });
+    const liveScoringSummaryRows = buildScoringSummaryExportRows(events, awayTeam, homeTeam);
+    const battingRows = liveTeamStatSections.map((team) => `<tr class="team-heading"><td colspan="20">${escapeHtml(team.name)}</td></tr>${Object.entries(team.battingStats || {}).map(([player, stat]) => battingHtmlRow(player, stat)).join("")}${battingHtmlRow(`${team.name} Total`, team.battingTotal, true)}`).join("");
+    const pitchingRows = liveTeamStatSections.map((team) => `<tr class="team-heading"><td colspan="14">${escapeHtml(team.name)}</td></tr>${Object.entries(team.pitchingStats || {}).map(([player, stat]) => pitchingHtmlRow(player, stat)).join("")}${pitchingHtmlRow(`${team.name} Total`, team.pitchingTotal, true)}`).join("");
     const splitRows = taggedHittingSplits.map((stat) => `<tr><td>${escapeHtml(stat.player)}</td><td>${stat.PA}</td><td>${stat.AB}</td><td>${stat.H}</td><td>${average(stat.H, stat.AB)}</td><td>${stat.BB}</td><td>${stat.K}</td><td>${stat.R}</td><td>${stat.HR}</td><td>${stat.RBI}</td><td>${stat.WHAMMY}</td></tr>`).join("");
     const pudwhackerRows = pudwhackerSplits.map((stat) => `<tr><td>${escapeHtml(stat.player)}</td><td>${stat.PA}</td><td>${stat.AB}</td><td>${stat.H}</td><td>${average(stat.H, stat.AB)}</td><td>${stat.BB}</td><td>${stat.K}</td><td>${stat.R}</td><td>${stat.HR}</td><td>${stat.RBI}</td><td>${stat.PUDWHACKER}</td></tr>`).join("");
     const eventRows = events.map((event, index) => `<tr><td>${index + 1}</td><td>${escapeHtml(event.type)}</td><td>${event.inning ? `${event.half === "top" ? "Top" : "Bottom"} ${event.inning}` : ""}</td><td>${escapeHtml(event.batter || "")}</td><td>${escapeHtml(event.pitcher || "")}</td><td>${escapeHtml(event.result || "")}</td><td>${escapeHtml(modifierLabel(event.modifier))}</td><td>${event.runs ?? ""}</td><td>${event.rbi ?? ""}</td><td>${event.outs ?? ""}</td><td>${escapeHtml(event.note || "")}</td></tr>`).join("");
@@ -13852,15 +14401,16 @@ export default function WiffleScoringPrototype() {
 
     printWindow.document.write(`
       <html><head><title>Wiffle Game Report</title><style>
-      body{font-family:Arial,sans-serif;color:#111827;padding:24px} table{width:100%;border-collapse:collapse;margin:12px 0 24px;font-size:12px} th,td{border:1px solid #d1d5db;padding:6px;text-align:left} th{background:#f3f4f6}.score{font-size:28px;font-weight:800;margin:8px 0 16px}
+      body{font-family:Arial,sans-serif;color:#111827;padding:24px} table{width:100%;border-collapse:collapse;margin:12px 0 24px;font-size:12px} th,td{border:1px solid #d1d5db;padding:6px;text-align:left} th{background:#f3f4f6}.score{font-size:28px;font-weight:800;margin:8px 0 16px}.team-heading td{background:#e5e7eb;font-weight:800}.total td{font-weight:800;background:#f9fafb}
       </style></head><body>
       <h1>Wiffle Game Report</h1>
       <div>${escapeHtml(gameDate || "No date")} ${escapeHtml(gameTime || "")} · ${escapeHtml(gameLocation || "No location")}</div>
       <div class="score">${escapeHtml(awayTeam)} ${game.awayScore} — ${escapeHtml(homeTeam)} ${game.homeScore}</div>
       <h2>Line Score</h2><table><thead><tr><th>Team</th>${lineScore.inningNumbers.map((inning) => `<th>${inning}</th>`).join("")}<th>R</th><th>H</th></tr></thead><tbody><tr><td>${escapeHtml(awayTeam)}</td>${lineScore.awayRunsByInning.map((run) => `<td>${run}</td>`).join("")}<td>${lineScore.awayRunsTotal}</td><td>${lineScore.awayHits}</td></tr><tr><td>${escapeHtml(homeTeam)}</td>${lineScore.homeRunsByInning.map((run) => `<td>${run}</td>`).join("")}<td>${lineScore.homeRunsTotal}</td><td>${lineScore.homeHits}</td></tr></tbody></table>
+      <h2>Scoring Summary</h2><table><thead><tr><th>Inning</th><th>Team</th><th>Play</th><th>${escapeHtml(awayTeam)}</th><th>${escapeHtml(homeTeam)}</th></tr></thead><tbody>${scoringSummaryHtmlRows(liveScoringSummaryRows, awayTeam, homeTeam)}</tbody></table>
       <h2>Team Players</h2><table><thead><tr><th>Team</th><th>Player</th><th>Sub</th></tr></thead><tbody>${playerRows}</tbody></table>
-      <h2>Batting Stats</h2><table><thead><tr><th>Player</th><th>GP</th><th>PA</th><th>AB</th><th>Runs</th><th>Hits</th><th>2B</th><th>3B</th><th>HR</th><th>RBI</th><th>BB</th><th>SO</th><th>LOB</th><th>AVG</th><th>OBP</th><th>SLG</th><th>OPS</th><th>HR-PA</th><th>SO-PA</th></tr></thead><tbody>${battingRows}</tbody></table>
-      <h2>Pitching Stats</h2><table><thead><tr><th>Pitcher</th><th>GP</th><th>IP</th><th>HA</th><th>BB</th><th>HRA</th><th>R</th><th>UER</th><th>ER</th><th>ERA</th><th>WHIP</th><th>K:BB</th><th>LOB%</th></tr></thead><tbody>${pitchingRows}</tbody></table>
+      <h2>Batting Stats by Team</h2><table><thead><tr><th>Player</th><th>GP</th><th>PA</th><th>AB</th><th>Runs</th><th>Hits</th><th>1B</th><th>2B</th><th>3B</th><th>HR</th><th>RBI</th><th>BB</th><th>SO</th><th>LOB</th><th>AVG</th><th>OBP</th><th>SLG</th><th>OPS</th><th>HR-PA</th><th>SO-PA</th></tr></thead><tbody>${battingRows}</tbody></table>
+      <h2>Pitching Stats by Team</h2><table><thead><tr><th>Pitcher</th><th>GP</th><th>IP</th><th>HA</th><th>BB</th><th>K</th><th>HRA</th><th>R</th><th>UER</th><th>ER</th><th>ERA</th><th>WHIP</th><th>K:BB</th><th>LOB%</th></tr></thead><tbody>${pitchingRows}</tbody></table>
       <h2>Power Play / Whammy Splits</h2><table><thead><tr><th>Player</th><th>PA</th><th>AB</th><th>H</th><th>AVG</th><th>BB</th><th>K</th><th>R</th><th>HR</th><th>RBI</th><th>Whammy</th></tr></thead><tbody>${splitRows}</tbody></table>
       <h2>Pudwhacker Splits</h2><table><thead><tr><th>Player</th><th>PA</th><th>AB</th><th>H</th><th>AVG</th><th>BB</th><th>K</th><th>R</th><th>HR</th><th>RBI</th><th>Pudwhacker</th></tr></thead><tbody>${pudwhackerRows}</tbody></table>
       <h2>Event Log</h2><table><thead><tr><th>#</th><th>Type</th><th>Inning</th><th>Batter</th><th>Pitcher</th><th>Result</th><th>Tag</th><th>Runs</th><th>RBI</th><th>Outs</th><th>Note</th></tr></thead><tbody>${eventRows}</tbody></table>
@@ -15527,6 +16077,7 @@ export default function WiffleScoringPrototype() {
                     Tournament Bracket
                   </button>
                 ) : null}
+                onOpenGameLog={() => setGameLogModalOpen(true)}
                 onClose={() => {
                   setFullscreenGameViewOpen(false);
                   if (gamesPageMode === "view") setGamesPageMode("");
@@ -16057,31 +16608,7 @@ export default function WiffleScoringPrototype() {
                 <div className="mb-3 rounded-xl border bg-slate-50 p-3 text-sm font-bold text-slate-600">
                   {activeTournamentSavedGames.length} game{activeTournamentSavedGames.length === 1 ? "" : "s"} included.
                 </div>
-                <div className="overflow-auto rounded-xl border">
-                  <table className="min-w-full text-left text-sm">
-                    <thead className="bg-slate-50 text-xs font-black uppercase text-slate-500">
-                      {tournamentStatsType === "pitching" ? (
-                        <tr><th className="sticky left-0 bg-slate-50 px-3 py-2">{tournamentStatsGroup === "team" ? "Team" : "Player"}</th><th className="px-2 py-2">IP</th><th className="px-2 py-2">ERA</th><th className="px-2 py-2">WHIP</th><th className="px-2 py-2">H</th><th className="px-2 py-2">R</th><th className="px-2 py-2">BB</th><th className="px-2 py-2">K</th><th className="px-2 py-2">HR</th></tr>
-                      ) : (
-                        <tr><th className="sticky left-0 bg-slate-50 px-3 py-2">{tournamentStatsGroup === "team" ? "Team" : "Player"}</th><th className="px-2 py-2">PA</th><th className="px-2 py-2">AB</th><th className="px-2 py-2">H</th><th className="px-2 py-2">2B</th><th className="px-2 py-2">3B</th><th className="px-2 py-2">HR</th><th className="px-2 py-2">R</th><th className="px-2 py-2">RBI</th><th className="px-2 py-2">BB</th><th className="px-2 py-2">K</th><th className="px-2 py-2">AVG</th><th className="px-2 py-2">OPS</th></tr>
-                      )}
-                    </thead>
-                    <tbody>
-                      {tournamentStatsRows.map(([label, stat]) => (
-                        tournamentStatsType === "pitching" ? (
-                          <tr key={`tournament-pitch-${label}`} className="border-t">
-                            <td className="sticky left-0 bg-white px-3 py-2 font-black">{label}</td><td className="px-2 py-2">{formatInningsPitched(stat.OUTS)}</td><td className="px-2 py-2">{era(stat, gameInnings)}</td><td className="px-2 py-2">{whip(stat)}</td><td className="px-2 py-2">{stat.H}</td><td className="px-2 py-2">{stat.R}</td><td className="px-2 py-2">{stat.BB}</td><td className="px-2 py-2">{stat.K}</td><td className="px-2 py-2">{stat.HR}</td>
-                          </tr>
-                        ) : (
-                          <tr key={`tournament-hit-${label}`} className="border-t">
-                            <td className="sticky left-0 bg-white px-3 py-2 font-black">{label}</td><td className="px-2 py-2">{stat.PA}</td><td className="px-2 py-2">{stat.AB}</td><td className="px-2 py-2">{stat.H}</td><td className="px-2 py-2">{stat.D2}</td><td className="px-2 py-2">{stat.D3}</td><td className="px-2 py-2">{stat.HR}</td><td className="px-2 py-2">{stat.R}</td><td className="px-2 py-2">{stat.RBI}</td><td className="px-2 py-2">{stat.BB}</td><td className="px-2 py-2">{stat.K}</td><td className="px-2 py-2">{average(stat.H, stat.AB)}</td><td className="px-2 py-2">{ops(stat)}</td>
-                          </tr>
-                        )
-                      ))}
-                      {tournamentStatsRows.length === 0 && <tr><td className="px-3 py-4 text-sm font-semibold text-slate-500" colSpan={tournamentStatsType === "pitching" ? 9 : 13}>No completed tournament stats match this view yet.</td></tr>}
-                    </tbody>
-                  </table>
-                </div>
+                <TournamentStatsTable rows={tournamentStatsRows} type={tournamentStatsType} group={tournamentStatsGroup} sortKey={tournamentStatsSort} onSort={setTournamentStatsSort} />
               </div>
             ) : (
               <ReadOnlyTournamentBracketCanvas
@@ -16112,7 +16639,37 @@ export default function WiffleScoringPrototype() {
                   <button type="button" className={`rounded-full px-3 py-1 text-xs font-black uppercase ${historyTournamentViewer.view === "stats" ? "bg-slate-900 text-white" : "text-slate-500"}`} onClick={() => setHistoryTournamentViewer((prev) => ({ ...prev, view: "stats" }))}>Stats</button>
                   {historyTournamentViewer.tournament?.type === "round_robin" && <button type="button" className={`rounded-full px-3 py-1 text-xs font-black uppercase ${historyTournamentViewer.view === "standings" ? "bg-slate-900 text-white" : "text-slate-500"}`} onClick={() => setHistoryTournamentViewer((prev) => ({ ...prev, view: "standings" }))}>Standings</button>}
                 </div>
+                {historyTournamentViewer.view === "stats" && (
+                  <button
+                    type="button"
+                    className="text-xs font-black uppercase text-slate-500 underline-offset-4 transition hover:text-slate-900 hover:underline"
+                    onClick={() => setPendingTournamentReportExport({
+                      tournament: historyTournamentViewer.tournament,
+                      games: historyTournamentViewer.group?.games || historyTournamentStats?.games || [],
+                      league: historyTournamentViewer.league,
+                      scheduledGames: historyTournamentViewer.week?.games || [],
+                      title: historyTournamentViewer.title || "Tournament",
+                    })}
+                  >
+                    Export
+                  </button>
+                )}
                 <Button variant="outline" onClick={() => { setHistoryTournamentViewer(null); setHistoryTournamentStats(null); }}>Exit</Button>
+              </div>
+            </div>
+            <div className="pointer-events-none absolute -left-[10000px] top-0 w-[1200px] bg-white">
+              <div ref={historyTournamentReportBracketRef}>
+                <ReadOnlyTournamentBracketCanvas
+                  tournament={historyTournamentViewer.tournament}
+                  league={historyTournamentViewer.league}
+                  leagues={leagues}
+                  previousGames={previousGames}
+                  scheduledGames={historyTournamentViewer.week?.games || []}
+                  heightClassName="h-[760px] max-h-none"
+                  showLoserConnectors
+                  fitToContainer
+                  showZoomControls={false}
+                />
               </div>
             </div>
             {historyTournamentViewer.view === "standings" && historyTournamentViewer.tournament?.type === "round_robin" ? (
@@ -16156,31 +16713,7 @@ export default function WiffleScoringPrototype() {
                 <div className="mb-3 rounded-xl border bg-slate-50 p-3 text-sm font-bold text-slate-600">
                   {(historyTournamentStats?.games || []).length} completed game{(historyTournamentStats?.games || []).length === 1 ? "" : "s"} included.
                 </div>
-                <div className="overflow-auto rounded-xl border">
-                  <table className="min-w-full text-left text-sm">
-                    <thead className="bg-slate-50 text-xs font-black uppercase text-slate-500">
-                      {tournamentStatsType === "pitching" ? (
-                        <tr><th className="sticky left-0 bg-slate-50 px-3 py-2">{tournamentStatsGroup === "team" ? "Team" : "Player"}</th><th className="px-2 py-2">IP</th><th className="px-2 py-2">ERA</th><th className="px-2 py-2">WHIP</th><th className="px-2 py-2">H</th><th className="px-2 py-2">R</th><th className="px-2 py-2">BB</th><th className="px-2 py-2">K</th><th className="px-2 py-2">HR</th></tr>
-                      ) : (
-                        <tr><th className="sticky left-0 bg-slate-50 px-3 py-2">{tournamentStatsGroup === "team" ? "Team" : "Player"}</th><th className="px-2 py-2">PA</th><th className="px-2 py-2">AB</th><th className="px-2 py-2">H</th><th className="px-2 py-2">2B</th><th className="px-2 py-2">3B</th><th className="px-2 py-2">HR</th><th className="px-2 py-2">R</th><th className="px-2 py-2">RBI</th><th className="px-2 py-2">BB</th><th className="px-2 py-2">K</th><th className="px-2 py-2">AVG</th><th className="px-2 py-2">OPS</th></tr>
-                      )}
-                    </thead>
-                    <tbody>
-                      {historyTournamentStatsRows.map(([label, stat]) => (
-                        tournamentStatsType === "pitching" ? (
-                          <tr key={`viewer-tournament-pitch-${label}`} className="border-t">
-                            <td className="sticky left-0 bg-white px-3 py-2 font-black">{label}</td><td className="px-2 py-2">{formatInningsPitched(stat.OUTS)}</td><td className="px-2 py-2">{era(stat, gameInnings)}</td><td className="px-2 py-2">{whip(stat)}</td><td className="px-2 py-2">{stat.H}</td><td className="px-2 py-2">{stat.R}</td><td className="px-2 py-2">{stat.BB}</td><td className="px-2 py-2">{stat.K}</td><td className="px-2 py-2">{stat.HR}</td>
-                          </tr>
-                        ) : (
-                          <tr key={`viewer-tournament-hit-${label}`} className="border-t">
-                            <td className="sticky left-0 bg-white px-3 py-2 font-black">{label}</td><td className="px-2 py-2">{stat.PA}</td><td className="px-2 py-2">{stat.AB}</td><td className="px-2 py-2">{stat.H}</td><td className="px-2 py-2">{stat.D2}</td><td className="px-2 py-2">{stat.D3}</td><td className="px-2 py-2">{stat.HR}</td><td className="px-2 py-2">{stat.R}</td><td className="px-2 py-2">{stat.RBI}</td><td className="px-2 py-2">{stat.BB}</td><td className="px-2 py-2">{stat.K}</td><td className="px-2 py-2">{average(stat.H, stat.AB)}</td><td className="px-2 py-2">{ops(stat)}</td>
-                          </tr>
-                        )
-                      ))}
-                      {historyTournamentStatsRows.length === 0 && <tr><td className="px-3 py-4 text-sm font-semibold text-slate-500" colSpan={tournamentStatsType === "pitching" ? 9 : 13}>No completed tournament stats match this view yet.</td></tr>}
-                    </tbody>
-                  </table>
-                </div>
+                <TournamentStatsTable rows={historyTournamentStatsRows} type={tournamentStatsType} group={tournamentStatsGroup} sortKey={tournamentStatsSort} onSort={setTournamentStatsSort} />
               </div>
             ) : (
               <ReadOnlyTournamentBracketCanvas
@@ -16195,6 +16728,39 @@ export default function WiffleScoringPrototype() {
                 onMatchupClick={(matchup) => openHistoryTournamentMatchupResults(historyTournamentViewer.group, matchup)}
               />
             )}
+          </div>
+        ), document.body)}
+
+        {pendingTournamentReportExport && typeof document !== "undefined" && createPortal((
+          <div className="fixed inset-0 flex items-center justify-center bg-slate-900/60 p-4" style={{ zIndex: 2147483647 }} onClick={(event) => event.stopPropagation()}>
+            <div className="w-full max-w-sm rounded-3xl bg-white p-5 shadow-xl">
+              <div className="text-xs font-black uppercase tracking-wide text-slate-500">Export Tournament</div>
+              <h2 className="mt-1 text-2xl font-black">Choose export type</h2>
+              <p className="mt-2 text-sm font-semibold text-slate-600">PDF includes the bracket printout and stats. CSV exports the report tables.</p>
+              <div className="mt-5 grid gap-2 sm:grid-cols-2">
+                <Button
+                  variant="primary"
+                  onClick={() => {
+                    printTournamentReport({ ...pendingTournamentReportExport, leagues, bracketNode: historyTournamentReportBracketRef.current });
+                    setPendingTournamentReportExport(null);
+                  }}
+                >
+                  PDF
+                </Button>
+                <Button
+                  variant="outline"
+                  onClick={() => {
+                    exportTournamentReportCsv({ ...pendingTournamentReportExport, leagues });
+                    setPendingTournamentReportExport(null);
+                  }}
+                >
+                  CSV
+                </Button>
+              </div>
+              <div className="mt-3 flex justify-end">
+                <Button variant="outline" onClick={() => setPendingTournamentReportExport(null)}>Cancel</Button>
+              </div>
+            </div>
           </div>
         ), document.body)}
 
@@ -16233,31 +16799,7 @@ export default function WiffleScoringPrototype() {
               <div className="mb-3 rounded-xl border bg-slate-50 p-3 text-sm font-bold text-slate-600">
                 {(historyTournamentStats.games || []).length} completed game{(historyTournamentStats.games || []).length === 1 ? "" : "s"} included.
               </div>
-              <div className="overflow-auto rounded-xl border">
-                <table className="min-w-full text-left text-sm">
-                  <thead className="bg-slate-50 text-xs font-black uppercase text-slate-500">
-                    {tournamentStatsType === "pitching" ? (
-                      <tr><th className="sticky left-0 bg-slate-50 px-3 py-2">{tournamentStatsGroup === "team" ? "Team" : "Player"}</th><th className="px-2 py-2">IP</th><th className="px-2 py-2">ERA</th><th className="px-2 py-2">WHIP</th><th className="px-2 py-2">H</th><th className="px-2 py-2">R</th><th className="px-2 py-2">BB</th><th className="px-2 py-2">K</th><th className="px-2 py-2">HR</th></tr>
-                    ) : (
-                      <tr><th className="sticky left-0 bg-slate-50 px-3 py-2">{tournamentStatsGroup === "team" ? "Team" : "Player"}</th><th className="px-2 py-2">PA</th><th className="px-2 py-2">AB</th><th className="px-2 py-2">H</th><th className="px-2 py-2">2B</th><th className="px-2 py-2">3B</th><th className="px-2 py-2">HR</th><th className="px-2 py-2">R</th><th className="px-2 py-2">RBI</th><th className="px-2 py-2">BB</th><th className="px-2 py-2">K</th><th className="px-2 py-2">AVG</th><th className="px-2 py-2">OPS</th></tr>
-                    )}
-                  </thead>
-                  <tbody>
-                    {historyTournamentStatsRows.map(([label, stat]) => (
-                      tournamentStatsType === "pitching" ? (
-                        <tr key={`history-tournament-pitch-${label}`} className="border-t">
-                          <td className="sticky left-0 bg-white px-3 py-2 font-black">{label}</td><td className="px-2 py-2">{formatInningsPitched(stat.OUTS)}</td><td className="px-2 py-2">{era(stat, gameInnings)}</td><td className="px-2 py-2">{whip(stat)}</td><td className="px-2 py-2">{stat.H}</td><td className="px-2 py-2">{stat.R}</td><td className="px-2 py-2">{stat.BB}</td><td className="px-2 py-2">{stat.K}</td><td className="px-2 py-2">{stat.HR}</td>
-                        </tr>
-                      ) : (
-                        <tr key={`history-tournament-hit-${label}`} className="border-t">
-                          <td className="sticky left-0 bg-white px-3 py-2 font-black">{label}</td><td className="px-2 py-2">{stat.PA}</td><td className="px-2 py-2">{stat.AB}</td><td className="px-2 py-2">{stat.H}</td><td className="px-2 py-2">{stat.D2}</td><td className="px-2 py-2">{stat.D3}</td><td className="px-2 py-2">{stat.HR}</td><td className="px-2 py-2">{stat.R}</td><td className="px-2 py-2">{stat.RBI}</td><td className="px-2 py-2">{stat.BB}</td><td className="px-2 py-2">{stat.K}</td><td className="px-2 py-2">{average(stat.H, stat.AB)}</td><td className="px-2 py-2">{ops(stat)}</td>
-                        </tr>
-                      )
-                    ))}
-                    {historyTournamentStatsRows.length === 0 && <tr><td className="px-3 py-4 text-sm font-semibold text-slate-500" colSpan={tournamentStatsType === "pitching" ? 9 : 13}>No completed tournament stats match this view yet.</td></tr>}
-                  </tbody>
-                </table>
-              </div>
+              <TournamentStatsTable rows={historyTournamentStatsRows} type={tournamentStatsType} group={tournamentStatsGroup} sortKey={tournamentStatsSort} onSort={setTournamentStatsSort} />
             </div>
           </div>
         ), document.body)}
@@ -19550,43 +20092,51 @@ export default function WiffleScoringPrototype() {
               {(mockDraftMode || leagueDraftEnabledForActiveSession) && (
               <div className="space-y-4">
                 <Card>
-                  <div className="p-5">
-                    <div className="mb-3 flex items-center justify-between gap-3">
+                  <div className="p-4">
+                    <div className="mb-2 flex items-center justify-between gap-3">
                       <div>
-                        <div className="flex items-center gap-2">
+                        <div className="flex flex-wrap items-center gap-2">
                           <h2 className="text-xl font-bold">Draft Order</h2>
                           {mockDraftMode && <span className="rounded-full bg-purple-100 px-3 py-1 text-xs font-black uppercase text-purple-800">Mock Draft</span>}
                           {!draftStarted && <span className="rounded-full bg-blue-100 px-3 py-1 text-xs font-black uppercase text-blue-800">Setup Mode</span>}
                         </div>
-                        {!draftStarted && <p className="mt-1 text-xs font-semibold text-slate-500">Use the arrows to edit draft order before starting the draft.</p>}
                       </div>
-                      {!draftBoardEnabled && <span className="rounded-full bg-amber-100 px-3 py-1 text-xs font-black uppercase text-amber-800">Draft Disabled</span>}
+                      <div className="flex flex-wrap items-center justify-end gap-2">
+                        {!draftBoardEnabled && <span className="rounded-full bg-amber-100 px-3 py-1 text-xs font-black uppercase text-amber-800">Draft Disabled</span>}
+                        {!draftStarted && <Button variant="outline" onClick={() => setDraftOrderExpanded((current) => !current)}>{draftOrderExpanded ? "Done" : "Edit Order"}</Button>}
+                      </div>
                     </div>
-                    <div className="space-y-2">
+                    <div className="flex flex-wrap gap-1.5 rounded-xl border bg-slate-50 p-2">
                       {activeDraftSettings.draftOrder.map((teamId, index) => {
                         const team = (selectedLeague.teams || []).find((item) => item.id === teamId);
                         if (!team) return null;
+                        const isUpNext = teamId === draftNominatingTeamId && draftStarted && !draftCompleted;
                         return (
-                          <div key={teamId} className={`grid grid-cols-[2rem_1fr_auto] items-center gap-2 rounded-xl border p-2 ${teamId === draftNominatingTeamId && draftStarted && !draftCompleted ? "border-blue-300 bg-blue-50 ring-2 ring-blue-100" : "bg-slate-50"}`}>
-                            <div className="text-center text-sm font-black text-slate-500">{index + 1}</div>
-                            <div className="font-semibold">
-                              <div className="flex flex-wrap items-center gap-2">
-                                <span>{team.name}</span>
-                                {team.division && <span className="rounded-full bg-white px-2 py-0.5 text-[10px] font-black uppercase text-slate-500">{team.division}</span>}
-                                {teamId === draftNominatingTeamId && draftStarted && !draftCompleted && <span className="rounded-full bg-blue-600 px-2 py-0.5 text-[10px] font-black uppercase text-white">Up Next</span>}
-                              </div>
-                              <div className="mt-1 flex flex-wrap gap-2 text-xs font-bold text-slate-600">
-                                {team.captain ? <span>{`Captain: ${team.captain}`}</span> : <span className="text-slate-400">No captain</span>}
-                                {team.captain && <span>{`Captain Value: $${getCaptainDraftValue(activeDraftSettings, team)}`}</span>}
-                              </div>
-                            </div>
-                            {!draftStarted && (
-                              <div className="flex gap-1"><Button variant="outline" disabled={draftNominationLocked || index === 0} onClick={() => moveDraftOrder(index, -1)}>↑</Button><Button variant="outline" disabled={draftNominationLocked || index === activeDraftSettings.draftOrder.length - 1} onClick={() => moveDraftOrder(index, 1)}>↓</Button></div>
-                            )}
-                          </div>
+                          <span key={`draft-order-chip-${teamId}`} className={`inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-xs font-black ${isUpNext ? "bg-blue-600 text-white" : "bg-white text-slate-700"}`}>
+                            <span>{index + 1}.</span>
+                            <span>{team.name}</span>
+                          </span>
                         );
                       })}
                     </div>
+                    {draftOrderExpanded && !draftStarted && (
+                      <div className="mt-3 space-y-1.5">
+                        {activeDraftSettings.draftOrder.map((teamId, index) => {
+                          const team = (selectedLeague.teams || []).find((item) => item.id === teamId);
+                          if (!team) return null;
+                          return (
+                            <div key={`draft-order-edit-${teamId}`} className="grid grid-cols-[2rem_1fr_auto] items-center gap-2 rounded-xl border bg-white px-2 py-1.5">
+                              <div className="text-center text-xs font-black text-slate-500">{index + 1}</div>
+                              <div className="min-w-0 truncate text-sm font-black">{team.name}</div>
+                              <div className="flex gap-1">
+                                <Button variant="outline" disabled={draftNominationLocked || index === 0} onClick={() => moveDraftOrder(index, -1)}>↑</Button>
+                                <Button variant="outline" disabled={draftNominationLocked || index === activeDraftSettings.draftOrder.length - 1} onClick={() => moveDraftOrder(index, 1)}>↓</Button>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
                   </div>
                 </Card>
               </div>
@@ -19621,57 +20171,111 @@ export default function WiffleScoringPrototype() {
                           const rosterTarget = getTeamTotalRosterTargetCount(selectedLeague, team.id);
                           const locked = draftLockedTeamIds.has(team.id);
                           const carryoverOk = !activeDraftSettings.maxCarryoverEnabled || spend >= draftMinimumSpend;
+                          const captainName = getDraftCaptainName(team);
+                          const captainOptions = [...new Set([captainName, ...selectedLeaguePlayerOptions].map((player) => String(player || "").trim()).filter(Boolean))];
                           return (
-                            <div key={`final-draft-${team.id}`} className="rounded-2xl border bg-slate-50 p-4">
+                            <div key={`final-draft-${team.id}`} className="rounded-2xl border bg-slate-50 p-3">
                               <div className="flex flex-wrap items-start justify-between gap-3">
                                 <div>
-                                  <div className="text-lg font-black">{team.name}</div>
+                                  <div className="text-base font-black sm:text-lg">{team.name}</div>
                                   <div className="mt-1 text-xs font-semibold uppercase text-slate-500">{team.division || "No Division"} · Roster {rosterCount}/{rosterTarget}</div>
                                 </div>
-                                <div className="flex flex-col items-end gap-2">
+                                <div className="flex flex-wrap items-center justify-end gap-2">
                                   <div className={`rounded-full px-3 py-1 text-xs font-black uppercase ${locked ? "bg-slate-900 text-white" : carryoverOk ? "bg-green-100 text-green-800" : "bg-amber-100 text-amber-800"}`}>
                                     {locked ? "Locked" : carryoverOk ? "On Budget" : "Below Minimum"}
                                   </div>
-                                  <label className="flex items-center gap-2 rounded-lg border bg-white px-3 py-2 text-xs font-semibold">
+                                  <label className="flex items-center gap-2 rounded-lg border bg-white px-2 py-1.5 text-xs font-semibold">
                                     <input type="checkbox" checked={locked} onChange={(event) => toggleDraftTeamLock(team.id, event.target.checked)} />
-                                    Lock team after session
+                                    Lock
                                   </label>
                                 </div>
                               </div>
 
-                              <div className="mt-3 grid gap-2 sm:grid-cols-3">
-                                <div className="rounded-xl border bg-white p-3">
-                                  <div className="text-xs font-bold uppercase text-slate-500">Spent</div>
-                                  <div className="text-2xl font-black">{`$${spend}`}</div>
+                              <div className="mt-2 grid grid-cols-3 overflow-hidden rounded-xl border bg-white text-center">
+                                <div className="p-2">
+                                  <div className="text-[10px] font-black uppercase text-slate-500">Spent</div>
+                                  <div className="text-lg font-black">{`$${spend}`}</div>
                                 </div>
-                                <div className="rounded-xl border bg-white p-3">
-                                  <div className="text-xs font-bold uppercase text-slate-500">Remaining</div>
-                                  <div className="text-2xl font-black">{`$${remaining}`}</div>
+                                <div className="border-x p-2">
+                                  <div className="text-[10px] font-black uppercase text-slate-500">Left</div>
+                                  <div className="text-lg font-black">{`$${remaining}`}</div>
                                 </div>
-                                <div className="rounded-xl border bg-white p-3">
-                                  <div className="text-xs font-bold uppercase text-slate-500">Cap</div>
-                                  <div className="text-2xl font-black">{`$${activeDraftSettings.cap}`}</div>
+                                <div className="p-2">
+                                  <div className="text-[10px] font-black uppercase text-slate-500">Cap</div>
+                                  <div className="text-lg font-black">{`$${activeDraftSettings.cap}`}</div>
                                 </div>
                               </div>
 
                               {activeDraftSettings.maxCarryoverEnabled && (
-                                <div className="mt-3 rounded-xl border bg-white p-3 text-sm">
+                                <div className="mt-2 rounded-xl border bg-white p-2 text-xs">
                                   <div className="font-bold">{`Max Carryover: $${activeDraftSettings.maxCarryover}`}</div>
-                                  <div className="text-xs text-slate-500">{`Minimum spend required: $${draftMinimumSpend} · Current carryover: $${remaining}`}</div>
+                                  <div className="text-slate-500">{`Minimum spend: $${draftMinimumSpend} · Current carryover: $${remaining}`}</div>
                                 </div>
                               )}
 
-                              <div className="mt-3 rounded-xl border bg-white p-3">
-                                <div className="mb-2 text-xs font-black uppercase text-slate-500">Roster</div>
-                                <div className="space-y-1 text-sm">
-                                  {team.captain ? <div className="font-semibold">{activeDraftSettings.enabled ? `Captain: ${team.captain} ($${getCaptainDraftValue(activeDraftSettings, team)})` : `Captain: ${team.captain}`}</div> : <div className="text-slate-500">No captain assigned.</div>}
-                                  {draftedPlayers.length > 0 ? draftedPlayers.map((player) => (
-                                    <div key={`${team.id}-${player}`} className="flex justify-between gap-2 border-t pt-1">
-                                      <span>{player}</span>
-                                      <span className="font-bold">{`$${activeDraftSettings.playerValues?.[player] || 0}`}</span>
-                                    </div>
-                                  )) : <div className="text-slate-500">No drafted players yet.</div>}
+                              <div className="mt-2 rounded-xl border bg-white p-3">
+                                <div className="mb-2 flex items-center justify-between gap-2">
+                                  <div className="text-xs font-black uppercase text-slate-500">Roster</div>
+                                  {mockDraftMode && (
+                                    <button type="button" className="rounded-lg border bg-white px-2.5 py-1 text-xs font-black text-slate-700 hover:bg-slate-50" onClick={() => openMockDraftManualAdd(team.id)}>
+                                      Manual Add Player
+                                    </button>
+                                  )}
                                 </div>
+                                <div className="overflow-hidden rounded-lg border text-sm">
+                                  <div className="grid grid-cols-[1fr_5.25rem] bg-slate-50 text-[10px] font-black uppercase text-slate-500">
+                                    <div className="px-2 py-1.5">Player</div>
+                                    <div className="border-l px-2 py-1.5 text-right">Value</div>
+                                  </div>
+                                  <div className="grid grid-cols-[1fr_5.25rem] items-center border-t">
+                                    <div className="min-w-0 px-2 py-1.5">
+                                      {mockDraftMode ? (
+                                        <select className="w-full rounded-lg border px-2 py-1 text-xs font-semibold" value={captainName} onChange={(event) => updateMockDraftCaptain(team.id, event.target.value)}>
+                                          <option value="">No captain</option>
+                                          {captainOptions.map((player) => <option key={`mock-captain-${team.id}-${player}`} value={player}>{player}</option>)}
+                                        </select>
+                                      ) : team.captain ? (
+                                        <span className="font-semibold">{`Captain: ${team.captain}`}</span>
+                                      ) : (
+                                        <span className="text-slate-500">No captain assigned.</span>
+                                      )}
+                                    </div>
+                                    <div className="border-l px-2 py-1.5 text-right">
+                                      {mockDraftMode ? (
+                                        <input type="number" min="1" className="w-full rounded-lg border px-2 py-1 text-right text-xs font-black" value={getCaptainDraftValue(activeDraftSettings, team) || 1} onChange={(event) => updateDraftCaptainValue(team.id, event.target.value)} />
+                                      ) : team.captain ? (
+                                        <span className="font-black">{`$${getCaptainDraftValue(activeDraftSettings, team)}`}</span>
+                                      ) : (
+                                        <span className="text-slate-400">-</span>
+                                      )}
+                                    </div>
+                                  </div>
+                                  {draftedPlayers.map((player) => (
+                                    <div key={`${team.id}-${player}`} className="grid grid-cols-[1fr_5.25rem] items-center border-t">
+                                      <div className="min-w-0 px-2 py-1.5">
+                                        <div className="truncate font-semibold">{player}</div>
+                                        {mockDraftMode && (
+                                          <button type="button" className="mt-0.5 text-[10px] font-black uppercase text-red-600 hover:text-red-700" onClick={() => removeMockDraftPlayerFromTeam(team.id, player)}>
+                                            Remove
+                                          </button>
+                                        )}
+                                      </div>
+                                      <div className="border-l px-2 py-1.5 text-right">
+                                        {mockDraftMode ? (
+                                          <input type="number" min="1" className="w-full rounded-lg border px-2 py-1 text-right text-xs font-black" value={activeDraftSettings.playerValues?.[player] || 1} onChange={(event) => updateMockDraftPlayerValue(player, event.target.value)} />
+                                        ) : (
+                                          <span className="font-black">{`$${activeDraftSettings.playerValues?.[player] || 0}`}</span>
+                                        )}
+                                      </div>
+                                    </div>
+                                  ))}
+                                  {draftedPlayers.length === 0 && (
+                                    <div className="border-t px-2 py-2 text-sm text-slate-500">No drafted players yet.</div>
+                                  )}
+                                </div>
+                                {mockDraftMode && (
+                                  <p className="mt-2 text-[11px] font-semibold text-slate-500">Click a value to edit it in mock draft mode.</p>
+                                )}
                               </div>
                             </div>
                           );
@@ -21084,6 +21688,44 @@ export default function WiffleScoringPrototype() {
           </div>
         )}
 
+        {mockDraftManualAddTeamId && (() => {
+          const team = (selectedLeague?.teams || []).find((item) => item.id === mockDraftManualAddTeamId);
+          const captainName = getDraftCaptainName(team || {});
+          const manualAdd = mockDraftManualAdds[mockDraftManualAddTeamId] || { player: "", amount: "1" };
+          const manualPlayerOptions = selectedLeaguePlayerOptions.filter((player) => {
+            const cleanPlayer = String(player || "").trim();
+            if (!cleanPlayer || cleanPlayer === captainName) return false;
+            return !getDraftedPlayerTeamId(activeDraftSettings, cleanPlayer);
+          });
+          return (
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4">
+              <div className="w-full max-w-md rounded-3xl bg-white p-5 shadow-xl">
+                <div className="text-xs font-black uppercase tracking-wide text-purple-700">Mock Draft</div>
+                <h2 className="mt-1 text-2xl font-black">Manual Add Player</h2>
+                <p className="mt-1 text-sm font-semibold text-slate-500">{team?.name || "Select team"}</p>
+                <div className="mt-4 grid gap-3">
+                  <div>
+                    <label className="text-xs font-semibold uppercase text-slate-500">Player</label>
+                    <select className="mt-1 w-full rounded-xl border px-3 py-2 text-sm font-semibold" value={manualAdd.player || ""} onChange={(event) => updateMockDraftManualAdd(mockDraftManualAddTeamId, "player", event.target.value)}>
+                      <option value="">Select player</option>
+                      {manualPlayerOptions.map((player) => <option key={`mock-manual-player-${mockDraftManualAddTeamId}-${player}`} value={player}>{player}</option>)}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="text-xs font-semibold uppercase text-slate-500">Value</label>
+                    <input type="number" min="1" className="mt-1 w-full rounded-xl border px-3 py-2 text-sm font-black" value={manualAdd.amount || "1"} onChange={(event) => updateMockDraftManualAdd(mockDraftManualAddTeamId, "amount", event.target.value)} />
+                  </div>
+                  {draftAwardError && <p className="rounded-xl border border-red-200 bg-red-50 p-3 text-sm font-semibold text-red-700">{draftAwardError}</p>}
+                </div>
+                <div className="mt-5 flex flex-wrap justify-end gap-2">
+                  <Button variant="outline" onClick={() => { setMockDraftManualAddTeamId(""); setDraftAwardError(""); }}>Cancel</Button>
+                  <Button variant="primary" disabled={!manualAdd.player} onClick={() => { if (addMockDraftPlayerToTeam(mockDraftManualAddTeamId)) setMockDraftManualAddTeamId(""); }}>Add Player</Button>
+                </div>
+              </div>
+            </div>
+          );
+        })()}
+
         {blockedRosterAssignment && (
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4">
             <div className="w-full max-w-md rounded-3xl bg-white p-5 shadow-xl">
@@ -21277,14 +21919,22 @@ export default function WiffleScoringPrototype() {
         )}
 
         {gameLogModalOpen && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4">
+          <div className="fixed inset-0 flex items-center justify-center bg-slate-900/50 p-4" style={{ zIndex: 2147483647 }}>
             <div className="flex max-h-[90vh] w-full max-w-2xl flex-col rounded-3xl bg-white p-5 shadow-xl">
               <div className="mb-4 flex items-center justify-between gap-3">
                 <div>
                   <div className="text-xs font-black uppercase tracking-wide text-slate-500">Game Log</div>
                   <h2 className="mt-1 text-2xl font-black">{awayTeam} vs {homeTeam}</h2>
                 </div>
-                <Button variant="outline" onClick={() => setGameLogModalOpen(false)}>Close</Button>
+                <Button
+                  variant="outline"
+                  onClick={() => {
+                    setGameLogModalOpen(false);
+                    if (resumeFullscreenAfterGameLog) setResumeFullscreenAfterGameLog(false);
+                  }}
+                >
+                  Close
+                </Button>
               </div>
               <EventLogList events={events} awayTeam={awayTeam} homeTeam={homeTeam} />
             </div>
@@ -21778,9 +22428,10 @@ export default function WiffleScoringPrototype() {
                                 <div key={`tournament-history-${savedGame.id}`} className="rounded-xl border bg-slate-50 p-3">
                                   <div className="text-xs font-black uppercase text-slate-500">{savedGame.gameDate || "No date"} {savedGame.gameTime || ""}</div>
                                   <div className="mt-1 text-sm font-black">{savedGame.awayTeam} {savedGame.awayScore} - {savedGame.homeScore} {savedGame.homeTeam}</div>
-                                  <div className="mt-2 flex flex-wrap gap-2">
+                                  <div className="mt-2 flex flex-wrap items-center gap-2">
                                     <Button variant="outline" onClick={() => setTournamentGameDetail(savedGame)}>Stats</Button>
                                     {savedGame.status !== "final" && <Button variant="primary" onClick={() => openSavedGame(savedGame)}>Resume</Button>}
+                                    <button type="button" className="ml-auto text-[10px] font-black uppercase text-red-600 underline-offset-4 transition hover:text-red-700 hover:underline" onClick={() => requestDeleteSavedGame(savedGame)}>Erase</button>
                                   </div>
                                 </div>
                               ))}
@@ -21789,19 +22440,17 @@ export default function WiffleScoringPrototype() {
                         ) : (
                           <div className="space-y-2">
                             {displayGames.map((savedGame) => (
-                              <button
+                              <div
                                 key={`week-history-${savedGame.id}`}
-                                type="button"
-                                className="w-full rounded-xl border bg-slate-50 p-3 text-left transition hover:bg-white hover:shadow-sm"
-                                onClick={() => setTournamentGameDetail(savedGame)}
+                                className="w-full rounded-xl border bg-slate-50 p-3"
                               >
                                 <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-                                  <div>
+                                  <button type="button" className="min-w-0 flex-1 text-left" onClick={() => setTournamentGameDetail(savedGame)}>
                                     <div className="text-xs font-black uppercase text-slate-500">{savedGame.gameDate || "No date"} {savedGame.gameTime || ""} · {savedGame.gameLocation || "No location"}</div>
                                     <div className="mt-1 text-lg font-black">{savedGame.awayTeam} {savedGame.awayScore} - {savedGame.homeScore} {savedGame.homeTeam}</div>
                                     <div className="mt-1 text-sm font-semibold text-slate-500">Saved {savedGame.savedAt} · {savedGame.eventCount} events · {savedGame.innings} inning(s)</div>
-                                  </div>
-                                  <div className="flex flex-wrap gap-2">
+                                  </button>
+                                  <div className="flex flex-wrap items-center gap-2 sm:justify-end">
                                     <span className="rounded-full bg-white px-3 py-1 text-xs font-black uppercase text-slate-500">{savedGame.status === "final" ? "Final" : savedGame.status === "paused" ? "Paused" : "Live"}</span>
                                     {savedGame.status !== "final" && (
                                       <span
@@ -21820,26 +22469,13 @@ export default function WiffleScoringPrototype() {
                                         Resume
                                       </span>
                                     )}
+                                    <button type="button" className="ml-auto text-[10px] font-black uppercase text-red-600 underline-offset-4 transition hover:text-red-700 hover:underline sm:ml-0" onClick={() => requestDeleteSavedGame(savedGame)}>Erase</button>
                                   </div>
                                 </div>
-                              </button>
-                            ))}
-                          </div>
-                        )}
-                        <div className="mt-4 border-t pt-4">
-                          <div className="text-xs font-black uppercase text-slate-500">Saved Games</div>
-                          <div className="mt-2 grid gap-2 md:grid-cols-2">
-                            {displayGames.map((savedGame) => (
-                              <div key={`erase-history-${group.id}-${savedGame.id}`} className="flex items-center justify-between gap-2 rounded-xl border border-red-100 bg-red-50 p-3">
-                                <div className="min-w-0">
-                                  <div className="truncate text-sm font-black text-red-900">{savedGame.awayTeam} {savedGame.awayScore} - {savedGame.homeScore} {savedGame.homeTeam}</div>
-                                  <div className="text-xs font-semibold text-red-700">{savedGame.savedAt}</div>
-                                </div>
-                                <Button variant="danger" onClick={() => requestDeleteSavedGame(savedGame)}>Erase</Button>
                               </div>
                             ))}
                           </div>
-                        </div>
+                        )}
                       </div>
                     )}
                   </div>

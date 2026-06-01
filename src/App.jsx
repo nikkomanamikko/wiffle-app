@@ -1898,16 +1898,7 @@ const deviceSessionStateKeys = [
   "activeScheduleCopyTool",
   "pendingCopyWeekId",
   "copyWeekOneWeekLater",
-  "draftSessionId",
-  "draftSelectedPlayer",
-  "draftBidTeamId",
-  "draftBidAmount",
-  "draftTimerRemaining",
-  "draftTimerRunning",
   "draftAwardError",
-  "mockDraftMode",
-  "mockDrafts",
-  "draftStartedOverrides",
   "gameStarted",
   "gamePaused",
   "setupEditingDuringGame",
@@ -7201,6 +7192,10 @@ export default function WiffleScoringPrototype() {
   const [mockDrafts, setMockDrafts] = useState({});
   const [mockDraftManualAdds, setMockDraftManualAdds] = useState({});
   const [mockDraftManualAddTeamId, setMockDraftManualAddTeamId] = useState("");
+  const [pendingMockDraftPlayerRemoval, setPendingMockDraftPlayerRemoval] = useState(null);
+  const [pendingMockDraftCaptainEdit, setPendingMockDraftCaptainEdit] = useState(null);
+  const [pendingDraftNominationPlayer, setPendingDraftNominationPlayer] = useState("");
+  const [draftAvailableSort, setDraftAvailableSort] = useState({ key: "player", direction: "asc" });
   const [draftOrderExpanded, setDraftOrderExpanded] = useState(false);
   const [draftStartedOverrides, setDraftStartedOverrides] = useState({});
   const [pendingRealDraftStart, setPendingRealDraftStart] = useState(false);
@@ -7529,6 +7524,36 @@ export default function WiffleScoringPrototype() {
   const draftPlayerOptions = selectedLeaguePlayerOptions.filter((player) => !getDraftedPlayerTeamId(activeDraftSettings, player));
   const draftCaptainNames = new Set((selectedLeague.teams || []).map((team) => String(team.captain || "").trim()).filter(Boolean));
   const draftAvailablePlayers = draftPlayerOptions.filter((player) => !draftCaptainNames.has(player));
+  const draftCareerStats = (activePage === "draft" && (draftAvailablePlayers.length > 0 || draftSelectedPlayer))
+    ? buildLeagueAggregateStats({ league: selectedLeague, previousGames, scope: "career" })
+    : { battingStats: {}, pitchingStats: {} };
+  const getDraftAvailableSortValue = (player, sortKey = draftAvailableSort.key) => {
+    const batting = getPlayerBattingStat(draftCareerStats.battingStats, player);
+    const pitching = getPlayerPitchingStat(draftCareerStats.pitchingStats, player);
+    if (sortKey === "player") return String(player || "").toLowerCase();
+    if (sortKey === "AVG") return safeNumber(batting.AB) ? safeNumber(batting.H) / safeNumber(batting.AB) : 0;
+    if (sortKey === "OBP") return safeNumber(batting.AB) + safeNumber(batting.BB) ? (safeNumber(batting.H) + safeNumber(batting.BB)) / (safeNumber(batting.AB) + safeNumber(batting.BB)) : 0;
+    if (sortKey === "SLG") return safeNumber(batting.AB) ? totalBases(batting) / safeNumber(batting.AB) : 0;
+    if (sortKey === "OBPS") return (safeNumber(batting.AB) + safeNumber(batting.BB) ? (safeNumber(batting.H) + safeNumber(batting.BB)) / (safeNumber(batting.AB) + safeNumber(batting.BB)) : 0) + (safeNumber(batting.AB) ? totalBases(batting) / safeNumber(batting.AB) : 0);
+    if (sortKey === "HR") return safeNumber(batting.HR);
+    if (sortKey === "RBI") return safeNumber(batting.RBI);
+    if (sortKey === "IP") return safeNumber(pitching.OUTS);
+    if (sortKey === "ERA") return safeNumber(pitching.OUTS) ? (safeNumber(pitching.ER ?? pitching.R) * Math.max(1, Number(gameInnings) || GAME_INNINGS) * 3) / safeNumber(pitching.OUTS) : 999999;
+    if (sortKey === "WHIP") return safeNumber(pitching.OUTS) ? ((safeNumber(pitching.H) + safeNumber(pitching.BB)) * 3) / safeNumber(pitching.OUTS) : 0;
+    if (sortKey === "K") return safeNumber(pitching.K);
+    return 0;
+  };
+  const sortedDraftAvailablePlayers = [...draftAvailablePlayers].sort((playerA, playerB) => {
+    const valueA = getDraftAvailableSortValue(playerA);
+    const valueB = getDraftAvailableSortValue(playerB);
+    if (draftAvailableSort.key === "player") {
+      return draftAvailableSort.direction === "asc"
+        ? String(playerA).localeCompare(String(playerB))
+        : String(playerB).localeCompare(String(playerA));
+    }
+    const numericSort = draftAvailableSort.key === "ERA" ? valueA - valueB : valueB - valueA;
+    return (draftAvailableSort.direction === "asc" ? -numericSort : numericSort) || String(playerA).localeCompare(String(playerB));
+  });
   const draftLockedTeamIds = new Set(activeDraftSettings.lockedTeamIds || []);
   const draftEligibleTeams = (selectedLeague.teams || []).filter((team) => !draftLockedTeamIds.has(team.id));
   const draftMinimumSpend = getDraftMinimumSpend(activeDraftSettings);
@@ -7541,14 +7566,22 @@ export default function WiffleScoringPrototype() {
   const currentDraftMinimumBidError = draftSelectedPlayer && draftBidTeamId ? getDraftMinimumBidError(selectedLeague, activeDraftSettings, draftBidTeamId, draftBidAmountNumber) : "";
   const currentDraftMaximumBidError = draftSelectedPlayer && draftBidTeamId ? getDraftMaximumBidError(selectedLeague, activeDraftSettings, draftBidTeamId, draftBidAmountNumber) : "";
   const draftNominationLocked = Boolean(draftSelectedPlayer);
-  const nominatedPlayerStats = draftSelectedPlayer ? buildLeagueAggregateStats({ league: selectedLeague, previousGames, scope: "career" }) : null;
-  const nominatedBattingStats = draftSelectedPlayer ? getPlayerBattingStat(nominatedPlayerStats?.battingStats, draftSelectedPlayer) : emptyStats();
-  const nominatedPitchingStats = draftSelectedPlayer ? getPlayerPitchingStat(nominatedPlayerStats?.pitchingStats, draftSelectedPlayer) : emptyPitchingStats();
+  const nominatedBattingStats = draftSelectedPlayer ? getPlayerBattingStat(draftCareerStats.battingStats, draftSelectedPlayer) : emptyStats();
+  const nominatedPitchingStats = draftSelectedPlayer ? getPlayerPitchingStat(draftCareerStats.pitchingStats, draftSelectedPlayer) : emptyPitchingStats();
+  const nominatedPlayerProfile = draftSelectedPlayer ? getLeaguePlayerProfile(selectedLeague, draftSelectedPlayer) || allPlayerRecords.find((player) => String(player.name || "").trim() === String(draftSelectedPlayer || "").trim()) || getPlayerProfileFromLeagues(leagues, draftSelectedPlayer) : null;
   const currentWinningBid = getDraftCurrentBid(activeDraftSettings, draftSelectedPlayer) || getDraftBidHistory(activeDraftSettings, draftSelectedPlayer)[0] || null;
   const currentWinningTeam = currentWinningBid ? (selectedLeague.teams || []).find((team) => team.id === currentWinningBid.teamId) : null;
   const currentBidHistory = getDraftBidHistory(activeDraftSettings, draftSelectedPlayer);
   const draftNominatingTeamId = getDraftNominatingTeamId(selectedLeague, activeDraftSettings);
   const draftNominatingTeam = (selectedLeague.teams || []).find((team) => team.id === draftNominatingTeamId) || null;
+  const draftNominationOrder = (activeDraftSettings.draftOrder || []).filter((teamId) => {
+    const teamExists = (selectedLeague.teams || []).some((team) => team.id === teamId);
+    return teamExists && !(activeDraftSettings.lockedTeamIds || []).includes(teamId) && !isTeamDraftRosterFull(selectedLeague, activeDraftSettings, teamId);
+  });
+  const nextDraftNominatingTeamId = draftNominationOrder.length > 0
+    ? draftNominationOrder[(Math.max(0, Number(activeDraftSettings.nominationIndex) || 0) + (draftSelectedPlayer ? 1 : 0)) % draftNominationOrder.length]
+    : "";
+  const nextDraftNominatingTeam = (selectedLeague.teams || []).find((team) => team.id === nextDraftNominatingTeamId) || null;
   const openingBidRequiredFromNominatingTeam = Boolean(draftSelectedPlayer && !currentWinningBid && draftNominatingTeamId);
   const captainValueLockedForCurrentSeason = Object.values(selectedCurrentSeason.drafts || {}).some((draft) => hasDraftStarted(draft));
   const draftDivisionNames = makeDivisionNames(selectedLeague.divisionCount || 0, selectedLeague.divisions || []);
@@ -7558,6 +7591,11 @@ export default function WiffleScoringPrototype() {
         { division: "Unassigned", teams: (selectedLeague.teams || []).filter((team) => !draftDivisionNames.includes(team.division || "")) },
       ].filter((group) => group.teams.length > 0)
     : [{ division: "League", teams: selectedLeague.teams || [] }];
+  const draftSummaryTeams = draftSummaryGroups.flatMap(({ division, teams }) => teams.map((team) => ({ ...team, draftSummaryDivision: division })));
+  const draftSummaryMaxRosterRows = Math.max(
+    1,
+    ...draftSummaryTeams.map((team) => (activeDraftSettings.draftedPlayers?.[team.id] || []).length),
+  );
   const sessionRosterMode = Boolean(selectedCurrentSeason.sessionsEnabled && !selectedCurrentSeason.keepRostersForSessions);
   const keepTeamIdentityForSessions = selectedCurrentSeason.keepTeamIdentityForSessions !== false;
   const leagueCaptainsEnabled = selectedLeague?.enableCaptains !== false;
@@ -8305,8 +8343,8 @@ export default function WiffleScoringPrototype() {
   const pausedGameAwaitingNewSetup = Boolean(gameStarted && scoringPaused && !setupEditingDuringGame && game.status !== "final");
   const scheduleWeeksHavePendingChanges = Object.keys(dirtyScheduleWeekIds || {}).length > 0;
   const hasLocalDraftChanges = Boolean(playerPageHasUnsavedChanges || leagueHasUnsavedChanges || unsavedSetupChanges || selectedPlayerDraft || fieldEditorDraft || pendingFieldSaveConfirm || pendingFieldDelete || inlinePlayerCreationModalOpen || pendingPlayerSaveConfirm || pendingPlayerDelete || pendingScheduleWeekSave || scheduleWeeksHavePendingChanges || pendingPlayerPageExit || pendingLeagueExitPage || pendingLeagueSwitchId || pendingDraftAward || pendingDraftRestart || pendingRealDraftStart || pendingPlayerRename || confirmCancelGameOpen || confirmResetGameOpen);
-  const sharedStateSyncBlocked = Boolean(hasLocalDraftChanges);
-  const isRemoteSyncPaused = () => sharedStateSyncBlocked || Date.now() - lastLocalEditAtRef.current < 5000;
+  const sharedStateSyncBlocked = activePage === "draft" ? false : Boolean(hasLocalDraftChanges);
+  const isRemoteSyncPaused = () => sharedStateSyncBlocked || (activePageRef.current !== "draft" && Date.now() - lastLocalEditAtRef.current < 5000);
 
   const setupErrors = [];
   if (!setupLeagueId && !isCustomGame) setupErrors.push("Select a league or choose Custom Game.");
@@ -8377,6 +8415,15 @@ export default function WiffleScoringPrototype() {
     if (includeSessionState && savedState.activePage != null) setActivePage(savedState.activePage);
     if (includeSessionState && savedState.gamePaused != null) setGamePaused(Boolean(savedState.gamePaused));
     if (savedState.selectedLeagueId != null) setSelectedLeagueId(savedState.selectedLeagueId);
+    if (savedState.draftSessionId != null) setDraftSessionId(savedState.draftSessionId);
+    if (savedState.draftSelectedPlayer != null) setDraftSelectedPlayer(savedState.draftSelectedPlayer);
+    if (savedState.draftBidTeamId != null) setDraftBidTeamId(savedState.draftBidTeamId);
+    if (savedState.draftBidAmount != null) setDraftBidAmount(savedState.draftBidAmount);
+    if (savedState.draftTimerRemaining != null) setDraftTimerRemaining(savedState.draftTimerRemaining);
+    if (savedState.draftTimerRunning != null) setDraftTimerRunning(savedState.draftTimerRunning);
+    if (savedState.mockDraftMode != null) setMockDraftMode(savedState.mockDraftMode);
+    if (savedState.mockDrafts) setMockDrafts(savedState.mockDrafts);
+    if (savedState.draftStartedOverrides) setDraftStartedOverrides(savedState.draftStartedOverrides);
     if (!skipGameSetup) {
       if (savedState.setupLeagueId != null) setSetupLeagueId(savedState.setupLeagueId);
       if (savedState.leagueGameMode != null) setLeagueGameMode(savedState.leagueGameMode);
@@ -10361,6 +10408,7 @@ export default function WiffleScoringPrototype() {
   function writeDraftState(sessionId, updater) {
     const safeSessionId = sessionId || activeDraftSessionId || selectedCurrentSeason?.sessions?.[0]?.id || "default-session";
     if (!safeSessionId) return;
+    markNextSharedStateSaveAuthoritative();
 
     if (mockDraftMode) {
       setMockDrafts((prev) => {
@@ -10399,6 +10447,7 @@ export default function WiffleScoringPrototype() {
   function updateLeagueDirectlyForDraft(updater) {
     const targetLeagueId = selectedLeague?.id;
     if (!targetLeagueId) return;
+    markNextSharedStateSaveAuthoritative();
     setLeagues((prevLeagues) => prevLeagues.map((league) => (league.id === targetLeagueId ? updater(league) : league)));
   }
 
@@ -10475,6 +10524,13 @@ export default function WiffleScoringPrototype() {
     }));
   }
 
+  function saveMockDraftCaptainEdit() {
+    if (!pendingMockDraftCaptainEdit?.teamId) return;
+    updateMockDraftCaptain(pendingMockDraftCaptainEdit.teamId, pendingMockDraftCaptainEdit.captainName);
+    updateDraftCaptainValue(pendingMockDraftCaptainEdit.teamId, pendingMockDraftCaptainEdit.value);
+    setPendingMockDraftCaptainEdit(null);
+  }
+
   function updateMockDraftManualAdd(teamId, field, value) {
     setMockDraftManualAdds((prev) => ({
       ...prev,
@@ -10544,12 +10600,24 @@ export default function WiffleScoringPrototype() {
 
   function cancelDraftBid() {
     updateDraftSettings(activeDraftSessionId, (draft) => ({ ...draft, currentBid: null }));
+    markNextSharedStateSaveAuthoritative();
     setDraftSelectedPlayer("");
     setDraftBidTeamId("");
     setDraftBidAmount("1");
     setDraftAwardError("");
     setDraftTimerRunning(false);
     setDraftTimerRemaining(activeDraftSettings.timerSeconds || 60);
+  }
+
+  function updateDraftBidTeamSelection(teamId) {
+    markNextSharedStateSaveAuthoritative();
+    setDraftBidTeamId(teamId);
+    setDraftAwardError("");
+  }
+
+  function updateDraftBidAmountSelection(valueOrUpdater) {
+    markNextSharedStateSaveAuthoritative();
+    setDraftBidAmount(valueOrUpdater);
   }
 
   function validateDraftBid(teamId, amount) {
@@ -10601,11 +10669,13 @@ export default function WiffleScoringPrototype() {
       bidHistory: [...(draft.bidHistory || []), bid],
     }));
     setDraftAwardError("");
+    markNextSharedStateSaveAuthoritative();
     setDraftBidAmount(String(safeAmount + 1));
   }
 
   function commitStartDraft() {
     updateDraftDataDirect(activeDraftSessionId, (draft) => ({ ...draft, enabled: true, started: true, completed: false }));
+    markNextSharedStateSaveAuthoritative();
     setDraftStartedOverrides((prev) => ({ ...prev, [activeDraftKey]: true }));
     setPendingRealDraftStart(false);
     setDraftSelectedPlayer("");
@@ -10697,6 +10767,7 @@ export default function WiffleScoringPrototype() {
     setDraftAwardError("");
     setDraftTimerRunning(false);
     setDraftTimerRemaining(activeDraftSettings.timerSeconds || 60);
+    markNextSharedStateSaveAuthoritative();
     setDraftStartedOverrides((prev) => ({ ...prev, [activeDraftKey]: false }));
     setPendingDraftRestart(false);
   }
@@ -10720,6 +10791,7 @@ export default function WiffleScoringPrototype() {
       window.alert("The current player must be awarded or the bid must be cancelled before a new player can be selected.");
       return;
     }
+    markNextSharedStateSaveAuthoritative();
     setDraftSelectedPlayer(cleanPlayer);
     setDraftBidTeamId(cleanPlayer ? draftNominatingTeamId : "");
     setDraftAwardError("");
@@ -14423,8 +14495,8 @@ export default function WiffleScoringPrototype() {
   const previewOutcome = calculateAutoAdvance(game.bases, currentBatter, resultButtons[0]);
 
   return (
-    <div className="min-h-screen bg-slate-100 p-2 text-slate-900 sm:p-4">
-      <div className="mx-auto max-w-7xl space-y-3 sm:space-y-4">
+    <div className={`min-h-screen bg-slate-100 text-slate-900 ${activePage === "draft" ? "p-0 sm:p-2" : "p-2 sm:p-4"}`}>
+      <div className={`mx-auto space-y-3 sm:space-y-4 ${activePage === "draft" ? "max-w-none" : "max-w-7xl"}`}>
         <Card>
           <div className="p-3 sm:p-4">
             <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
@@ -19777,9 +19849,9 @@ export default function WiffleScoringPrototype() {
         )}
 
         {activePage === "draft" && selectedLeague && (
-          <div className="space-y-4">
+            <div className="flex flex-col gap-2 sm:gap-4">
             <Card>
-              <div className="p-5">
+              <div className="p-3 sm:p-5">
                 <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
                   <div>
                     <h2 className="text-xl font-bold">Draft</h2>
@@ -19791,7 +19863,7 @@ export default function WiffleScoringPrototype() {
                     </select>
                     {!draftStarted && (
                       <label className="flex items-center gap-2 rounded-xl border bg-slate-50 px-3 py-2 text-sm font-semibold">
-                        <input type="checkbox" checked={mockDraftMode} onChange={(event) => { setMockDraftMode(event.target.checked); setDraftSelectedPlayer(""); setDraftBidTeamId(""); setDraftBidAmount("1"); setDraftAwardError(""); }} />
+                        <input type="checkbox" checked={mockDraftMode} onChange={(event) => { markNextSharedStateSaveAuthoritative(); setMockDraftMode(event.target.checked); setDraftSelectedPlayer(""); setDraftBidTeamId(""); setDraftBidAmount("1"); setDraftAwardError(""); }} />
                         Mock Draft
                       </label>
                     )}
@@ -19802,7 +19874,7 @@ export default function WiffleScoringPrototype() {
             </Card>
 
             <Card>
-              <div className="p-5">
+              <div className="p-3 sm:p-5">
                 {mockDraftMode && <div className="mb-3 inline-flex rounded-full bg-purple-100 px-3 py-1 text-xs font-black uppercase text-purple-800">Mock Draft</div>}
                 <div className="mb-3 flex flex-wrap items-center gap-2">
                   <span className={`rounded-full px-3 py-1 text-xs font-black uppercase ${mockDraftMode ? "bg-purple-100 text-purple-800" : "bg-slate-100 text-slate-600"}`}>
@@ -19852,7 +19924,8 @@ export default function WiffleScoringPrototype() {
               </div>
             </Card>
 
-            <div className="grid gap-4 xl:grid-cols-[0.9fr_1.1fr]">
+            <div className="order-4 grid gap-4 xl:grid-cols-[0.9fr_1.1fr]">
+              {false && (
               <Card>
                 <div className="p-5">
                   <div className="mb-3 flex items-center justify-between gap-3">
@@ -19938,7 +20011,7 @@ export default function WiffleScoringPrototype() {
                         </div>
                         <div>
                           <label className="text-xs font-semibold uppercase text-slate-500">Bid Placed By Team</label>
-                          <select className="mt-1 w-full rounded-xl border px-3 py-2 text-sm font-semibold" value={draftBidTeamId} disabled={!draftCanUseAuction || !draftSelectedPlayer || openingBidRequiredFromNominatingTeam} onChange={(event) => { setDraftBidTeamId(event.target.value); setDraftAwardError(""); }}>
+                          <select className="mt-1 w-full rounded-xl border px-3 py-2 text-sm font-semibold" value={draftBidTeamId} disabled={!draftCanUseAuction || !draftSelectedPlayer || openingBidRequiredFromNominatingTeam} onChange={(event) => updateDraftBidTeamSelection(event.target.value)}>
                             <option value="">Select team</option>
                             {draftEligibleTeams.map((team) => (
                               <option key={team.id} value={team.id}>{`${team.name} · $${getTeamDraftSpend(activeDraftSettings, team.id)}/$${activeDraftSettings.cap} · Min $${getTeamDraftMinimumBid(selectedLeague, activeDraftSettings, team.id)} · Max $${getTeamDraftMaximumBid(selectedLeague, activeDraftSettings, team.id)}`}</option>
@@ -20003,7 +20076,7 @@ export default function WiffleScoringPrototype() {
                                       <button
                                         type="button"
                                         className="truncate text-left font-bold text-slate-900 underline decoration-dotted underline-offset-2 hover:text-green-700"
-                                        onClick={() => { setDraftBidTeamId(bid.teamId); setDraftAwardError(""); }}
+                                        onClick={() => updateDraftBidTeamSelection(bid.teamId)}
                                         title="Use this team for the next bid"
                                       >
                                         {bidTeam?.name || "Unknown Team"}
@@ -20029,12 +20102,12 @@ export default function WiffleScoringPrototype() {
                               className="w-28 rounded-xl border px-3 py-2 text-center text-sm font-black"
                               value={draftBidAmount}
                               disabled={!draftSelectedPlayer}
-                              onChange={(event) => setDraftBidAmount(event.target.value)}
-                              onBlur={() => setDraftBidAmount(String(Math.max(currentTeamMinimumBid || 1, Number(draftBidAmount) || currentTeamMinimumBid || 1)))}
+                              onChange={(event) => updateDraftBidAmountSelection(event.target.value)}
+                              onBlur={() => updateDraftBidAmountSelection(String(Math.max(currentTeamMinimumBid || 1, Number(draftBidAmount) || currentTeamMinimumBid || 1)))}
                             />
-                            <Button variant="outline" disabled={!draftSelectedPlayer} onClick={() => setDraftBidAmount((amount) => String(Math.max(1, Number(amount) || 0) + 1))}>+ $1</Button>
-                            <Button variant="outline" disabled={!draftSelectedPlayer} onClick={() => setDraftBidAmount((amount) => String(Math.max(1, Number(amount) || 0) + 5))}>+ $5</Button>
-                            <Button variant="outline" disabled={!draftSelectedPlayer} onClick={() => setDraftBidAmount((amount) => String(Math.max(1, Number(amount) || 0) + 10))}>+ $10</Button>
+                            <Button variant="outline" disabled={!draftSelectedPlayer} onClick={() => updateDraftBidAmountSelection((amount) => String(Math.max(1, Number(amount) || 0) + 1))}>+ $1</Button>
+                            <Button variant="outline" disabled={!draftSelectedPlayer} onClick={() => updateDraftBidAmountSelection((amount) => String(Math.max(1, Number(amount) || 0) + 5))}>+ $5</Button>
+                            <Button variant="outline" disabled={!draftSelectedPlayer} onClick={() => updateDraftBidAmountSelection((amount) => String(Math.max(1, Number(amount) || 0) + 10))}>+ $10</Button>
                           </div>
                         </div>
                         <div className="flex flex-wrap gap-2">
@@ -20088,6 +20161,7 @@ export default function WiffleScoringPrototype() {
                   )}
                 </div>
               </Card>
+              )}
 
               {(mockDraftMode || leagueDraftEnabledForActiveSession) && (
               <div className="space-y-4">
@@ -20144,148 +20218,344 @@ export default function WiffleScoringPrototype() {
             </div>
 
             {(mockDraftMode || leagueDraftEnabledForActiveSession) && (
+            <div className="order-3">
             <Card>
-              <div className="p-5">
+              <div className="p-1.5 sm:p-4">
                 <div className="mb-4 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
                   <div>
                     <div className="flex items-center gap-2">
-                      <h2 className="text-xl font-bold">Draft Summary</h2>
+                      <h2 className="text-xl font-bold">Auction Board</h2>
                       {mockDraftMode && <span className="rounded-full bg-purple-100 px-3 py-1 text-xs font-black uppercase text-purple-800">Mock Draft</span>}
                     </div>
-                    <p className="text-sm text-slate-500">Easy-read roster and budget view for {activeDraftSession?.name || "this session"}.</p>
+                    <p className="text-sm text-slate-500">Single-board roster, budget, auction, and available player view for {activeDraftSession?.name || "this session"}.</p>
                   </div>
                   <div className="rounded-full bg-slate-100 px-3 py-1 text-xs font-black uppercase text-slate-500">
                     {mockDraftMode ? "Mock Draft" : activeDraftSettings.enabled ? "Draft Enabled" : "Draft Disabled"}
                   </div>
                 </div>
-                <div className="space-y-5">
-                  {draftSummaryGroups.map(({ division, teams }) => (
-                    <div key={`draft-summary-${division}`}>
-                      <h3 className="mb-2 text-sm font-black uppercase tracking-wide text-slate-500">{division}</h3>
-                      <div className="grid gap-3 lg:grid-cols-2">
-                        {teams.map((team) => {
-                          const spend = getTeamDraftSpend(activeDraftSettings, team.id);
-                          const remaining = Math.max(0, Number(activeDraftSettings.cap || 0) - spend);
-                          const draftedPlayers = activeDraftSettings.draftedPlayers?.[team.id] || [];
-                          const rosterCount = getTeamDraftedTotalCount(selectedLeague, activeDraftSettings, team.id);
-                          const rosterTarget = getTeamTotalRosterTargetCount(selectedLeague, team.id);
-                          const locked = draftLockedTeamIds.has(team.id);
-                          const carryoverOk = !activeDraftSettings.maxCarryoverEnabled || spend >= draftMinimumSpend;
-                          const captainName = getDraftCaptainName(team);
-                          const captainOptions = [...new Set([captainName, ...selectedLeaguePlayerOptions].map((player) => String(player || "").trim()).filter(Boolean))];
-                          return (
-                            <div key={`final-draft-${team.id}`} className="rounded-2xl border bg-slate-50 p-3">
-                              <div className="flex flex-wrap items-start justify-between gap-3">
-                                <div>
-                                  <div className="text-base font-black sm:text-lg">{team.name}</div>
-                                  <div className="mt-1 text-xs font-semibold uppercase text-slate-500">{team.division || "No Division"} · Roster {rosterCount}/{rosterTarget}</div>
-                                </div>
-                                <div className="flex flex-wrap items-center justify-end gap-2">
-                                  <div className={`rounded-full px-3 py-1 text-xs font-black uppercase ${locked ? "bg-slate-900 text-white" : carryoverOk ? "bg-green-100 text-green-800" : "bg-amber-100 text-amber-800"}`}>
-                                    {locked ? "Locked" : carryoverOk ? "On Budget" : "Below Minimum"}
-                                  </div>
-                                  <label className="flex items-center gap-2 rounded-lg border bg-white px-2 py-1.5 text-xs font-semibold">
-                                    <input type="checkbox" checked={locked} onChange={(event) => toggleDraftTeamLock(team.id, event.target.checked)} />
-                                    Lock
-                                  </label>
-                                </div>
-                              </div>
-
-                              <div className="mt-2 grid grid-cols-3 overflow-hidden rounded-xl border bg-white text-center">
-                                <div className="p-2">
-                                  <div className="text-[10px] font-black uppercase text-slate-500">Spent</div>
-                                  <div className="text-lg font-black">{`$${spend}`}</div>
-                                </div>
-                                <div className="border-x p-2">
-                                  <div className="text-[10px] font-black uppercase text-slate-500">Left</div>
-                                  <div className="text-lg font-black">{`$${remaining}`}</div>
-                                </div>
-                                <div className="p-2">
-                                  <div className="text-[10px] font-black uppercase text-slate-500">Cap</div>
-                                  <div className="text-lg font-black">{`$${activeDraftSettings.cap}`}</div>
-                                </div>
-                              </div>
-
-                              {activeDraftSettings.maxCarryoverEnabled && (
-                                <div className="mt-2 rounded-xl border bg-white p-2 text-xs">
-                                  <div className="font-bold">{`Max Carryover: $${activeDraftSettings.maxCarryover}`}</div>
-                                  <div className="text-slate-500">{`Minimum spend: $${draftMinimumSpend} · Current carryover: $${remaining}`}</div>
-                                </div>
-                              )}
-
-                              <div className="mt-2 rounded-xl border bg-white p-3">
-                                <div className="mb-2 flex items-center justify-between gap-2">
-                                  <div className="text-xs font-black uppercase text-slate-500">Roster</div>
-                                  {mockDraftMode && (
-                                    <button type="button" className="rounded-lg border bg-white px-2.5 py-1 text-xs font-black text-slate-700 hover:bg-slate-50" onClick={() => openMockDraftManualAdd(team.id)}>
-                                      Manual Add Player
-                                    </button>
+                <div className="overflow-x-auto rounded-t-xl border border-slate-800 border-b-slate-700 bg-slate-950 p-1.5 sm:rounded-t-2xl sm:p-3">
+                  <div className="grid min-w-max gap-1 sm:gap-2" style={{ gridTemplateColumns: `repeat(${Math.max(1, draftSummaryTeams.length)}, 5.45rem)` }}>
+                    {draftSummaryTeams.map((team) => {
+                      const spend = getTeamDraftSpend(activeDraftSettings, team.id);
+                      const remaining = Math.max(0, Number(activeDraftSettings.cap || 0) - spend);
+                      const draftedPlayers = activeDraftSettings.draftedPlayers?.[team.id] || [];
+                      const rosterCount = getTeamDraftedTotalCount(selectedLeague, activeDraftSettings, team.id);
+                      const rosterTarget = getTeamTotalRosterTargetCount(selectedLeague, team.id);
+                      const captainName = getDraftCaptainName(team);
+                      const emptyRows = Math.max(0, draftSummaryMaxRosterRows - draftedPlayers.length);
+                      return (
+                        <div key={`draft-board-team-${team.id}`} className="overflow-hidden rounded-md border border-slate-700 bg-slate-900 text-white sm:rounded-lg">
+                          <div className="border-b border-slate-700 bg-slate-800 p-1">
+                            <div className="flex items-start gap-1.5">
+                              <div className="flex min-w-0 items-center gap-1">
+                                <div className="flex h-4 w-4 shrink-0 items-center justify-center overflow-hidden rounded-full border border-slate-600 bg-slate-950 text-[6px] font-black text-slate-300 sm:h-5 sm:w-5 sm:text-[7px]">
+                                  {team.logoUrl ? (
+                                    <img src={team.logoUrl} alt={`${team.name} logo`} className="h-full w-full object-cover" />
+                                  ) : (
+                                    String(team.name || "T").slice(0, 2).toUpperCase()
                                   )}
                                 </div>
-                                <div className="overflow-hidden rounded-lg border text-sm">
-                                  <div className="grid grid-cols-[1fr_5.25rem] bg-slate-50 text-[10px] font-black uppercase text-slate-500">
-                                    <div className="px-2 py-1.5">Player</div>
-                                    <div className="border-l px-2 py-1.5 text-right">Value</div>
-                                  </div>
-                                  <div className="grid grid-cols-[1fr_5.25rem] items-center border-t">
-                                    <div className="min-w-0 px-2 py-1.5">
-                                      {mockDraftMode ? (
-                                        <select className="w-full rounded-lg border px-2 py-1 text-xs font-semibold" value={captainName} onChange={(event) => updateMockDraftCaptain(team.id, event.target.value)}>
-                                          <option value="">No captain</option>
-                                          {captainOptions.map((player) => <option key={`mock-captain-${team.id}-${player}`} value={player}>{player}</option>)}
-                                        </select>
-                                      ) : team.captain ? (
-                                        <span className="font-semibold">{`Captain: ${team.captain}`}</span>
-                                      ) : (
-                                        <span className="text-slate-500">No captain assigned.</span>
-                                      )}
-                                    </div>
-                                    <div className="border-l px-2 py-1.5 text-right">
-                                      {mockDraftMode ? (
-                                        <input type="number" min="1" className="w-full rounded-lg border px-2 py-1 text-right text-xs font-black" value={getCaptainDraftValue(activeDraftSettings, team) || 1} onChange={(event) => updateDraftCaptainValue(team.id, event.target.value)} />
-                                      ) : team.captain ? (
-                                        <span className="font-black">{`$${getCaptainDraftValue(activeDraftSettings, team)}`}</span>
-                                      ) : (
-                                        <span className="text-slate-400">-</span>
-                                      )}
-                                    </div>
-                                  </div>
-                                  {draftedPlayers.map((player) => (
-                                    <div key={`${team.id}-${player}`} className="grid grid-cols-[1fr_5.25rem] items-center border-t">
-                                      <div className="min-w-0 px-2 py-1.5">
-                                        <div className="truncate font-semibold">{player}</div>
-                                        {mockDraftMode && (
-                                          <button type="button" className="mt-0.5 text-[10px] font-black uppercase text-red-600 hover:text-red-700" onClick={() => removeMockDraftPlayerFromTeam(team.id, player)}>
-                                            Remove
-                                          </button>
-                                        )}
-                                      </div>
-                                      <div className="border-l px-2 py-1.5 text-right">
-                                        {mockDraftMode ? (
-                                          <input type="number" min="1" className="w-full rounded-lg border px-2 py-1 text-right text-xs font-black" value={activeDraftSettings.playerValues?.[player] || 1} onChange={(event) => updateMockDraftPlayerValue(player, event.target.value)} />
-                                        ) : (
-                                          <span className="font-black">{`$${activeDraftSettings.playerValues?.[player] || 0}`}</span>
-                                        )}
-                                      </div>
-                                    </div>
-                                  ))}
-                                  {draftedPlayers.length === 0 && (
-                                    <div className="border-t px-2 py-2 text-sm text-slate-500">No drafted players yet.</div>
-                                  )}
+                                <div className="min-w-0">
+                                  <div className="line-clamp-2 break-words font-black leading-tight" style={{ fontSize: "7px" }}>{team.name}</div>
+                                  <div className="mt-0.5 truncate text-[7px] font-black uppercase tracking-wide text-slate-400 sm:text-[8px]">{rosterCount}/{rosterTarget}</div>
                                 </div>
-                                {mockDraftMode && (
-                                  <p className="mt-2 text-[11px] font-semibold text-slate-500">Click a value to edit it in mock draft mode.</p>
-                                )}
                               </div>
                             </div>
-                          );
-                        })}
-                      </div>
+                            <div className="mt-1 rounded bg-slate-950/60 px-1 py-0.5">
+                              <div className="flex items-center justify-between gap-1 text-[8px] sm:text-[9px]">
+                                <span className="font-black uppercase text-slate-400">Spent</span>
+                                <span className="font-black">{`$${spend}`}</span>
+                              </div>
+                              <div className="flex items-center justify-between gap-1 text-[8px] sm:text-[9px]">
+                                <span className="font-black uppercase text-slate-400">Left</span>
+                                <span className="font-black">{`$${remaining}`}</span>
+                              </div>
+                            </div>
+                            <div className="mt-1 flex justify-end">
+                              {mockDraftMode && (
+                                <button type="button" className="text-[10px] font-black leading-none text-slate-300 underline decoration-slate-500 underline-offset-2 hover:text-white sm:text-[8px] sm:font-bold" onClick={() => openMockDraftManualAdd(team.id)} title="Add player manually">
+                                  <span className="sm:hidden">+</span>
+                                  <span className="hidden sm:inline">+ Player</span>
+                                </button>
+                              )}
+                            </div>
+                          </div>
+                          <div className="border-b border-slate-800 p-0.5">
+                            <button
+                              type="button"
+                              className={`relative block min-h-12 w-full min-w-0 rounded bg-slate-950 px-1 py-1 text-left font-bold leading-tight ${mockDraftMode ? "text-white hover:text-blue-200" : "text-white"}`}
+                              style={{ fontSize: "7px" }}
+                              onClick={() => mockDraftMode && setPendingMockDraftCaptainEdit({ teamId: team.id, teamName: team.name, captainName, value: getCaptainDraftValue(activeDraftSettings, team) || 1 })}
+                            >
+                              <span className="block min-w-0">
+                                <span className="block pr-6 text-[6px] font-black uppercase text-slate-500">Captain</span>
+                                <span className="mt-0.5 block whitespace-normal break-words underline decoration-slate-500 underline-offset-2">{captainName || "No captain"}</span>
+                              </span>
+                              <span className="absolute right-1 top-1 font-black" style={{ fontSize: "7px" }}>{captainName ? `$${getCaptainDraftValue(activeDraftSettings, team) || 0}` : "-"}</span>
+                            </button>
+                          </div>
+                          {draftedPlayers.map((player) => {
+                            return (
+                            <div key={`draft-board-${team.id}-${player}`} className="border-b border-slate-800 p-0.5">
+                              <button
+                                type="button"
+                                className={`relative block min-h-10 w-full min-w-0 rounded bg-slate-950 px-1 pb-1 pt-3 text-left font-bold leading-tight ${mockDraftMode ? "text-white hover:text-blue-200" : "text-white"}`}
+                                style={{ fontSize: "7px" }}
+                                onClick={() => mockDraftMode && setPendingMockDraftPlayerRemoval({ teamId: team.id, teamName: team.name, playerName: player, value: activeDraftSettings.playerValues?.[player] || 1 })}
+                              >
+                                <span className="block min-w-0 whitespace-normal break-words underline decoration-slate-500 underline-offset-2">{player}</span>
+                                <span className="absolute right-1 top-1 font-black" style={{ fontSize: "7px" }}>{`$${activeDraftSettings.playerValues?.[player] || 0}`}</span>
+                              </button>
+                            </div>
+                            );
+                          })}
+                          {Array.from({ length: emptyRows }).map((_, index) => (
+                            <div key={`draft-board-empty-${team.id}-${index}`} className="border-b border-slate-800 p-0.5">
+                              <div className="rounded bg-slate-950/40 px-1 py-1">
+                                <span className="block text-[7px] font-semibold text-slate-600 sm:text-[8px]">Open</span>
+                                <span className="block text-right text-[6.5px] text-slate-700">-</span>
+                              </div>
+                            </div>
+                          ))}
+                          {activeDraftSettings.maxCarryoverEnabled && (
+                            <div className="px-1.5 py-1 text-[8px] font-semibold text-slate-400">{`Min $${draftMinimumSpend} · Carry $${remaining}`}</div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                  {mockDraftMode && <p className="mt-3 text-xs font-semibold text-slate-300">Click a player name to remove them from a mock roster. Click a value to edit it.</p>}
+                </div>
+
+                <div className="rounded-b-xl border border-slate-800 border-t-0 bg-slate-950 p-2 text-white sm:rounded-b-2xl sm:p-3">
+                  <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                    <div>
+                      <div className="text-[10px] font-black uppercase tracking-wide text-slate-400">Auction Board</div>
+                      <h3 className="text-lg font-black">{draftStarted ? draftCompleted ? "Draft Complete" : draftNominatingTeam ? `${draftNominatingTeam.name} is up` : "No eligible teams remaining" : "Start the draft to open bidding"}</h3>
+                      {draftStarted && !draftCompleted && nextDraftNominatingTeam && (
+                        <div className="mt-0.5 text-[10px] font-black uppercase tracking-wide text-slate-400">{`Next nomination: ${nextDraftNominatingTeam.name}`}</div>
+                      )}
                     </div>
-                  ))}
+                    <div className="flex flex-wrap gap-2">
+                      {!draftBoardEnabled && <span className="rounded-full bg-amber-200 px-3 py-1 text-[10px] font-black uppercase text-amber-950">Draft Disabled</span>}
+                      {!draftStarted && <Button variant="primary" disabled={!mockDraftMode && !leagueDraftEnabledForActiveSession} onClick={startDraft}>{mockDraftMode ? "Start Mock Draft" : "Start Draft"}</Button>}
+                      {draftCompleted && <Button variant="danger" onClick={restartDraft}>Restart Draft</Button>}
+                    </div>
+                  </div>
+
+                  {!draftStarted ? (
+                    <div className="rounded-xl border border-slate-700 bg-slate-900 p-4 text-sm font-semibold text-slate-300">
+                      Start the draft when you are ready. The draft board, auction controls, and available player table will stay in this same board.
+                    </div>
+                  ) : draftCompleted ? (
+                    <div className="rounded-xl border border-slate-700 bg-slate-900 p-4 text-sm font-semibold text-slate-300">
+                      The draft is complete. Rosters and budgets are shown above.
+                    </div>
+                  ) : (
+                    <>
+                      <div className="pb-1">
+                      <div className="rounded-xl border border-slate-700 bg-slate-900 p-2">
+                        <div className="min-w-0 p-1">
+                          <div className="grid grid-cols-[3rem_minmax(0,1fr)] items-center gap-2">
+                            <PlayerAvatar playerName={draftSelectedPlayer || "Player"} profile={nominatedPlayerProfile} size="md" />
+                            <div className="min-w-0 flex-1">
+                              <div className="text-[10px] font-black uppercase tracking-wide text-slate-400">Player Up For Bid</div>
+                              <div className="mt-0.5 truncate text-lg font-black text-white">{draftSelectedPlayer || "Nominate from player list"}</div>
+                            </div>
+                          </div>
+                          {draftSelectedPlayer && (
+                            <div className="mt-1.5 grid gap-1.5 text-[10px] font-semibold text-slate-300 sm:grid-cols-2">
+                              <div className="rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5">
+                                <div className="text-[9px] font-black uppercase text-slate-500">Career Hitting</div>
+                                <div className="mt-1">{formatBattingLine(nominatedBattingStats)}</div>
+                              </div>
+                              <div className="rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5">
+                                <div className="text-[9px] font-black uppercase text-slate-500">Career Pitching</div>
+                                <div className="mt-1">{formatPitchingLine(nominatedPitchingStats)}</div>
+                              </div>
+                            </div>
+                          )}
+
+                          <div className="mt-2 rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5">
+                            <div className="flex items-center justify-between gap-2">
+                              <div className="text-[10px] font-black uppercase tracking-wide text-slate-400">Current Winning Bid</div>
+                              <button
+                                type="button"
+                                disabled={!currentWinningBid}
+                                onClick={cancelLatestBid}
+                                className="text-[10px] font-black uppercase text-slate-400 underline decoration-slate-600 underline-offset-2 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
+                              >
+                                Cancel Latest
+                              </button>
+                            </div>
+                            {currentWinningBid && currentWinningTeam ? (
+                              <div className="mt-1.5 flex items-center gap-2">
+                                <div className="flex h-7 w-7 shrink-0 items-center justify-center overflow-hidden rounded-full border border-slate-600 bg-slate-900 text-[8px] font-black text-slate-300">
+                                  {currentWinningTeam.logoUrl ? <img src={currentWinningTeam.logoUrl} alt={`${currentWinningTeam.name} logo`} className="h-full w-full object-cover" /> : String(currentWinningTeam.name || "T").slice(0, 2).toUpperCase()}
+                                </div>
+                                <div className="min-w-0">
+                                  <div className="truncate text-sm font-black">{currentWinningTeam.name}</div>
+                                  <div className="text-xs font-black text-green-300">{`$${currentWinningBid.amount}`}</div>
+                                </div>
+                              </div>
+                            ) : (
+                              <div className="mt-1 text-xs font-semibold text-slate-400">No bids placed yet.</div>
+                            )}
+                            <div className="mt-2 max-h-24 space-y-1 overflow-auto pr-1 text-[10px]">
+                              {currentBidHistory.length > 0 ? currentBidHistory.map((bid) => {
+                                const bidTeam = (selectedLeague.teams || []).find((team) => team.id === bid.teamId);
+                                return (
+                                  <div key={bid.id} className="flex justify-between gap-2 rounded bg-slate-900 px-2 py-1">
+                                    <button
+                                      type="button"
+                                      className="truncate text-left font-bold text-white underline decoration-slate-500 underline-offset-2 hover:text-green-200"
+                                      onClick={() => updateDraftBidTeamSelection(bid.teamId)}
+                                      title="Use this team for the next bid"
+                                    >
+                                      {bidTeam?.name || "Unknown Team"}
+                                    </button>
+                                    <span className="font-black text-green-300">{`$${bid.amount}`}</span>
+                                  </div>
+                                );
+                              }) : null}
+                            </div>
+                          </div>
+
+                          <div className="mt-2 grid gap-2 md:grid-cols-[minmax(0,1fr)_6rem] md:items-end">
+                            <div>
+                              <label className="text-[10px] font-black uppercase tracking-wide text-slate-400">Bid Placed By Team</label>
+                              <select className="mt-1 w-full rounded-lg border border-slate-600 bg-slate-950 px-2 py-1.5 text-xs font-semibold text-white" value={draftBidTeamId} disabled={!draftCanUseAuction || !draftSelectedPlayer || openingBidRequiredFromNominatingTeam} onChange={(event) => updateDraftBidTeamSelection(event.target.value)}>
+                                <option value="">Select team</option>
+                                {draftEligibleTeams.map((team) => (
+                                  <option key={team.id} value={team.id}>{`${team.name} · $${getTeamDraftSpend(activeDraftSettings, team.id)}/$${activeDraftSettings.cap} · Min $${getTeamDraftMinimumBid(selectedLeague, activeDraftSettings, team.id)} · Max $${getTeamDraftMaximumBid(selectedLeague, activeDraftSettings, team.id)}`}</option>
+                                ))}
+                              </select>
+                            </div>
+                            <div>
+                              <label className="text-[10px] font-black uppercase tracking-wide text-slate-400">Bid $</label>
+                              <input
+                                type="number"
+                                min="1"
+                                step="1"
+                                className="mt-1 w-full rounded-lg border border-slate-600 bg-slate-950 px-2 py-1.5 text-center text-xs font-black text-white"
+                                value={draftBidAmount}
+                                disabled={!draftSelectedPlayer}
+                                onChange={(event) => updateDraftBidAmountSelection(event.target.value)}
+                                onBlur={() => updateDraftBidAmountSelection(String(Math.max(currentTeamMinimumBid || 1, Number(draftBidAmount) || currentTeamMinimumBid || 1)))}
+                              />
+                            </div>
+                          </div>
+                          <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                            <Button variant="outline" disabled={!draftSelectedPlayer} onClick={() => updateDraftBidAmountSelection((amount) => String(Math.max(1, Number(amount) || 0) + 1))}>+ $1</Button>
+                            <Button variant="outline" disabled={!draftSelectedPlayer} onClick={() => updateDraftBidAmountSelection((amount) => String(Math.max(1, Number(amount) || 0) + 5))}>+ $5</Button>
+                            <Button variant="outline" disabled={!draftSelectedPlayer} onClick={() => updateDraftBidAmountSelection((amount) => String(Math.max(1, Number(amount) || 0) + 10))}>+ $10</Button>
+                            <button
+                              type="button"
+                              disabled={!draftCanUseAuction || !draftCaptainValuesReady || !draftSelectedPlayer || !String(draftBidTeamId || "").trim() || draftBidAmountNumber < 1 || draftBidAmountNumber < currentTeamMinimumBid || draftBidAmountNumber > currentTeamMaximumBid || getTeamDraftSpend(activeDraftSettings, draftBidTeamId) + draftBidAmountNumber > Number(activeDraftSettings.cap || 0) || Boolean(currentDraftMinimumBidError) || Boolean(currentDraftMaximumBidError) || Boolean(currentDraftCarryoverError) || Boolean(currentDraftRosterFullError)}
+                              onClick={placeDraftBid}
+                              className="inline-flex items-center justify-center rounded-lg bg-green-600 px-3 py-1.5 text-xs font-black uppercase tracking-wide text-white transition hover:bg-green-500 disabled:cursor-not-allowed disabled:opacity-50"
+                            >
+                              Place Bid
+                            </button>
+                            <button
+                              type="button"
+                              disabled={!draftStarted || draftCompleted || !draftCaptainValuesReady || !draftSelectedPlayer || !currentWinningBid}
+                              onClick={() => awardDraftPlayer(draftSelectedPlayer, currentWinningBid?.teamId, currentWinningBid?.amount)}
+                              className="inline-flex items-center justify-center rounded-lg bg-white px-3 py-1.5 text-xs font-black uppercase tracking-wide text-slate-950 transition hover:bg-slate-200 disabled:cursor-not-allowed disabled:opacity-50"
+                            >
+                              Award Player
+                            </button>
+                            {draftSelectedPlayer && <Button variant="outline" onClick={cancelDraftBid}>Cancel Bid</Button>}
+                          </div>
+                          {draftSelectedPlayer && draftBidTeamId && <p className="mt-2 text-xs font-semibold text-slate-400">{`Bid range: $${currentTeamMinimumBid} minimum / $${currentTeamMaximumBid} maximum`}</p>}
+                          {draftSelectedPlayer && openingBidRequiredFromNominatingTeam && <p className="mt-2 rounded-xl border border-blue-400 bg-blue-950 p-3 text-sm font-bold text-blue-100">Opening bid is locked to {draftNominatingTeam?.name || "the current draft-order team"}.</p>}
+                          {currentDraftMinimumBidError && <p className="mt-2 rounded-xl border border-red-400 bg-red-950 p-3 text-sm font-semibold text-red-100">{currentDraftMinimumBidError}</p>}
+                          {draftBidTeamId && getTeamDraftSpend(activeDraftSettings, draftBidTeamId) + draftBidAmountNumber > Number(activeDraftSettings.cap || 0) && <p className="mt-2 text-xs font-semibold text-red-300">This bid would exceed the selected team cap.</p>}
+                          {currentDraftMaximumBidError && <p className="mt-2 rounded-xl border border-red-400 bg-red-950 p-3 text-sm font-semibold text-red-100">{currentDraftMaximumBidError}</p>}
+                          {currentDraftRosterFullError && <p className="mt-2 rounded-xl border border-red-400 bg-red-950 p-3 text-sm font-semibold text-red-100">{currentDraftRosterFullError}</p>}
+                          {currentDraftCarryoverError && <p className="mt-2 rounded-xl border border-red-400 bg-red-950 p-3 text-sm font-semibold text-red-100">{currentDraftCarryoverError}</p>}
+                          {draftAwardError && <p className="mt-2 rounded-xl border border-red-400 bg-red-950 p-3 text-sm font-semibold text-red-100">{draftAwardError}</p>}
+                        </div>
+
+                      </div>
+                      </div>
+
+                      <div className="mt-3 rounded-xl border border-slate-700 bg-slate-900">
+                        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-700 px-3 py-2">
+                          <div>
+                            <div className="text-[10px] font-black uppercase tracking-wide text-slate-400">Available Players</div>
+                            <div className="text-sm font-semibold text-slate-300">Career stats snapshot</div>
+                          </div>
+                          <span className="rounded-full bg-slate-800 px-3 py-1 text-[10px] font-black uppercase text-slate-300">{draftAvailablePlayers.length} available</span>
+                        </div>
+                        <div className="max-h-80 overflow-auto">
+                          <table className="w-max min-w-[38rem] table-auto text-left text-xs">
+                            <thead className="sticky top-0 z-10 bg-slate-950 text-[10px] uppercase tracking-wide text-slate-400">
+                              <tr>
+                                {[
+                                  ["player", "Player", "left"],
+                                  ["AVG", "AVG", "center"],
+                                  ["OBP", "OBP", "center"],
+                                  ["SLG", "SLG", "center"],
+                                  ["OBPS", "OBPS", "center"],
+                                  ["HR", "HR", "center"],
+                                  ["RBI", "RBI", "center"],
+                                  ["IP", "IP", "center"],
+                                  ["ERA", "ERA", "center"],
+                                  ["WHIP", "WHIP", "center"],
+                                  ["K", "K", "center"],
+                                ].map(([key, label, align]) => (
+                                  <th key={`draft-sort-${key}`} className={`${align === "left" ? "sticky left-0 z-20 whitespace-nowrap bg-slate-950 px-2 text-left" : "px-2 text-center"} py-2`}>
+                                    <button
+                                      type="button"
+                                      className="font-black uppercase hover:text-white"
+                                      onClick={() => setDraftAvailableSort((current) => ({ key, direction: current.key === key && current.direction === "desc" ? "asc" : "desc" }))}
+                                    >
+                                      {label}{draftAvailableSort.key === key ? draftAvailableSort.direction === "desc" ? " ↓" : " ↑" : ""}
+                                    </button>
+                                  </th>
+                                ))}
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {sortedDraftAvailablePlayers.map((player) => {
+                                const batting = getPlayerBattingStat(draftCareerStats.battingStats, player);
+                                const pitching = getPlayerPitchingStat(draftCareerStats.pitchingStats, player);
+                                const profile = getLeaguePlayerProfile(selectedLeague, player) || allPlayerRecords.find((record) => String(record.name || "").trim() === String(player || "").trim()) || getPlayerProfileFromLeagues(leagues, player);
+                                return (
+                                  <tr key={`draft-available-${player}`} className="cursor-pointer border-t border-slate-800 hover:bg-slate-800/70" onClick={() => draftCanUseAuction && setPendingDraftNominationPlayer(player)}>
+                                    <td className="sticky left-0 z-10 whitespace-nowrap bg-slate-900 px-2 py-2">
+                                      <div className="flex items-center gap-1.5">
+                                        <PlayerAvatar playerName={player} profile={profile} size="sm" />
+                                        <span className="font-black text-white">{player}</span>
+                                      </div>
+                                    </td>
+                                    <td className="px-2 py-2 text-center font-semibold text-slate-200">{average(batting.H, batting.AB)}</td>
+                                    <td className="px-2 py-2 text-center font-semibold text-slate-200">{obp(batting)}</td>
+                                    <td className="px-2 py-2 text-center font-semibold text-slate-200">{slg(batting)}</td>
+                                    <td className="px-2 py-2 text-center font-semibold text-slate-200">{ops(batting)}</td>
+                                    <td className="px-2 py-2 text-center font-semibold text-slate-200">{batting.HR || 0}</td>
+                                    <td className="px-2 py-2 text-center font-semibold text-slate-200">{batting.RBI || 0}</td>
+                                    <td className="px-2 py-2 text-center font-semibold text-slate-200">{formatInningsPitched(pitching.OUTS || 0)}</td>
+                                    <td className="px-2 py-2 text-center font-semibold text-slate-200">{era(pitching)}</td>
+                                    <td className="px-2 py-2 text-center font-semibold text-slate-200">{whip(pitching)}</td>
+                                    <td className="px-2 py-2 text-center font-semibold text-slate-200">{pitching.K || 0}</td>
+                                  </tr>
+                                );
+                              })}
+                              {draftAvailablePlayers.length === 0 && (
+                                <tr><td className="px-3 py-3 text-slate-500" colSpan="11">No available non-captain players left.</td></tr>
+                              )}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    </>
+                  )}
                 </div>
               </div>
             </Card>
+            </div>
             )}
           </div>
         )}
@@ -21701,7 +21971,7 @@ export default function WiffleScoringPrototype() {
             <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4">
               <div className="w-full max-w-md rounded-3xl bg-white p-5 shadow-xl">
                 <div className="text-xs font-black uppercase tracking-wide text-purple-700">Mock Draft</div>
-                <h2 className="mt-1 text-2xl font-black">Manual Add Player</h2>
+                <h2 className="mt-1 text-2xl font-black">Add Player</h2>
                 <p className="mt-1 text-sm font-semibold text-slate-500">{team?.name || "Select team"}</p>
                 <div className="mt-4 grid gap-3">
                   <div>
@@ -21725,6 +21995,115 @@ export default function WiffleScoringPrototype() {
             </div>
           );
         })()}
+
+        {pendingDraftNominationPlayer && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4">
+            <div className="w-full max-w-md rounded-3xl bg-white p-5 shadow-xl">
+              <div className="text-xs font-black uppercase tracking-wide text-purple-700">Nominate Player</div>
+              <h2 className="mt-1 text-2xl font-black">Nominate {pendingDraftNominationPlayer}?</h2>
+              <p className="mt-2 rounded-xl border bg-slate-50 p-3 text-sm font-semibold text-slate-700">
+                This will put {pendingDraftNominationPlayer} on the auction block for the current draft.
+              </p>
+              <div className="mt-5 flex flex-wrap justify-end gap-2">
+                <Button variant="outline" onClick={() => setPendingDraftNominationPlayer("")}>Cancel</Button>
+                <Button
+                  variant="primary"
+                  onClick={() => {
+                    selectDraftPlayerForBid(pendingDraftNominationPlayer);
+                    setPendingDraftNominationPlayer("");
+                  }}
+                >
+                  Nominate Player
+                </Button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {pendingMockDraftCaptainEdit && (() => {
+          const captainOptions = selectedLeaguePlayerOptions
+            .map((player) => String(player || "").trim())
+            .filter(Boolean);
+          return (
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4">
+              <div className="w-full max-w-md rounded-3xl bg-white p-5 shadow-xl">
+                <div className="text-xs font-black uppercase tracking-wide text-purple-700">Mock Draft Captain</div>
+                <h2 className="mt-1 text-2xl font-black">{pendingMockDraftCaptainEdit.teamName}</h2>
+                <div className="mt-3 space-y-3 rounded-xl border bg-slate-50 p-3 text-sm font-semibold text-slate-700">
+                  <label className="block">
+                    <span className="text-xs font-black uppercase tracking-wide text-slate-500">Captain</span>
+                    <select
+                      className="mt-1 w-full rounded-xl border bg-white px-3 py-2 text-sm font-semibold text-slate-900"
+                      value={pendingMockDraftCaptainEdit.captainName || ""}
+                      onChange={(event) => setPendingMockDraftCaptainEdit((prev) => ({ ...prev, captainName: event.target.value }))}
+                    >
+                      <option value="">No captain</option>
+                      {captainOptions.map((player) => <option key={`captain-edit-${pendingMockDraftCaptainEdit.teamId}-${player}`} value={player}>{player}</option>)}
+                    </select>
+                  </label>
+                  <label className="block">
+                    <span className="text-xs font-black uppercase tracking-wide text-slate-500">Value</span>
+                    <input
+                      type="number"
+                      min="1"
+                      className="mt-1 w-full rounded-xl border bg-white px-3 py-2 text-sm font-black text-slate-900"
+                      value={pendingMockDraftCaptainEdit.value ?? 1}
+                      onChange={(event) => setPendingMockDraftCaptainEdit((prev) => ({ ...prev, value: event.target.value }))}
+                    />
+                  </label>
+                </div>
+                <div className="mt-5 flex flex-wrap justify-end gap-2">
+                  <Button variant="outline" onClick={() => setPendingMockDraftCaptainEdit(null)}>Cancel</Button>
+                  <Button variant="primary" onClick={saveMockDraftCaptainEdit}>Save Captain</Button>
+                </div>
+              </div>
+            </div>
+          );
+        })()}
+
+        {pendingMockDraftPlayerRemoval && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4">
+            <div className="w-full max-w-md rounded-3xl bg-white p-5 shadow-xl">
+              <div className="text-xs font-black uppercase tracking-wide text-purple-700">Mock Draft Roster</div>
+              <h2 className="mt-1 text-2xl font-black">Edit mock draft player</h2>
+              <div className="mt-3 space-y-3 rounded-xl border bg-slate-50 p-3 text-sm font-semibold text-slate-700">
+                <div>Player: <span className="font-black text-slate-900">{pendingMockDraftPlayerRemoval.playerName}</span></div>
+                <div>Team: <span className="font-black text-slate-900">{pendingMockDraftPlayerRemoval.teamName}</span></div>
+                <label className="block">
+                  <span className="text-xs font-black uppercase tracking-wide text-slate-500">Value</span>
+                  <input
+                    type="number"
+                    min="1"
+                    className="mt-1 w-full rounded-xl border bg-white px-3 py-2 text-sm font-black text-slate-900"
+                    value={pendingMockDraftPlayerRemoval.value ?? activeDraftSettings.playerValues?.[pendingMockDraftPlayerRemoval.playerName] ?? 1}
+                    onChange={(event) => setPendingMockDraftPlayerRemoval((prev) => ({ ...prev, value: event.target.value }))}
+                  />
+                </label>
+              </div>
+              <div className="mt-5 flex flex-wrap justify-end gap-2">
+                <Button variant="outline" onClick={() => setPendingMockDraftPlayerRemoval(null)}>Cancel</Button>
+                <Button
+                  variant="primary"
+                  onClick={() => {
+                    updateMockDraftPlayerValue(pendingMockDraftPlayerRemoval.playerName, pendingMockDraftPlayerRemoval.value);
+                    setPendingMockDraftPlayerRemoval(null);
+                  }}
+                >
+                  Save Value
+                </Button>
+                <Button
+                  variant="danger"
+                  onClick={() => {
+                    removeMockDraftPlayerFromTeam(pendingMockDraftPlayerRemoval.teamId, pendingMockDraftPlayerRemoval.playerName);
+                    setPendingMockDraftPlayerRemoval(null);
+                  }}
+                >
+                  Remove Player
+                </Button>
+              </div>
+            </div>
+          </div>
+        )}
 
         {blockedRosterAssignment && (
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4">

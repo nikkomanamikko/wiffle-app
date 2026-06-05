@@ -7196,7 +7196,10 @@ export default function WiffleScoringPrototype() {
   const [pendingMockDraftCaptainEdit, setPendingMockDraftCaptainEdit] = useState(null);
   const [pendingDraftNominationPlayer, setPendingDraftNominationPlayer] = useState("");
   const [draftAvailableSort, setDraftAvailableSort] = useState({ key: "player", direction: "asc" });
+  const [draftStatsScope, setDraftStatsScope] = useState("career");
   const [draftOrderExpanded, setDraftOrderExpanded] = useState(false);
+  const [draftOrderContainerExpanded, setDraftOrderContainerExpanded] = useState(true);
+  const [draftSettingsExpanded, setDraftSettingsExpanded] = useState(true);
   const [draftStartedOverrides, setDraftStartedOverrides] = useState({});
   const [pendingRealDraftStart, setPendingRealDraftStart] = useState(false);
   const [pendingDraftAward, setPendingDraftAward] = useState(null);
@@ -7212,6 +7215,9 @@ export default function WiffleScoringPrototype() {
   const [leagueDraft, setLeagueDraft] = useState(null);
   const [leagueDraftLeagueId, setLeagueDraftLeagueId] = useState("");
   const [leagueEditorOpen, setLeagueEditorOpen] = useState(false);
+  const [leagueSetupWizardOpen, setLeagueSetupWizardOpen] = useState(false);
+  const [leagueSetupWizardStep, setLeagueSetupWizardStep] = useState("identity");
+  const [leagueAwardsWizardOpen, setLeagueAwardsWizardOpen] = useState(false);
   const [gameStarted, setGameStarted] = useState(false);
   const [gamePaused, setGamePaused] = useState(false);
   const [pendingGameDelete, setPendingGameDelete] = useState(null);
@@ -7482,6 +7488,42 @@ export default function WiffleScoringPrototype() {
   }));
   const leagueSettingsLocked = activePage === "league" && selectedLeagueRealDraftInProgress;
   const selectedCurrentSeason = selectedLeagueSeasons.find((season) => Number(season.year) === Number(selectedLeague?.currentSeasonYear)) || selectedLeagueSeasons[0] || normalizeSeasonRecord(makeDefaultSeasonRecord(currentYearNumber()));
+  const selectedCurrentSession = selectedCurrentSeason.sessions.find((session) => session.id === selectedCurrentSeason.currentSessionId) || selectedCurrentSeason.sessions[0] || null;
+  const leagueSetupDivisionNames = makeDivisionNames(selectedLeague?.divisionCount || 0, selectedLeague?.divisions || []);
+  const leagueSetupDraftSessionOptions = selectedCurrentSeason.sessionsEnabled ? selectedCurrentSeason.sessions : [{ id: selectedCurrentSeason.currentSessionId || selectedCurrentSeason.sessions?.[0]?.id || "default-session", name: "Season Draft" }];
+  const leagueSetupDraftEnabledCount = leagueSetupDraftSessionOptions.filter((session) => {
+    const sessionDraft = normalizeDraftSettings(selectedCurrentSeason.drafts?.[session.id], selectedLeague, session.id);
+    return Boolean(sessionDraft.enabled);
+  }).length;
+  const leagueSetupWizardSteps = ["identity", "season", "seasonNotes", "sessions", "sessionNames", "draftAvailability", "teams", "roster", "captains", "divisions", "divisionNames"];
+  const leagueSetupWizardStepLabels = {
+    identity: "League Identity",
+    season: "Current Season",
+    seasonNotes: "Season Notes",
+    sessions: "Season Sessions",
+    sessionNames: "Session Details",
+    draftAvailability: "Draft Availability",
+    teams: "Teams",
+    roster: "Roster Size",
+    captains: "Captains",
+    divisions: "Divisions",
+    divisionNames: "Division Names",
+  };
+  const leagueSetupWizardStepIndex = Math.max(0, leagueSetupWizardSteps.indexOf(leagueSetupWizardStep));
+  const leagueSetupSummaryItems = [
+    { label: "League", value: selectedLeague?.name || "Untitled League" },
+    { label: "Season", value: selectedLeague?.currentSeasonYear || currentYearNumber() },
+    { label: "Notes", value: selectedCurrentSeason.notes ? "Added" : "Blank" },
+    { label: "Sessions", value: selectedCurrentSeason.sessionsEnabled ? `${selectedCurrentSeason.sessionCount || selectedCurrentSeason.sessions.length} session${Number(selectedCurrentSeason.sessionCount || selectedCurrentSeason.sessions.length) === 1 ? "" : "s"}` : "Off" },
+    { label: "Current Session", value: selectedCurrentSeason.sessionsEnabled ? selectedCurrentSession?.name || "Session 1" : "Single season" },
+    { label: "Rosters", value: selectedCurrentSeason.sessionsEnabled ? (selectedCurrentSeason.keepRostersForSessions ? "Carry over" : "By session") : "Single roster" },
+    { label: "Team Identity", value: selectedCurrentSeason.sessionsEnabled ? (selectedCurrentSeason.keepTeamIdentityForSessions !== false ? "Carry over" : "By session") : "Single setup" },
+    { label: "Draft", value: leagueSetupDraftEnabledCount > 0 ? `${leagueSetupDraftEnabledCount} enabled` : "Off" },
+    { label: "Teams", value: selectedLeague?.teamCount || 1 },
+    { label: "Players / Team", value: selectedLeague?.playersPerTeam || 1 },
+    { label: "Captains", value: selectedLeague?.enableCaptains === false ? "Off" : "On" },
+    { label: "Divisions", value: (selectedLeague?.divisionCount || 0) > 0 ? `${selectedLeague.divisionCount} division${Number(selectedLeague.divisionCount) === 1 ? "" : "s"}` : "Off" },
+  ];
   const allLeagueTournaments = leagues
     .flatMap((league) => (league.tournaments || []).map((tournament) => ({
       ...tournament,
@@ -7506,7 +7548,6 @@ export default function WiffleScoringPrototype() {
     .filter((league) => selectedTournamentLeagueIds.includes(league.id))
     .flatMap((league) => (league.teams || []).map((team) => ({ ...team, sourceLeagueId: league.id, sourceLeagueName: league.name || "League" })))
     .sort((a, b) => String(a.sourceLeagueName || "").localeCompare(String(b.sourceLeagueName || "")) || String(a.name || "").localeCompare(String(b.name || "")));
-  const selectedCurrentSession = selectedCurrentSeason.sessions.find((session) => session.id === selectedCurrentSeason.currentSessionId) || selectedCurrentSeason.sessions[0] || null;
   const activeDraftSessionId = selectedCurrentSeason.sessionsEnabled ? (draftSessionId || selectedCurrentSession?.id || selectedCurrentSeason.sessions[0]?.id || "") : (selectedCurrentSession?.id || selectedCurrentSeason.sessions[0]?.id || "default-session");
   const activeDraftSession = selectedCurrentSeason.sessions.find((session) => session.id === activeDraftSessionId) || selectedCurrentSession || selectedCurrentSeason.sessions[0] || null;
   const activeDraftKey = `${selectedLeague?.id || "league"}-${selectedCurrentSeason?.id || "season"}-${activeDraftSessionId || "session"}`;
@@ -7527,20 +7568,34 @@ export default function WiffleScoringPrototype() {
   const draftCareerStats = (activePage === "draft" && (draftAvailablePlayers.length > 0 || draftSelectedPlayer))
     ? buildLeagueAggregateStats({ league: selectedLeague, previousGames, scope: "career" })
     : { battingStats: {}, pitchingStats: {} };
+  const draftSeasonStats = (activePage === "draft" && (draftAvailablePlayers.length > 0 || draftSelectedPlayer))
+    ? buildLeagueAggregateStats({ league: selectedLeague, previousGames, scope: "season", seasonYear: Number(selectedCurrentSeason?.year) || Number(selectedLeague?.currentSeasonYear) || currentYearNumber(), sessionId: "all" })
+    : { battingStats: {}, pitchingStats: {} };
+  const draftStatsForBoard = draftStatsScope === "season" ? draftSeasonStats : draftCareerStats;
   const getDraftAvailableSortValue = (player, sortKey = draftAvailableSort.key) => {
-    const batting = getPlayerBattingStat(draftCareerStats.battingStats, player);
-    const pitching = getPlayerPitchingStat(draftCareerStats.pitchingStats, player);
+    const batting = getPlayerBattingStat(draftStatsForBoard.battingStats, player);
+    const pitching = getPlayerPitchingStat(draftStatsForBoard.pitchingStats, player);
     if (sortKey === "player") return String(player || "").toLowerCase();
+    if (sortKey === "AB") return safeNumber(batting.AB);
     if (sortKey === "AVG") return safeNumber(batting.AB) ? safeNumber(batting.H) / safeNumber(batting.AB) : 0;
     if (sortKey === "OBP") return safeNumber(batting.AB) + safeNumber(batting.BB) ? (safeNumber(batting.H) + safeNumber(batting.BB)) / (safeNumber(batting.AB) + safeNumber(batting.BB)) : 0;
     if (sortKey === "SLG") return safeNumber(batting.AB) ? totalBases(batting) / safeNumber(batting.AB) : 0;
     if (sortKey === "OBPS") return (safeNumber(batting.AB) + safeNumber(batting.BB) ? (safeNumber(batting.H) + safeNumber(batting.BB)) / (safeNumber(batting.AB) + safeNumber(batting.BB)) : 0) + (safeNumber(batting.AB) ? totalBases(batting) / safeNumber(batting.AB) : 0);
     if (sortKey === "HR") return safeNumber(batting.HR);
     if (sortKey === "RBI") return safeNumber(batting.RBI);
+    if (sortKey === "BB") return safeNumber(batting.BB);
     if (sortKey === "IP") return safeNumber(pitching.OUTS);
     if (sortKey === "ERA") return safeNumber(pitching.OUTS) ? (safeNumber(pitching.ER ?? pitching.R) * Math.max(1, Number(gameInnings) || GAME_INNINGS) * 3) / safeNumber(pitching.OUTS) : 999999;
     if (sortKey === "WHIP") return safeNumber(pitching.OUTS) ? ((safeNumber(pitching.H) + safeNumber(pitching.BB)) * 3) / safeNumber(pitching.OUTS) : 0;
     if (sortKey === "K") return safeNumber(pitching.K);
+    if (sortKey === "PBB") return safeNumber(pitching.BB);
+    if (sortKey === "HRA") return safeNumber(pitching.HR);
+    if (sortKey === "KBB") return safeNumber(pitching.BB) ? safeNumber(pitching.K) / safeNumber(pitching.BB) : safeNumber(pitching.K);
+    if (sortKey === "P_LOB") {
+      const baserunners = safeNumber(pitching.H) + safeNumber(pitching.BB);
+      const denominator = baserunners - (1.4 * safeNumber(pitching.HR));
+      return denominator > 0 ? Math.max(0, baserunners - safeNumber(pitching.R)) / denominator : 0;
+    }
     return 0;
   };
   const sortedDraftAvailablePlayers = [...draftAvailablePlayers].sort((playerA, playerB) => {
@@ -7566,8 +7621,8 @@ export default function WiffleScoringPrototype() {
   const currentDraftMinimumBidError = draftSelectedPlayer && draftBidTeamId ? getDraftMinimumBidError(selectedLeague, activeDraftSettings, draftBidTeamId, draftBidAmountNumber) : "";
   const currentDraftMaximumBidError = draftSelectedPlayer && draftBidTeamId ? getDraftMaximumBidError(selectedLeague, activeDraftSettings, draftBidTeamId, draftBidAmountNumber) : "";
   const draftNominationLocked = Boolean(draftSelectedPlayer);
-  const nominatedBattingStats = draftSelectedPlayer ? getPlayerBattingStat(draftCareerStats.battingStats, draftSelectedPlayer) : emptyStats();
-  const nominatedPitchingStats = draftSelectedPlayer ? getPlayerPitchingStat(draftCareerStats.pitchingStats, draftSelectedPlayer) : emptyPitchingStats();
+  const nominatedBattingStats = draftSelectedPlayer ? getPlayerBattingStat(draftStatsForBoard.battingStats, draftSelectedPlayer) : emptyStats();
+  const nominatedPitchingStats = draftSelectedPlayer ? getPlayerPitchingStat(draftStatsForBoard.pitchingStats, draftSelectedPlayer) : emptyPitchingStats();
   const nominatedPlayerProfile = draftSelectedPlayer ? getLeaguePlayerProfile(selectedLeague, draftSelectedPlayer) || allPlayerRecords.find((player) => String(player.name || "").trim() === String(draftSelectedPlayer || "").trim()) || getPlayerProfileFromLeagues(leagues, draftSelectedPlayer) : null;
   const currentWinningBid = getDraftCurrentBid(activeDraftSettings, draftSelectedPlayer) || getDraftBidHistory(activeDraftSettings, draftSelectedPlayer)[0] || null;
   const currentWinningTeam = currentWinningBid ? (selectedLeague.teams || []).find((team) => team.id === currentWinningBid.teamId) : null;
@@ -8421,6 +8476,7 @@ export default function WiffleScoringPrototype() {
     if (savedState.draftBidAmount != null) setDraftBidAmount(savedState.draftBidAmount);
     if (savedState.draftTimerRemaining != null) setDraftTimerRemaining(savedState.draftTimerRemaining);
     if (savedState.draftTimerRunning != null) setDraftTimerRunning(savedState.draftTimerRunning);
+    if (savedState.draftStatsScope != null) setDraftStatsScope(savedState.draftStatsScope === "season" ? "season" : "career");
     if (savedState.mockDraftMode != null) setMockDraftMode(savedState.mockDraftMode);
     if (savedState.mockDrafts) setMockDrafts(savedState.mockDrafts);
     if (savedState.draftStartedOverrides) setDraftStartedOverrides(savedState.draftStartedOverrides);
@@ -8620,6 +8676,7 @@ export default function WiffleScoringPrototype() {
       draftTimerRemaining,
       draftTimerRunning,
       draftAwardError,
+      draftStatsScope,
       mockDraftMode,
       mockDrafts,
       draftStartedOverrides,
@@ -8638,7 +8695,7 @@ export default function WiffleScoringPrototype() {
     lastPersistedStateSignatureRef.current = nextStateSignature;
     const activeLiveGameSession = Boolean(gameStarted || activePage === "score" || liveEventsWriteInFlight);
     savePersistedAppState({ ...nextState, savedAt: new Date().toISOString() }, { shared: forceSaveRequested || !activeLiveGameSession });
-  }, [storageHydrated, awayTeam, homeTeam, gameDate, gameTime, gameLocation, gameSeasonYear, gameSessionId, selectedFieldId, gameInnings, pitchingOrderPredetermined, powerPlaysEnabled, powerPlayLimitType, powerPlayLimitAmount, whammysEnabled, pudwhackerEnabled, extraRunnerRules, ghostRunnersCountAsRbi, runRuleEnabled, runRuleRuns, runRuleBeforeFourthOnly, walkRunRuleCountsAsHr, confirmHomeAwayBeforeStart, useLeagueDefaultRules, teamPlayers, subPlayers, subSlots, battingOrder, pitchingOrder, extraPitchers, events, previousGames, archivedFinalEventId, expandedGameId, activeSavedGameId, activeLiveGameId, liveGamesIndex, activePage, leagues, freeAgentPlayers, selectedLeagueId, setupLeagueId, leagueGameMode, useExhibitionLeagueTeams, awayLeagueTeamId, homeLeagueTeamId, statsViewMode, statsLeagueId, statsSeasonYear, statsSessionId, statsPlayerFilter, statsVsHitterFilter, statsVsPitcherFilter, statsVsScope, splitsScope, splitsLeagueId, splitsSeasonYear, splitsSessionId, splitsPlayerFilter, splitsGroupBy, splitsIncludeSubs, playerLeagueFilter, leadersViewMode, leadersLeagueId, leadersSeasonYear, selectedLeaderStats, fieldImportSourceLeagueId, selectedImportFieldIds, fieldLeagueFilter, setupAttempted, matchupStatScopeIndex, selectedLeagueTeamsSessionId, useLeagueSchedule, selectedScheduledWeekId, selectedScheduledGameId, copyScheduleTargetSessionId, copyScheduleFirstWeekDate, copySeasonSourceId, copySeasonTargetId, copySeasonFirstWeekDate, activeScheduleCopyTool, pendingCopyWeekId, copyWeekOneWeekLater, draftSessionId, draftSelectedPlayer, draftBidTeamId, draftBidAmount, draftTimerRemaining, draftTimerRunning, draftAwardError, mockDraftMode, mockDrafts, draftStartedOverrides, gameStarted, gamePaused, savedSetupSignature, setupEditingDuringGame]);
+  }, [storageHydrated, awayTeam, homeTeam, gameDate, gameTime, gameLocation, gameSeasonYear, gameSessionId, selectedFieldId, gameInnings, pitchingOrderPredetermined, powerPlaysEnabled, powerPlayLimitType, powerPlayLimitAmount, whammysEnabled, pudwhackerEnabled, extraRunnerRules, ghostRunnersCountAsRbi, runRuleEnabled, runRuleRuns, runRuleBeforeFourthOnly, walkRunRuleCountsAsHr, confirmHomeAwayBeforeStart, useLeagueDefaultRules, teamPlayers, subPlayers, subSlots, battingOrder, pitchingOrder, extraPitchers, events, previousGames, archivedFinalEventId, expandedGameId, activeSavedGameId, activeLiveGameId, liveGamesIndex, activePage, leagues, freeAgentPlayers, selectedLeagueId, setupLeagueId, leagueGameMode, useExhibitionLeagueTeams, awayLeagueTeamId, homeLeagueTeamId, statsViewMode, statsLeagueId, statsSeasonYear, statsSessionId, statsPlayerFilter, statsVsHitterFilter, statsVsPitcherFilter, statsVsScope, splitsScope, splitsLeagueId, splitsSeasonYear, splitsSessionId, splitsPlayerFilter, splitsGroupBy, splitsIncludeSubs, playerLeagueFilter, leadersViewMode, leadersLeagueId, leadersSeasonYear, selectedLeaderStats, fieldImportSourceLeagueId, selectedImportFieldIds, fieldLeagueFilter, setupAttempted, matchupStatScopeIndex, selectedLeagueTeamsSessionId, useLeagueSchedule, selectedScheduledWeekId, selectedScheduledGameId, copyScheduleTargetSessionId, copyScheduleFirstWeekDate, copySeasonSourceId, copySeasonTargetId, copySeasonFirstWeekDate, activeScheduleCopyTool, pendingCopyWeekId, copyWeekOneWeekLater, draftSessionId, draftSelectedPlayer, draftBidTeamId, draftBidAmount, draftTimerRemaining, draftTimerRunning, draftAwardError, draftStatsScope, mockDraftMode, mockDrafts, draftStartedOverrides, gameStarted, gamePaused, savedSetupSignature, setupEditingDuringGame]);
 
   useEffect(() => {
     if (!storageHydrated || setupSignatureInitializedRef.current) return;
@@ -19855,7 +19912,6 @@ export default function WiffleScoringPrototype() {
                 <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
                   <div>
                     <h2 className="text-xl font-bold">Draft</h2>
-                    <p className="text-sm text-slate-500">Run an auction-style draft for league players by session. Captains are automatically kept on their teams. Mock Draft lets you simulate without changing league rosters.</p>
                   </div>
                   <div className="flex flex-wrap gap-2">
                     <select className="rounded-xl border px-3 py-2 text-sm font-semibold" value={selectedLeague.id} onChange={(event) => setSelectedLeagueId(event.target.value)}>
@@ -19873,58 +19929,73 @@ export default function WiffleScoringPrototype() {
               </div>
             </Card>
 
+            {!draftStarted && (
+            <div className="order-3">
             <Card>
               <div className="p-3 sm:p-5">
                 {mockDraftMode && <div className="mb-3 inline-flex rounded-full bg-purple-100 px-3 py-1 text-xs font-black uppercase text-purple-800">Mock Draft</div>}
-                <div className="mb-3 flex flex-wrap items-center gap-2">
-                  <span className={`rounded-full px-3 py-1 text-xs font-black uppercase ${mockDraftMode ? "bg-purple-100 text-purple-800" : "bg-slate-100 text-slate-600"}`}>
-                    {mockDraftMode ? "Mock Draft Mode" : "Official Draft Mode"}
-                  </span>
-                  {mockDraftMode && <span className="rounded-full bg-purple-50 px-3 py-1 text-xs font-semibold text-purple-700">Mock picks will not update league rosters.</span>}
-                  {mockDraftMode && <span className="rounded-full bg-purple-100 px-3 py-1 text-xs font-black uppercase text-purple-800">Official draft setting locked</span>}
-                </div>
                 <div className="mb-3 flex items-center justify-between gap-3">
                   <div>
                     <h2 className="text-xl font-bold">Draft Settings</h2>
-                    <p className="text-sm text-slate-500">Select session, cap, carryover rules, edit draft order, and start the draft when ready.</p>
                   </div>
-                  {!draftStarted && <span className="rounded-full bg-blue-100 px-3 py-1 text-xs font-black uppercase text-blue-800">Draft Setup Mode</span>}
-                  {draftStarted && !draftCompleted && <span className="rounded-full bg-green-100 px-3 py-1 text-xs font-black uppercase text-green-800">Draft Started</span>}
-                  {draftCompleted && <span className="rounded-full bg-slate-900 px-3 py-1 text-xs font-black uppercase text-white">Draft Completed</span>}
+                  <div className="flex flex-wrap items-center justify-end gap-2">
+                    {!draftStarted && <span className="rounded-full bg-blue-100 px-3 py-1 text-xs font-black uppercase text-blue-800">Draft Setup Mode</span>}
+                    <Button variant="outline" onClick={() => setDraftSettingsExpanded((current) => !current)}>{draftSettingsExpanded ? "Hide" : "Show"}</Button>
+                  </div>
                 </div>
-                <div className="grid gap-3 lg:grid-cols-5 lg:items-end">
-                  <div>
-                    <label className="text-xs font-semibold uppercase text-slate-500">Draft Session</label>
-                    <select className="mt-1 w-full rounded-xl border px-3 py-2 text-sm font-semibold" value={activeDraftSessionId} disabled={draftStarted || draftNominationLocked} onChange={(event) => { setDraftSessionId(event.target.value); setDraftSelectedPlayer(""); setDraftBidTeamId(""); setDraftAwardError(""); }}>
-                      {selectedCurrentSeason.sessions.map((session) => <option key={session.id} value={session.id}>{session.name}</option>)}
-                    </select>
-                  </div>
-                  <div>
-                    <label className="text-xs font-semibold uppercase text-slate-500">Team Cap $</label>
-                    <input type="number" min="1" className="mt-1 w-full rounded-xl border px-3 py-2 text-sm font-semibold" value={activeDraftSettings.cap} disabled={draftStarted || draftNominationLocked} onChange={(event) => updateDraftCap(event.target.value)} />
-                  </div>
-                  <div className="rounded-xl border bg-slate-50 p-3">
-                    <label className="flex items-center gap-2 text-sm font-semibold">
-                      <input type="checkbox" checked={Boolean(activeDraftSettings.maxCarryoverEnabled)} disabled={draftStarted || draftNominationLocked} onChange={(event) => updateDraftSettings(activeDraftSessionId, { maxCarryoverEnabled: event.target.checked })} />
-                      Enable Max Carryover $
-                    </label>
-                    {activeDraftSettings.maxCarryoverEnabled && (
-                      <div className="mt-2">
-                        <label className="text-xs font-semibold uppercase text-slate-500">Max Carryover $</label>
-                        <input type="number" min="0" className="mt-1 w-full rounded-xl border px-3 py-2 text-sm font-semibold" value={activeDraftSettings.maxCarryover} disabled={draftStarted || draftNominationLocked} onChange={(event) => updateDraftMaxCarryover(event.target.value)} />
-                        <p className="mt-1 text-xs text-slate-500">{`Minimum spend: $${draftMinimumSpend}`}</p>
+                {draftSettingsExpanded && (
+                <>
+                {draftStarted ? (
+                  <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+                    {[
+                      ["Session", activeDraftSession?.name || "Session"],
+                      ["Team Cap", `$${activeDraftSettings.cap}`],
+                      ["Carryover", activeDraftSettings.maxCarryoverEnabled ? `$${activeDraftSettings.maxCarryover} max` : "Off"],
+                      ["Minimum Spend", `$${draftMinimumSpend}`],
+                    ].map(([label, value]) => (
+                      <div key={`draft-summary-${label}`} className="rounded-xl border bg-slate-50 px-3 py-2">
+                        <div className="text-[10px] font-black uppercase tracking-wide text-slate-500">{label}</div>
+                        <div className="mt-0.5 text-sm font-black text-slate-900">{value}</div>
                       </div>
-                    )}
+                    ))}
                   </div>
-                </div>
+                ) : (
+                  <div className="grid gap-3 lg:grid-cols-5 lg:items-end">
+                    <div>
+                      <label className="text-xs font-semibold uppercase text-slate-500">Draft Session</label>
+                      <select className="mt-1 w-full rounded-xl border px-3 py-2 text-sm font-semibold" value={activeDraftSessionId} disabled={draftStarted || draftNominationLocked} onChange={(event) => { setDraftSessionId(event.target.value); setDraftSelectedPlayer(""); setDraftBidTeamId(""); setDraftAwardError(""); }}>
+                        {selectedCurrentSeason.sessions.map((session) => <option key={session.id} value={session.id}>{session.name}</option>)}
+                      </select>
+                    </div>
+                    <div>
+                      <label className="text-xs font-semibold uppercase text-slate-500">Team Cap $</label>
+                      <input type="number" min="1" className="mt-1 w-full rounded-xl border px-3 py-2 text-sm font-semibold" value={activeDraftSettings.cap} disabled={draftStarted || draftNominationLocked} onChange={(event) => updateDraftCap(event.target.value)} />
+                    </div>
+                    <div className="rounded-xl border bg-slate-50 p-3">
+                      <label className="flex items-center gap-2 text-sm font-semibold">
+                        <input type="checkbox" checked={Boolean(activeDraftSettings.maxCarryoverEnabled)} disabled={draftStarted || draftNominationLocked} onChange={(event) => updateDraftSettings(activeDraftSessionId, { maxCarryoverEnabled: event.target.checked })} />
+                        Enable Max Carryover $
+                      </label>
+                      {activeDraftSettings.maxCarryoverEnabled && (
+                        <div className="mt-2">
+                          <label className="text-xs font-semibold uppercase text-slate-500">Max Carryover $</label>
+                          <input type="number" min="0" className="mt-1 w-full rounded-xl border px-3 py-2 text-sm font-semibold" value={activeDraftSettings.maxCarryover} disabled={draftStarted || draftNominationLocked} onChange={(event) => updateDraftMaxCarryover(event.target.value)} />
+                          <p className="mt-1 text-xs text-slate-500">{`Minimum spend: $${draftMinimumSpend}`}</p>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
                 {!mockDraftMode && !leagueDraftEnabledForActiveSession && <div className="mt-3 rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm font-semibold text-amber-900"><div className="font-black">Draft is not enabled for this session.</div><p className="mt-1">Go to League → Season and enable draft for this session before starting a real draft.</p><div className="mt-3"><Button variant="outline" onClick={() => goToPage("league")}>Open League Settings</Button></div></div>}
-                {!draftBoardEnabled && mockDraftMode && <p className="mt-3 rounded-xl border bg-purple-50 p-3 text-sm font-semibold text-purple-800">Mock Draft is enabled. You can start a mock draft without enabling the official session draft.</p>}
                 {!draftCaptainValuesReady && <p className="mt-3 rounded-xl border border-red-200 bg-red-50 p-3 text-sm font-semibold text-red-700">Captain $ values are required before the draft can start: {teamsMissingCaptainValues.map((team) => team.name).join(", ")}.</p>}
-                {draftStarted && <p className="mt-3 rounded-xl border bg-slate-50 p-3 text-sm font-semibold text-slate-600">Draft has started. Captain $ values are locked for this session.</p>}
+                </>
+                )}
               </div>
             </Card>
+            </div>
+            )}
 
-            <div className="order-4 grid gap-4 xl:grid-cols-[0.9fr_1.1fr]">
+            <div className="order-2 grid gap-4 xl:grid-cols-[0.9fr_1.1fr]">
               {false && (
               <Card>
                 <div className="p-5">
@@ -20031,11 +20102,11 @@ export default function WiffleScoringPrototype() {
                           </div>
                           <div className="mt-3 grid gap-3 md:grid-cols-2">
                             <div className="rounded-xl border bg-white p-3">
-                              <div className="text-xs font-bold uppercase text-slate-500">Career Hitting</div>
+                              <div className="text-xs font-bold uppercase text-slate-500">{draftStatsScope === "season" ? "Season Hitting" : "Career Hitting"}</div>
                               <div className="mt-1 text-sm font-semibold">{formatBattingLine(nominatedBattingStats)}</div>
                             </div>
                             <div className="rounded-xl border bg-white p-3">
-                              <div className="text-xs font-bold uppercase text-slate-500">Career Pitching</div>
+                              <div className="text-xs font-bold uppercase text-slate-500">{draftStatsScope === "season" ? "Season Pitching" : "Career Pitching"}</div>
                               <div className="mt-1 text-sm font-semibold">{formatPitchingLine(nominatedPitchingStats)}</div>
                             </div>
                           </div>
@@ -20171,15 +20242,17 @@ export default function WiffleScoringPrototype() {
                       <div>
                         <div className="flex flex-wrap items-center gap-2">
                           <h2 className="text-xl font-bold">Draft Order</h2>
-                          {mockDraftMode && <span className="rounded-full bg-purple-100 px-3 py-1 text-xs font-black uppercase text-purple-800">Mock Draft</span>}
                           {!draftStarted && <span className="rounded-full bg-blue-100 px-3 py-1 text-xs font-black uppercase text-blue-800">Setup Mode</span>}
                         </div>
                       </div>
                       <div className="flex flex-wrap items-center justify-end gap-2">
                         {!draftBoardEnabled && <span className="rounded-full bg-amber-100 px-3 py-1 text-xs font-black uppercase text-amber-800">Draft Disabled</span>}
-                        {!draftStarted && <Button variant="outline" onClick={() => setDraftOrderExpanded((current) => !current)}>{draftOrderExpanded ? "Done" : "Edit Order"}</Button>}
+                        <Button variant="outline" onClick={() => setDraftOrderContainerExpanded((current) => !current)}>{draftOrderContainerExpanded ? "Hide" : "Show"}</Button>
+                        {draftOrderContainerExpanded && !draftStarted && <Button variant="outline" onClick={() => setDraftOrderExpanded((current) => !current)}>{draftOrderExpanded ? "Done" : "Edit Order"}</Button>}
                       </div>
                     </div>
+                    {draftOrderContainerExpanded && (
+                    <>
                     <div className="flex flex-wrap gap-1.5 rounded-xl border bg-slate-50 p-2">
                       {activeDraftSettings.draftOrder.map((teamId, index) => {
                         const team = (selectedLeague.teams || []).find((item) => item.id === teamId);
@@ -20211,6 +20284,8 @@ export default function WiffleScoringPrototype() {
                         })}
                       </div>
                     )}
+                    </>
+                    )}
                   </div>
                 </Card>
               </div>
@@ -20218,19 +20293,25 @@ export default function WiffleScoringPrototype() {
             </div>
 
             {(mockDraftMode || leagueDraftEnabledForActiveSession) && (
-            <div className="order-3">
+            <div className="order-1">
             <Card>
               <div className="p-1.5 sm:p-4">
                 <div className="mb-4 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
                   <div>
                     <div className="flex items-center gap-2">
                       <h2 className="text-xl font-bold">Auction Board</h2>
-                      {mockDraftMode && <span className="rounded-full bg-purple-100 px-3 py-1 text-xs font-black uppercase text-purple-800">Mock Draft</span>}
                     </div>
-                    <p className="text-sm text-slate-500">Single-board roster, budget, auction, and available player view for {activeDraftSession?.name || "this session"}.</p>
                   </div>
-                  <div className="rounded-full bg-slate-100 px-3 py-1 text-xs font-black uppercase text-slate-500">
-                    {mockDraftMode ? "Mock Draft" : activeDraftSettings.enabled ? "Draft Enabled" : "Draft Disabled"}
+                  <div className={`rounded-full px-3 py-1 text-xs font-black uppercase ${
+                    mockDraftMode
+                      ? "bg-purple-100 text-purple-800"
+                      : activeDraftSettings.enabled && draftStarted && !draftCompleted
+                        ? "bg-green-100 text-green-800"
+                        : activeDraftSettings.enabled
+                          ? "bg-blue-100 text-blue-800"
+                          : "bg-slate-100 text-slate-500"
+                  }`}>
+                    {mockDraftMode ? "Mock Draft" : activeDraftSettings.enabled && draftStarted && !draftCompleted ? "Live Draft" : activeDraftSettings.enabled ? "Draft Enabled" : "Draft Disabled"}
                   </div>
                 </div>
                 <div className="overflow-x-auto rounded-t-xl border border-slate-800 border-b-slate-700 bg-slate-950 p-1.5 sm:rounded-t-2xl sm:p-3">
@@ -20256,7 +20337,7 @@ export default function WiffleScoringPrototype() {
                                   )}
                                 </div>
                                 <div className="min-w-0">
-                                  <div className="line-clamp-2 break-words font-black leading-tight" style={{ fontSize: "7px" }}>{team.name}</div>
+                                  <div className="line-clamp-2 break-words font-black leading-tight" style={{ fontSize: "12px" }}>{team.name}</div>
                                   <div className="mt-0.5 truncate text-[7px] font-black uppercase tracking-wide text-slate-400 sm:text-[8px]">{rosterCount}/{rosterTarget}</div>
                                 </div>
                               </div>
@@ -20283,15 +20364,15 @@ export default function WiffleScoringPrototype() {
                           <div className="border-b border-slate-800 p-0.5">
                             <button
                               type="button"
-                              className={`relative block min-h-12 w-full min-w-0 rounded bg-slate-950 px-1 py-1 text-left font-bold leading-tight ${mockDraftMode ? "text-white hover:text-blue-200" : "text-white"}`}
-                              style={{ fontSize: "7px" }}
+                              className={`relative block min-h-12 w-full min-w-0 rounded bg-slate-950 px-1 pb-1 pt-3 text-left font-bold leading-tight ${mockDraftMode ? "text-white hover:text-blue-200" : "text-white"}`}
+                              style={{ fontSize: "12px" }}
                               onClick={() => mockDraftMode && setPendingMockDraftCaptainEdit({ teamId: team.id, teamName: team.name, captainName, value: getCaptainDraftValue(activeDraftSettings, team) || 1 })}
                             >
                               <span className="block min-w-0">
-                                <span className="block pr-6 text-[6px] font-black uppercase text-slate-500">Captain</span>
-                                <span className="mt-0.5 block whitespace-normal break-words underline decoration-slate-500 underline-offset-2">{captainName || "No captain"}</span>
+                                <span className="absolute left-1 right-7 top-1 block truncate text-[6px] font-black uppercase text-slate-500">Captain</span>
+                                <span className="block whitespace-normal break-words underline decoration-slate-500 underline-offset-2">{captainName || "No captain"}</span>
                               </span>
-                              <span className="absolute right-1 top-1 font-black" style={{ fontSize: "7px" }}>{captainName ? `$${getCaptainDraftValue(activeDraftSettings, team) || 0}` : "-"}</span>
+                              <span className="absolute right-1 top-1 font-black" style={{ fontSize: "10px" }}>{captainName ? `$${getCaptainDraftValue(activeDraftSettings, team) || 0}` : "-"}</span>
                             </button>
                           </div>
                           {draftedPlayers.map((player) => {
@@ -20300,11 +20381,11 @@ export default function WiffleScoringPrototype() {
                               <button
                                 type="button"
                                 className={`relative block min-h-10 w-full min-w-0 rounded bg-slate-950 px-1 pb-1 pt-3 text-left font-bold leading-tight ${mockDraftMode ? "text-white hover:text-blue-200" : "text-white"}`}
-                                style={{ fontSize: "7px" }}
+                                style={{ fontSize: "12px" }}
                                 onClick={() => mockDraftMode && setPendingMockDraftPlayerRemoval({ teamId: team.id, teamName: team.name, playerName: player, value: activeDraftSettings.playerValues?.[player] || 1 })}
                               >
                                 <span className="block min-w-0 whitespace-normal break-words underline decoration-slate-500 underline-offset-2">{player}</span>
-                                <span className="absolute right-1 top-1 font-black" style={{ fontSize: "7px" }}>{`$${activeDraftSettings.playerValues?.[player] || 0}`}</span>
+                                <span className="absolute right-1 top-1 font-black" style={{ fontSize: "10px" }}>{`$${activeDraftSettings.playerValues?.[player] || 0}`}</span>
                               </button>
                             </div>
                             );
@@ -20331,7 +20412,7 @@ export default function WiffleScoringPrototype() {
                   <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
                     <div>
                       <div className="text-[10px] font-black uppercase tracking-wide text-slate-400">Auction Board</div>
-                      <h3 className="text-lg font-black">{draftStarted ? draftCompleted ? "Draft Complete" : draftNominatingTeam ? `${draftNominatingTeam.name} is up` : "No eligible teams remaining" : "Start the draft to open bidding"}</h3>
+                      {!draftSelectedPlayer && <h3 className="text-lg font-black">{draftStarted ? draftCompleted ? "Draft Complete" : draftNominatingTeam ? `${draftNominatingTeam.name} is up` : "No eligible teams remaining" : "Start the draft to open bidding"}</h3>}
                       {draftStarted && !draftCompleted && nextDraftNominatingTeam && (
                         <div className="mt-0.5 text-[10px] font-black uppercase tracking-wide text-slate-400">{`Next nomination: ${nextDraftNominatingTeam.name}`}</div>
                       )}
@@ -20366,11 +20447,11 @@ export default function WiffleScoringPrototype() {
                           {draftSelectedPlayer && (
                             <div className="mt-1.5 grid gap-1.5 text-[10px] font-semibold text-slate-300 sm:grid-cols-2">
                               <div className="rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5">
-                                <div className="text-[9px] font-black uppercase text-slate-500">Career Hitting</div>
+                                <div className="text-[9px] font-black uppercase text-slate-500">{draftStatsScope === "season" ? "Season Hitting" : "Career Hitting"}</div>
                                 <div className="mt-1">{formatBattingLine(nominatedBattingStats)}</div>
                               </div>
                               <div className="rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5">
-                                <div className="text-[9px] font-black uppercase text-slate-500">Career Pitching</div>
+                                <div className="text-[9px] font-black uppercase text-slate-500">{draftStatsScope === "season" ? "Season Pitching" : "Career Pitching"}</div>
                                 <div className="mt-1">{formatPitchingLine(nominatedPitchingStats)}</div>
                               </div>
                             </div>
@@ -20383,7 +20464,7 @@ export default function WiffleScoringPrototype() {
                                 type="button"
                                 disabled={!currentWinningBid}
                                 onClick={cancelLatestBid}
-                                className="text-[10px] font-black uppercase text-slate-400 underline decoration-slate-600 underline-offset-2 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
+                                className="text-[7px] font-black uppercase text-slate-600 underline decoration-slate-700 underline-offset-2 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
                               >
                                 Cancel Latest
                               </button>
@@ -20394,8 +20475,8 @@ export default function WiffleScoringPrototype() {
                                   {currentWinningTeam.logoUrl ? <img src={currentWinningTeam.logoUrl} alt={`${currentWinningTeam.name} logo`} className="h-full w-full object-cover" /> : String(currentWinningTeam.name || "T").slice(0, 2).toUpperCase()}
                                 </div>
                                 <div className="min-w-0">
-                                  <div className="truncate text-sm font-black">{currentWinningTeam.name}</div>
-                                  <div className="text-xs font-black text-green-300">{`$${currentWinningBid.amount}`}</div>
+                                  <div className="truncate text-xl font-black leading-tight">{currentWinningTeam.name}</div>
+                                  <div className="text-lg font-black leading-tight text-green-300">{`$${currentWinningBid.amount}`}</div>
                                 </div>
                               </div>
                             ) : (
@@ -20423,7 +20504,7 @@ export default function WiffleScoringPrototype() {
 
                           <div className="mt-2 grid gap-2 md:grid-cols-[minmax(0,1fr)_6rem] md:items-end">
                             <div>
-                              <label className="text-[10px] font-black uppercase tracking-wide text-slate-400">Bid Placed By Team</label>
+                              <label className="text-[10px] font-black uppercase tracking-wide text-slate-400">Next Bid:</label>
                               <select className="mt-1 w-full rounded-lg border border-slate-600 bg-slate-950 px-2 py-1.5 text-xs font-semibold text-white" value={draftBidTeamId} disabled={!draftCanUseAuction || !draftSelectedPlayer || openingBidRequiredFromNominatingTeam} onChange={(event) => updateDraftBidTeamSelection(event.target.value)}>
                                 <option value="">Select team</option>
                                 {draftEligibleTeams.map((team) => (
@@ -20445,29 +20526,42 @@ export default function WiffleScoringPrototype() {
                               />
                             </div>
                           </div>
-                          <div className="mt-2 flex flex-wrap items-center gap-1.5">
-                            <Button variant="outline" disabled={!draftSelectedPlayer} onClick={() => updateDraftBidAmountSelection((amount) => String(Math.max(1, Number(amount) || 0) + 1))}>+ $1</Button>
-                            <Button variant="outline" disabled={!draftSelectedPlayer} onClick={() => updateDraftBidAmountSelection((amount) => String(Math.max(1, Number(amount) || 0) + 5))}>+ $5</Button>
-                            <Button variant="outline" disabled={!draftSelectedPlayer} onClick={() => updateDraftBidAmountSelection((amount) => String(Math.max(1, Number(amount) || 0) + 10))}>+ $10</Button>
+                          <div className="mt-2">
                             <button
                               type="button"
                               disabled={!draftCanUseAuction || !draftCaptainValuesReady || !draftSelectedPlayer || !String(draftBidTeamId || "").trim() || draftBidAmountNumber < 1 || draftBidAmountNumber < currentTeamMinimumBid || draftBidAmountNumber > currentTeamMaximumBid || getTeamDraftSpend(activeDraftSettings, draftBidTeamId) + draftBidAmountNumber > Number(activeDraftSettings.cap || 0) || Boolean(currentDraftMinimumBidError) || Boolean(currentDraftMaximumBidError) || Boolean(currentDraftCarryoverError) || Boolean(currentDraftRosterFullError)}
                               onClick={placeDraftBid}
-                              className="inline-flex items-center justify-center rounded-lg bg-green-600 px-3 py-1.5 text-xs font-black uppercase tracking-wide text-white transition hover:bg-green-500 disabled:cursor-not-allowed disabled:opacity-50"
+                              className="flex w-full items-center justify-center rounded-lg bg-green-600 px-3 py-2 text-sm font-black uppercase tracking-wide text-white transition hover:bg-green-500 disabled:cursor-not-allowed disabled:opacity-50"
                             >
                               Place Bid
                             </button>
+                          </div>
+                          <div className="mt-2">
                             <button
                               type="button"
                               disabled={!draftStarted || draftCompleted || !draftCaptainValuesReady || !draftSelectedPlayer || !currentWinningBid}
                               onClick={() => awardDraftPlayer(draftSelectedPlayer, currentWinningBid?.teamId, currentWinningBid?.amount)}
-                              className="inline-flex items-center justify-center rounded-lg bg-white px-3 py-1.5 text-xs font-black uppercase tracking-wide text-slate-950 transition hover:bg-slate-200 disabled:cursor-not-allowed disabled:opacity-50"
+                              className="flex w-full items-center justify-center rounded-lg bg-amber-400 px-3 py-2 text-sm font-black uppercase tracking-wide text-amber-950 transition hover:bg-amber-300 disabled:cursor-not-allowed disabled:opacity-50"
                             >
                               Award Player
                             </button>
-                            {draftSelectedPlayer && <Button variant="outline" onClick={cancelDraftBid}>Cancel Bid</Button>}
                           </div>
-                          {draftSelectedPlayer && draftBidTeamId && <p className="mt-2 text-xs font-semibold text-slate-400">{`Bid range: $${currentTeamMinimumBid} minimum / $${currentTeamMaximumBid} maximum`}</p>}
+                          <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                            <Button variant="outline" disabled={!draftSelectedPlayer} onClick={() => updateDraftBidAmountSelection((amount) => String(Math.max(1, Number(amount) || 0) + 1))}>+ $1</Button>
+                            <Button variant="outline" disabled={!draftSelectedPlayer} onClick={() => updateDraftBidAmountSelection((amount) => String(Math.max(1, Number(amount) || 0) + 5))}>+ $5</Button>
+                            <Button variant="outline" disabled={!draftSelectedPlayer} onClick={() => updateDraftBidAmountSelection((amount) => String(Math.max(1, Number(amount) || 0) + 10))}>+ $10</Button>
+                          </div>
+                          {draftSelectedPlayer && (
+                            <div className="mt-1 flex justify-end">
+                              <button
+                                type="button"
+                                onClick={cancelDraftBid}
+                                className="inline-flex items-center justify-center rounded bg-red-800 px-2 py-0.5 text-[8px] font-black uppercase tracking-wide text-white transition hover:bg-red-700"
+                              >
+                                Cancel Bid
+                              </button>
+                            </div>
+                          )}
                           {draftSelectedPlayer && openingBidRequiredFromNominatingTeam && <p className="mt-2 rounded-xl border border-blue-400 bg-blue-950 p-3 text-sm font-bold text-blue-100">Opening bid is locked to {draftNominatingTeam?.name || "the current draft-order team"}.</p>}
                           {currentDraftMinimumBidError && <p className="mt-2 rounded-xl border border-red-400 bg-red-950 p-3 text-sm font-semibold text-red-100">{currentDraftMinimumBidError}</p>}
                           {draftBidTeamId && getTeamDraftSpend(activeDraftSettings, draftBidTeamId) + draftBidAmountNumber > Number(activeDraftSettings.cap || 0) && <p className="mt-2 text-xs font-semibold text-red-300">This bid would exceed the selected team cap.</p>}
@@ -20484,26 +20578,49 @@ export default function WiffleScoringPrototype() {
                         <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-700 px-3 py-2">
                           <div>
                             <div className="text-[10px] font-black uppercase tracking-wide text-slate-400">Available Players</div>
-                            <div className="text-sm font-semibold text-slate-300">Career stats snapshot</div>
+                            <div className="text-sm font-semibold text-slate-300">{draftStatsScope === "season" ? `${selectedCurrentSeason?.year || "Season"} stats snapshot` : "Career stats snapshot"}</div>
                           </div>
-                          <span className="rounded-full bg-slate-800 px-3 py-1 text-[10px] font-black uppercase text-slate-300">{draftAvailablePlayers.length} available</span>
+                          <div className="flex flex-wrap items-center gap-2">
+                            <div className="inline-flex rounded-full border border-slate-700 bg-slate-950 p-0.5">
+                              {[
+                                ["career", "Career"],
+                                ["season", "Season"],
+                              ].map(([scope, label]) => (
+                                <button
+                                  key={`draft-stats-scope-${scope}`}
+                                  type="button"
+                                  className={`rounded-full px-2.5 py-1 text-[10px] font-black uppercase tracking-wide transition ${draftStatsScope === scope ? "bg-slate-100 text-slate-950 shadow-sm" : "text-slate-400 hover:text-white"}`}
+                                  onClick={() => setDraftStatsScope(scope)}
+                                >
+                                  {label}
+                                </button>
+                              ))}
+                            </div>
+                            <span className="rounded-full bg-slate-800 px-3 py-1 text-[10px] font-black uppercase text-slate-300">{draftAvailablePlayers.length} available</span>
+                          </div>
                         </div>
                         <div className="max-h-80 overflow-auto">
-                          <table className="w-max min-w-[38rem] table-auto text-left text-xs">
+                          <table className="w-max min-w-[42rem] table-auto text-left text-xs">
                             <thead className="sticky top-0 z-10 bg-slate-950 text-[10px] uppercase tracking-wide text-slate-400">
                               <tr>
                                 {[
                                   ["player", "Player", "left"],
+                                  ["AB", "AB", "center"],
                                   ["AVG", "AVG", "center"],
                                   ["OBP", "OBP", "center"],
                                   ["SLG", "SLG", "center"],
                                   ["OBPS", "OBPS", "center"],
                                   ["HR", "HR", "center"],
                                   ["RBI", "RBI", "center"],
+                                  ["BB", "BB", "center"],
                                   ["IP", "IP", "center"],
                                   ["ERA", "ERA", "center"],
                                   ["WHIP", "WHIP", "center"],
                                   ["K", "K", "center"],
+                                  ["PBB", "P BB", "center"],
+                                  ["HRA", "HRA", "center"],
+                                  ["KBB", "K:BB", "center"],
+                                  ["P_LOB", "LOB%", "center"],
                                 ].map(([key, label, align]) => (
                                   <th key={`draft-sort-${key}`} className={`${align === "left" ? "sticky left-0 z-20 whitespace-nowrap bg-slate-950 px-2 text-left" : "px-2 text-center"} py-2`}>
                                     <button
@@ -20519,8 +20636,8 @@ export default function WiffleScoringPrototype() {
                             </thead>
                             <tbody>
                               {sortedDraftAvailablePlayers.map((player) => {
-                                const batting = getPlayerBattingStat(draftCareerStats.battingStats, player);
-                                const pitching = getPlayerPitchingStat(draftCareerStats.pitchingStats, player);
+                                const batting = getPlayerBattingStat(draftStatsForBoard.battingStats, player);
+                                const pitching = getPlayerPitchingStat(draftStatsForBoard.pitchingStats, player);
                                 const profile = getLeaguePlayerProfile(selectedLeague, player) || allPlayerRecords.find((record) => String(record.name || "").trim() === String(player || "").trim()) || getPlayerProfileFromLeagues(leagues, player);
                                 return (
                                   <tr key={`draft-available-${player}`} className="cursor-pointer border-t border-slate-800 hover:bg-slate-800/70" onClick={() => draftCanUseAuction && setPendingDraftNominationPlayer(player)}>
@@ -20530,21 +20647,27 @@ export default function WiffleScoringPrototype() {
                                         <span className="font-black text-white">{player}</span>
                                       </div>
                                     </td>
+                                    <td className="px-2 py-2 text-center font-semibold text-slate-200">{batting.AB || 0}</td>
                                     <td className="px-2 py-2 text-center font-semibold text-slate-200">{average(batting.H, batting.AB)}</td>
                                     <td className="px-2 py-2 text-center font-semibold text-slate-200">{obp(batting)}</td>
                                     <td className="px-2 py-2 text-center font-semibold text-slate-200">{slg(batting)}</td>
                                     <td className="px-2 py-2 text-center font-semibold text-slate-200">{ops(batting)}</td>
                                     <td className="px-2 py-2 text-center font-semibold text-slate-200">{batting.HR || 0}</td>
                                     <td className="px-2 py-2 text-center font-semibold text-slate-200">{batting.RBI || 0}</td>
+                                    <td className="px-2 py-2 text-center font-semibold text-slate-200">{batting.BB || 0}</td>
                                     <td className="px-2 py-2 text-center font-semibold text-slate-200">{formatInningsPitched(pitching.OUTS || 0)}</td>
                                     <td className="px-2 py-2 text-center font-semibold text-slate-200">{era(pitching)}</td>
                                     <td className="px-2 py-2 text-center font-semibold text-slate-200">{whip(pitching)}</td>
                                     <td className="px-2 py-2 text-center font-semibold text-slate-200">{pitching.K || 0}</td>
+                                    <td className="px-2 py-2 text-center font-semibold text-slate-200">{pitching.BB || 0}</td>
+                                    <td className="px-2 py-2 text-center font-semibold text-slate-200">{pitching.HR || 0}</td>
+                                    <td className="px-2 py-2 text-center font-semibold text-slate-200">{kToBb(pitching)}</td>
+                                    <td className="px-2 py-2 text-center font-semibold text-slate-200">{pitcherLobPercent(pitching)}</td>
                                   </tr>
                                 );
                               })}
                               {draftAvailablePlayers.length === 0 && (
-                                <tr><td className="px-3 py-3 text-slate-500" colSpan="11">No available non-captain players left.</td></tr>
+                                <tr><td className="px-3 py-3 text-slate-500" colSpan="17">No available non-captain players left.</td></tr>
                               )}
                             </tbody>
                           </table>
@@ -20556,6 +20679,38 @@ export default function WiffleScoringPrototype() {
               </div>
             </Card>
             </div>
+            )}
+            {draftStarted && (
+              <div className="order-3">
+                <Card>
+                  <div className="p-3 sm:p-5">
+                    <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+                      <div>
+                        <h2 className="text-lg font-black">Draft Settings</h2>
+                      </div>
+                      <div className="flex flex-wrap items-center justify-end gap-2">
+                        {!draftCompleted ? <span className="rounded-full bg-green-100 px-3 py-1 text-xs font-black uppercase text-green-800">Draft Started</span> : <span className="rounded-full bg-slate-900 px-3 py-1 text-xs font-black uppercase text-white">Draft Completed</span>}
+                        <Button variant="outline" onClick={() => setDraftSettingsExpanded((current) => !current)}>{draftSettingsExpanded ? "Hide" : "Show"}</Button>
+                      </div>
+                    </div>
+                    {draftSettingsExpanded && (
+                    <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+                      {[
+                        ["Session", activeDraftSession?.name || "Session"],
+                        ["Team Cap", `$${activeDraftSettings.cap}`],
+                        ["Carryover", activeDraftSettings.maxCarryoverEnabled ? `$${activeDraftSettings.maxCarryover} max` : "Off"],
+                        ["Minimum Spend", `$${draftMinimumSpend}`],
+                      ].map(([label, value]) => (
+                        <div key={`locked-draft-summary-${label}`} className="rounded-xl border bg-slate-50 px-3 py-2">
+                          <div className="text-[10px] font-black uppercase tracking-wide text-slate-500">{label}</div>
+                          <div className="mt-0.5 text-sm font-black text-slate-900">{value}</div>
+                        </div>
+                      ))}
+                    </div>
+                    )}
+                  </div>
+                </Card>
+              </div>
             )}
           </div>
         )}
@@ -21153,227 +21308,323 @@ export default function WiffleScoringPrototype() {
                 League settings can not be changed during an active draft. League Setup, Season, Teams, Players, Default Game Rules, and history settings are locked until the draft is completed or restarted.
               </div>
             )}
+            {leagueSetupWizardOpen && !leagueSettingsLocked && (
+              <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4">
+                <div className="w-full max-w-lg rounded-3xl bg-white p-5 shadow-xl">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <div className="text-xs font-black uppercase tracking-wide text-slate-500">League Setup</div>
+                      <h2 className="mt-1 text-2xl font-black">{leagueSetupWizardStepLabels[leagueSetupWizardStep]}</h2>
+                      <p className="mt-1 text-sm font-semibold text-slate-500">Step {leagueSetupWizardStepIndex + 1} of {leagueSetupWizardSteps.length}</p>
+                    </div>
+                    <Button variant="outline" onClick={() => setLeagueSetupWizardOpen(false)}>Close</Button>
+                  </div>
+
+                  <div className="mt-4 rounded-2xl border bg-slate-50 p-4">
+                    {leagueSetupWizardStep === "identity" && (
+                      <div className="space-y-4">
+                        <div>
+                          <label className="text-xs font-black uppercase text-slate-500">League Name</label>
+                          <input className="mt-1 w-full rounded-xl border bg-white px-3 py-2 text-sm font-semibold" value={selectedLeague.name || ""} onChange={(event) => updateLeagueName(event.target.value)} />
+                        </div>
+                        <div>
+                          <label className="text-xs font-black uppercase text-slate-500">League Logo</label>
+                          <div className="mt-2 flex items-center gap-3">
+                            <div className="flex h-16 w-16 shrink-0 items-center justify-center overflow-hidden rounded-2xl border bg-white">
+                              {selectedLeague.logoUrl ? (
+                                <img src={selectedLeague.logoUrl} alt={`${selectedLeague.name || "League"} logo`} className="h-full w-full object-contain" />
+                              ) : (
+                                <span className="text-xs font-black text-slate-400">LOGO</span>
+                              )}
+                            </div>
+                            <div className="flex flex-wrap gap-2">
+                              <label className="inline-flex cursor-pointer items-center justify-center rounded-xl border bg-white px-3 py-2 text-sm font-semibold hover:bg-slate-50">
+                                Upload
+                                <input type="file" accept="image/*" className="hidden" onChange={(event) => updateLeagueLogo(event.target.files?.[0])} />
+                              </label>
+                              {selectedLeague.logoUrl && <Button variant="outline" onClick={clearLeagueLogo}>Remove</Button>}
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    )}
+
+                    {leagueSetupWizardStep === "season" && (
+                      <div>
+                        <label className="text-xs font-black uppercase text-slate-500">Current Season</label>
+                        <input type="number" className="mt-1 w-full rounded-xl border bg-white px-3 py-2 text-sm font-semibold" value={selectedLeague.currentSeasonYear || currentYearNumber()} onChange={(event) => updateLeagueCurrentSeasonYear(event.target.value)} />
+                        <p className="mt-2 text-sm font-semibold text-slate-500">This controls which season is active for standings, schedules, sessions, and awards.</p>
+                      </div>
+                    )}
+
+                    {leagueSetupWizardStep === "seasonNotes" && (
+                      <div>
+                        <label className="text-xs font-black uppercase text-slate-500">Season Notes</label>
+                        <textarea
+                          className="mt-1 min-h-28 w-full rounded-xl border bg-white px-3 py-2 text-sm font-semibold"
+                          value={selectedCurrentSeason.notes || ""}
+                          onChange={(event) => updateLeagueYear(selectedCurrentSeason.id, "notes", event.target.value)}
+                          placeholder="Champion, major changes, season notes, etc."
+                        />
+                        <p className="mt-2 text-sm font-semibold text-slate-500">These notes stay with the selected season.</p>
+                      </div>
+                    )}
+
+                    {leagueSetupWizardStep === "sessions" && (
+                      <div className="space-y-3">
+                        <label className="flex items-center justify-between gap-3 rounded-xl border bg-white p-3 text-sm font-black">
+                          <span>Use sessions within this season</span>
+                          <input type="checkbox" checked={Boolean(selectedCurrentSeason.sessionsEnabled)} onChange={(event) => updateLeagueYear(selectedCurrentSeason.id, "sessionsEnabled", event.target.checked)} />
+                        </label>
+                        {selectedCurrentSeason.sessionsEnabled && (
+                          <>
+                            <div>
+                              <label className="text-xs font-black uppercase text-slate-500">Number of Sessions</label>
+                              <input type="number" min="2" className="mt-1 w-full rounded-xl border bg-white px-3 py-2 text-sm font-semibold" value={Math.max(2, selectedCurrentSeason.sessionCount || 2)} onChange={(event) => updateLeagueYear(selectedCurrentSeason.id, "sessionCount", event.target.value)} />
+                            </div>
+                            <label className="flex items-center justify-between gap-3 rounded-xl border bg-white p-3 text-sm font-black">
+                              <span>Keep rosters from session to session</span>
+                              <input type="checkbox" checked={Boolean(selectedCurrentSeason.keepRostersForSessions)} onChange={(event) => updateLeagueYear(selectedCurrentSeason.id, "keepRostersForSessions", event.target.checked)} />
+                            </label>
+                            <label className="flex items-center justify-between gap-3 rounded-xl border bg-white p-3 text-sm font-black">
+                              <span>Keep team names and logos from session to session</span>
+                              <input type="checkbox" checked={selectedCurrentSeason.keepTeamIdentityForSessions !== false} onChange={(event) => updateLeagueYear(selectedCurrentSeason.id, "keepTeamIdentityForSessions", event.target.checked)} />
+                            </label>
+                          </>
+                        )}
+                        {!selectedCurrentSeason.sessionsEnabled && <p className="text-sm font-semibold text-slate-500">Sessions are off. This season uses one roster setup for the full season.</p>}
+                      </div>
+                    )}
+
+                    {leagueSetupWizardStep === "sessionNames" && (
+                      <div>
+                        {selectedCurrentSeason.sessionsEnabled ? (
+                          <div className="space-y-3">
+                            <div>
+                              <label className="text-xs font-black uppercase text-slate-500">Current Session</label>
+                              <select className="mt-1 w-full rounded-xl border bg-white px-3 py-2 text-sm font-semibold" value={selectedCurrentSeason.currentSessionId || selectedCurrentSeason.sessions[0]?.id || ""} onChange={(event) => updateLeagueCurrentSession(selectedCurrentSeason.id, event.target.value)}>
+                                {selectedCurrentSeason.sessions.map((session) => <option key={session.id} value={session.id}>{session.name}</option>)}
+                              </select>
+                            </div>
+                            {selectedCurrentSeason.sessions.map((session, index) => (
+                              <div key={session.id} className="grid gap-2 rounded-xl border bg-white p-3">
+                                <div>
+                                  <label className="text-xs font-black uppercase text-slate-500">Session {index + 1}</label>
+                                  <input className="mt-1 w-full rounded-xl border bg-white px-3 py-2 text-sm font-semibold" value={session.name} onChange={(event) => updateLeagueSeasonSession(selectedCurrentSeason.id, session.id, "name", event.target.value)} />
+                                </div>
+                                <div>
+                                  <label className="text-xs font-black uppercase text-slate-500">Roster Notes</label>
+                                  <input className="mt-1 w-full rounded-xl border bg-white px-3 py-2 text-sm font-semibold" value={session.rosterNotes || ""} onChange={(event) => updateLeagueSeasonSession(selectedCurrentSeason.id, session.id, "rosterNotes", event.target.value)} placeholder="Optional roster changes for this session" />
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        ) : (
+                          <p className="rounded-xl border bg-white p-3 text-sm font-semibold text-slate-500">Sessions are off. Go back one step to enable and name sessions.</p>
+                        )}
+                      </div>
+                    )}
+
+                    {leagueSetupWizardStep === "draftAvailability" && (
+                      <div className="space-y-3">
+                        <p className="text-sm font-semibold text-slate-500">Enable draft here before using a real draft on the Draft page.</p>
+                        {leagueSetupDraftSessionOptions.map((session) => {
+                          const sessionDraft = normalizeDraftSettings(selectedCurrentSeason.drafts?.[session.id], selectedLeague, session.id);
+                          const sessionDraftStarted = hasDraftStarted(sessionDraft);
+                          return (
+                            <label key={`wizard-draft-enabled-${selectedCurrentSeason.id}-${session.id}`} className="flex items-center justify-between gap-3 rounded-xl border bg-white p-3 text-sm font-semibold">
+                              <span>
+                                <span className="block font-black">{session.name}</span>
+                                <span className="block text-xs font-normal text-slate-500">{sessionDraftStarted ? "Draft started - setting locked." : "Enable for real draft use."}</span>
+                              </span>
+                              <input
+                                type="checkbox"
+                                checked={Boolean(sessionDraft.enabled)}
+                                disabled={sessionDraftStarted}
+                                onChange={(event) => updateLeagueDraftEnabledForSession(selectedCurrentSeason.id, session.id, event.target.checked)}
+                              />
+                            </label>
+                          );
+                        })}
+                      </div>
+                    )}
+
+                    {leagueSetupWizardStep === "teams" && (
+                      <div>
+                        <label className="text-xs font-black uppercase text-slate-500">Number of Teams</label>
+                        <input type="number" min="1" className="mt-1 w-full rounded-xl border bg-white px-3 py-2 text-sm font-semibold" value={selectedLeague.teamCount || 1} onChange={(event) => updateLeagueTeamCount(event.target.value)} />
+                        <p className="mt-2 text-sm font-semibold text-slate-500">Changing this adjusts the league team list while preserving existing teams where possible.</p>
+                      </div>
+                    )}
+
+                    {leagueSetupWizardStep === "roster" && (
+                      <div>
+                        <label className="text-xs font-black uppercase text-slate-500">Players per Team</label>
+                        <input type="number" min="1" className="mt-1 w-full rounded-xl border bg-white px-3 py-2 text-sm font-semibold" value={selectedLeague.playersPerTeam || 1} onChange={(event) => updateLeaguePlayersPerTeam(event.target.value)} />
+                        <p className="mt-2 text-sm font-semibold text-slate-500">This is the default roster size used by league teams, drafts, and setup flows.</p>
+                      </div>
+                    )}
+
+                    {leagueSetupWizardStep === "captains" && (
+                      <div className="space-y-3">
+                        <label className="flex items-center justify-between gap-3 rounded-xl border bg-white p-3 text-sm font-black">
+                          <span>Enable Team Captains</span>
+                          <input type="checkbox" checked={selectedLeague.enableCaptains !== false} onChange={(event) => updateLeagueCaptainsEnabled(event.target.checked)} />
+                        </label>
+                        <p className="text-sm font-semibold text-slate-500">When enabled, each team can keep one captain across sessions.</p>
+                      </div>
+                    )}
+
+                    {leagueSetupWizardStep === "divisions" && (
+                      <div className="space-y-3">
+                        <label className="flex items-center justify-between gap-3 rounded-xl border bg-white p-3 text-sm font-black">
+                          <span>Enable Divisions</span>
+                          <input type="checkbox" checked={(selectedLeague.divisionCount || 0) > 0} onChange={(event) => updateLeagueDivisionsEnabled(event.target.checked)} />
+                        </label>
+                        {(selectedLeague.divisionCount || 0) > 0 && (
+                          <div>
+                            <label className="text-xs font-black uppercase text-slate-500">Number of Divisions</label>
+                            <input type="number" min="2" className="mt-1 w-full rounded-xl border bg-white px-3 py-2 text-sm font-semibold" value={Math.max(2, selectedLeague.divisionCount || 2)} onChange={(event) => updateLeagueDivisionCount(event.target.value)} />
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    {leagueSetupWizardStep === "divisionNames" && (
+                      <div>
+                        {leagueSetupDivisionNames.length > 0 ? (
+                          <div className="space-y-3">
+                            {leagueSetupDivisionNames.map((division, index) => (
+                              <div key={`league-setup-wizard-division-${index}`}>
+                                <label className="text-xs font-black uppercase text-slate-500">Division {index + 1}</label>
+                                <input className="mt-1 w-full rounded-xl border bg-white px-3 py-2 text-sm font-semibold" value={division} onChange={(event) => updateLeagueDivisionName(index, event.target.value)} />
+                              </div>
+                            ))}
+                          </div>
+                        ) : (
+                          <p className="rounded-xl border bg-white p-3 text-sm font-semibold text-slate-500">Divisions are off. Go back one step to enable divisions before naming them.</p>
+                        )}
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="mt-5 flex flex-wrap items-center justify-between gap-2">
+                    <Button variant="outline" disabled={leagueSetupWizardStepIndex === 0} onClick={() => setLeagueSetupWizardStep(leagueSetupWizardSteps[Math.max(0, leagueSetupWizardStepIndex - 1)])}>Back</Button>
+                    <div className="flex flex-wrap gap-2">
+                      <Button variant="outline" onClick={() => setLeagueSetupWizardOpen(false)}>Done</Button>
+                      {leagueSetupWizardStepIndex < leagueSetupWizardSteps.length - 1 && (
+                        <Button variant="primary" onClick={() => setLeagueSetupWizardStep(leagueSetupWizardSteps[Math.min(leagueSetupWizardSteps.length - 1, leagueSetupWizardStepIndex + 1)])}>Next</Button>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+            {leagueAwardsWizardOpen && !leagueSettingsLocked && (
+              <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4">
+                <div className="max-h-[90vh] w-full max-w-2xl overflow-auto rounded-3xl bg-white p-5 shadow-xl">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <div className="text-xs font-black uppercase tracking-wide text-slate-500">Award Winners</div>
+                      <h2 className="mt-1 text-2xl font-black">{selectedCurrentSeason.year} Awards</h2>
+                      <p className="mt-1 text-sm font-semibold text-slate-500">Legacy Points from awards count in the Legacy Points leaderboard only.</p>
+                    </div>
+                    <Button variant="outline" onClick={() => setLeagueAwardsWizardOpen(false)}>Close</Button>
+                  </div>
+                  <div className="mt-4 flex flex-wrap gap-2">
+                    <Button variant="outline" onClick={() => saveSeasonAwardsAsDefaults(selectedCurrentSeason.id)}>Save Defaults</Button>
+                    <Button variant="outline" onClick={() => addSeasonAward(selectedCurrentSeason.id)}>+ Add Award</Button>
+                  </div>
+                  <div className="mt-4 space-y-2">
+                    {(selectedCurrentSeason.awards || []).map((award) => (
+                      <div key={award.id} className="grid gap-2 rounded-xl border bg-slate-50 p-3 md:grid-cols-[1fr_1fr_7rem_auto] md:items-end">
+                        <div>
+                          <label className="text-xs font-semibold uppercase text-slate-500">Award</label>
+                          <input className="mt-1 w-full rounded-xl border px-3 py-2 text-sm" value={award.category || ""} onChange={(event) => updateSeasonAward(selectedCurrentSeason.id, award.id, "category", event.target.value)} />
+                        </div>
+                        <div>
+                          <label className="text-xs font-semibold uppercase text-slate-500">Winner</label>
+                          <select className="mt-1 w-full rounded-xl border px-3 py-2 text-sm" value={award.winner || ""} onChange={(event) => updateSeasonAward(selectedCurrentSeason.id, award.id, "winner", event.target.value)}>
+                            <option value="">Select winner</option>
+                            {selectedLeaguePlayerOptions.map((player) => <option key={player} value={player}>{player}</option>)}
+                          </select>
+                        </div>
+                        <div>
+                          <label className="text-xs font-semibold uppercase text-slate-500">Legacy Pts</label>
+                          <select className="mt-1 w-full rounded-xl border px-3 py-2 text-sm" value={award.legacyPoints || 1} onChange={(event) => updateSeasonAward(selectedCurrentSeason.id, award.id, "legacyPoints", event.target.value)}>
+                            <option value="1">1</option>
+                            <option value="2">2</option>
+                            <option value="3">3</option>
+                          </select>
+                        </div>
+                        <Button variant="outline" onClick={() => removeSeasonAward(selectedCurrentSeason.id, award.id)}>Remove</Button>
+                      </div>
+                    ))}
+                    {(!selectedCurrentSeason.awards || selectedCurrentSeason.awards.length === 0) && (
+                      <div className="rounded-xl border bg-slate-50 p-3 text-sm font-semibold text-slate-500">No award categories yet.</div>
+                    )}
+                  </div>
+                  <div className="mt-5 flex justify-end">
+                    <Button variant="primary" onClick={() => setLeagueAwardsWizardOpen(false)}>Done</Button>
+                  </div>
+                </div>
+              </div>
+            )}
             <fieldset disabled={leagueSettingsLocked} aria-disabled={leagueSettingsLocked} className={leagueSettingsLocked ? "pointer-events-none select-none opacity-50" : ""}>
             <Card>
               <details className="group" open>
                 <summary className="flex cursor-pointer list-none items-center justify-between gap-3 p-5">
-                  <div>
+                  <div className="min-w-0">
                     <h2 className="text-xl font-bold">League Setup</h2>
-                    <p className="text-sm text-slate-500">League name, current season, teams, divisions, and roster size.</p>
+                    <p className="text-sm font-semibold text-slate-500">
+                      <span className="font-black text-slate-700">{selectedLeague.name || "Untitled League"}</span>
+                      <span> · Current season {selectedLeague.currentSeasonYear || currentYearNumber()}</span>
+                    </p>
+                    <p className="text-xs text-slate-500 group-open:block hidden">League name, current season, teams, divisions, and roster size.</p>
                   </div>
                   <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-bold uppercase text-slate-500 group-open:hidden">Open</span>
                   <span className="hidden rounded-full bg-slate-900 px-3 py-1 text-xs font-bold uppercase text-white group-open:inline-block">Close</span>
                 </summary>
                 <div className="border-t p-5 pt-4">
-                  <div className="mb-4 rounded-2xl border bg-slate-50 p-4">
-                    <label className="text-xs font-semibold uppercase text-slate-500">League Logo</label>
-                    <div className="mt-3 flex flex-col gap-3 md:flex-row md:items-center">
-                      <div className="flex h-24 w-24 items-center justify-center overflow-hidden rounded-2xl border bg-white">
+                  <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                    <div className="flex min-w-0 items-center gap-3">
+                      <div className="flex h-14 w-14 shrink-0 items-center justify-center overflow-hidden rounded-xl border bg-white">
                         {selectedLeague.logoUrl ? (
                           <img src={selectedLeague.logoUrl} alt={`${selectedLeague.name || "League"} logo`} className="h-full w-full object-contain" />
                         ) : (
-                          <span className="text-xs font-semibold text-slate-400">No Logo</span>
+                          <span className="text-xs font-black text-slate-400">LOGO</span>
                         )}
                       </div>
-                      <div className="flex flex-wrap gap-2">
-                        <label className="inline-flex cursor-pointer items-center justify-center rounded-xl border bg-white px-3 py-2 text-sm font-semibold hover:bg-slate-50">
-                          Upload League Logo
-                          <input type="file" accept="image/*" className="hidden" onChange={(event) => updateLeagueLogo(event.target.files?.[0])} />
-                        </label>
-                        {selectedLeague.logoUrl && <Button variant="outline" onClick={clearLeagueLogo}>Remove Logo</Button>}
+                      <div className="min-w-0">
+                        <div className="truncate text-xl font-black">{selectedLeague.name || "Untitled League"}</div>
+                        <div className="text-sm font-semibold text-slate-500">Current season {selectedLeague.currentSeasonYear || currentYearNumber()}</div>
                       </div>
                     </div>
-                  </div>
-                  <div className="grid gap-3 md:grid-cols-5">
-                    <div>
-                      <label className="text-xs font-semibold uppercase text-slate-500">League Name</label>
-                      <input className="mt-1 w-full rounded-xl border px-3 py-2" value={selectedLeague.name} onChange={(event) => updateLeagueName(event.target.value)} />
-                    </div>
-                    <div>
-                      <label className="text-xs font-semibold uppercase text-slate-500">Current Season</label>
-                      <input type="number" className="mt-1 w-full rounded-xl border px-3 py-2" value={selectedLeague.currentSeasonYear || currentYearNumber()} onChange={(event) => updateLeagueCurrentSeasonYear(event.target.value)} />
-                    </div>
-                    <div>
-                      <label className="text-xs font-semibold uppercase text-slate-500">Number of Teams</label>
-                      <input type="number" min="1" className="mt-1 w-full rounded-xl border px-3 py-2" value={selectedLeague.teamCount} onChange={(event) => updateLeagueTeamCount(event.target.value)} />
-                    </div>
-                    <div>
-                      <label className="text-xs font-semibold uppercase text-slate-500">Players per Team</label>
-                      <input type="number" min="1" className="mt-1 w-full rounded-xl border px-3 py-2" value={selectedLeague.playersPerTeam} onChange={(event) => updateLeaguePlayersPerTeam(event.target.value)} />
-                    </div>
-                    <div className="rounded-xl border bg-slate-50 p-3">
-                      <label className="flex items-center gap-2 text-sm font-semibold">
-                        <input type="checkbox" checked={(selectedLeague.divisionCount || 0) > 0} onChange={(event) => updateLeagueDivisionsEnabled(event.target.checked)} />
-                        Enable Divisions
-                      </label>
-                      {(selectedLeague.divisionCount || 0) > 0 && (
-                        <div className="mt-3">
-                          <label className="text-xs font-semibold uppercase text-slate-500">Number of Divisions</label>
-                          <input type="number" min="2" className="mt-1 w-full rounded-xl border px-3 py-2" value={Math.max(2, selectedLeague.divisionCount || 2)} onChange={(event) => updateLeagueDivisionCount(event.target.value)} />
-                        </div>
-                      )}
-                    </div>
+                    <Button variant="outline" onClick={() => { setLeagueSetupWizardOpen(true); setLeagueSetupWizardStep("identity"); }}>Edit Setup</Button>
                   </div>
 
-                  {(selectedLeague.divisionCount || 0) > 0 && (
-                    <div className="mt-4 grid gap-3 md:grid-cols-2 lg:grid-cols-4">
-                      {makeDivisionNames(selectedLeague.divisionCount || 0, selectedLeague.divisions || []).map((division, index) => (
-                        <div key={`division-${index}`}>
-                          <label className="text-xs font-semibold uppercase text-slate-500">Division {index + 1} Name</label>
-                          <input className="mt-1 w-full rounded-xl border px-3 py-2 text-sm" value={division} onChange={(event) => updateLeagueDivisionName(index, event.target.value)} />
+                  <div className="mt-3 overflow-hidden rounded-xl border bg-white">
+                    <div className="grid grid-cols-2 divide-x divide-y text-sm sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6">
+                      {leagueSetupSummaryItems.map((item) => (
+                        <div key={item.label} className="min-w-0 px-3 py-2">
+                          <div className="text-[10px] font-black uppercase tracking-wide text-slate-500">{item.label}</div>
+                          <div className="truncate text-sm font-black text-slate-900">{item.value}</div>
                         </div>
                       ))}
                     </div>
-                  )}
-                  {(selectedLeague.divisionCount || 0) === 0 && <p className="mt-4 rounded-xl border bg-slate-50 p-3 text-sm text-slate-500">Divisions are turned off for this league.</p>}
-                </div>
-              </details>
-            </Card>
-
-            <Card>
-              <details className="group">
-                <summary className="flex cursor-pointer list-none items-center justify-between gap-3 p-5">
-                  <div>
-                    <h2 className="text-xl font-bold">Season</h2>
-                    <p className="text-sm text-slate-500">Manage seasons, sessions, roster carryover, awards, and legacy points.</p>
-                  </div>
-                  <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-bold uppercase text-slate-500 group-open:hidden">Open</span>
-                  <span className="hidden rounded-full bg-slate-900 px-3 py-1 text-xs font-bold uppercase text-white group-open:inline-block">Close</span>
-                </summary>
-                <div className="border-t p-5 pt-4">
-                  <div className="space-y-4">
-                    {(selectedLeague.years || []).map(normalizeSeasonRecord).map((season) => (
-                      <div key={season.id} className="rounded-2xl border bg-slate-50 p-4">
-                        <div className="grid gap-3 md:grid-cols-[8rem_1fr_12rem] md:items-end">
-                          <div>
-                            <label className="text-xs font-semibold uppercase text-slate-500">Season Year</label>
-                            <button type="button" className="mt-1 w-full rounded-xl border bg-white px-3 py-2 text-left text-sm font-semibold hover:bg-slate-50" onClick={() => openYearPicker(season.id, season.year, "Select Season Year")}>{season.year}</button>
-                          </div>
-                          <div>
-                            <label className="text-xs font-semibold uppercase text-slate-500">Season Notes</label>
-                            <input className="mt-1 w-full rounded-xl border px-3 py-2 text-sm" value={season.notes || ""} onChange={(event) => updateLeagueYear(season.id, "notes", event.target.value)} placeholder="Champion, major changes, season notes, etc." />
-                          </div>
-                          <div>
-                            <label className="text-xs font-semibold uppercase text-slate-500">Current Session</label>
-                            <select className="mt-1 w-full rounded-xl border px-3 py-2 text-sm" value={season.currentSessionId || season.sessions[0]?.id || ""} disabled={!season.sessionsEnabled} onChange={(event) => updateLeagueCurrentSession(season.id, event.target.value)}>
-                              {season.sessions.map((session) => <option key={session.id} value={session.id}>{session.name}</option>)}
-                            </select>
-                          </div>
-                        </div>
-
-                        <div className="mt-4 rounded-xl border bg-white p-3">
-                          <div className="grid gap-3 md:grid-cols-3 md:items-center">
-                            <label className="flex items-center gap-2 text-sm font-semibold">
-                              <input type="checkbox" checked={Boolean(season.sessionsEnabled)} onChange={(event) => updateLeagueYear(season.id, "sessionsEnabled", event.target.checked)} />
-                              Use sessions within this season
-                            </label>
-                            {season.sessionsEnabled && (
-                              <div>
-                                <label className="text-xs font-semibold uppercase text-slate-500">Number of Sessions</label>
-                                <input type="number" min="2" className="mt-1 w-full rounded-xl border px-3 py-2 text-sm font-semibold" value={Math.max(2, season.sessionCount || 2)} onChange={(event) => updateLeagueYear(season.id, "sessionCount", event.target.value)} />
-                              </div>
-                            )}
-                            {season.sessionsEnabled && (
-                              <>
-                                <label className="flex items-center gap-2 text-sm font-semibold">
-                                  <input type="checkbox" checked={Boolean(season.keepRostersForSessions)} onChange={(event) => updateLeagueYear(season.id, "keepRostersForSessions", event.target.checked)} />
-                                  Keep rosters from session to session
-                                </label>
-                                <label className="flex items-center gap-2 text-sm font-semibold">
-                                  <input type="checkbox" checked={season.keepTeamIdentityForSessions !== false} onChange={(event) => updateLeagueYear(season.id, "keepTeamIdentityForSessions", event.target.checked)} />
-                                  Keep team names and logos from session to session
-                                </label>
-                              </>
-                            )}
-                          </div>
-                          {season.sessionsEnabled && (
-                            <div className="mt-3 space-y-2">
-                              {season.sessions.map((session, index) => (
-                                <div key={session.id} className="grid gap-2 rounded-xl border bg-slate-50 p-3 md:grid-cols-[10rem_1fr]">
-                                  <div>
-                                    <label className="text-xs font-semibold uppercase text-slate-500">Session {index + 1}</label>
-                                    <input className="mt-1 w-full rounded-xl border px-3 py-2 text-sm" value={session.name} onChange={(event) => updateLeagueSeasonSession(season.id, session.id, "name", event.target.value)} />
-                                  </div>
-                                  <div>
-                                    <label className="text-xs font-semibold uppercase text-slate-500">Roster Notes</label>
-                                    <input className="mt-1 w-full rounded-xl border px-3 py-2 text-sm" value={session.rosterNotes || ""} onChange={(event) => updateLeagueSeasonSession(season.id, session.id, "rosterNotes", event.target.value)} placeholder="Optional roster changes for this session" />
-                                  </div>
-                                </div>
-                              ))}
-                            </div>
-                          )}
-                          {!season.sessionsEnabled && <p className="mt-2 text-xs text-slate-500">Sessions are off. This season uses one roster setup for the full season.</p>}
-                        </div>
-
-                        <div className="mt-4 rounded-xl border bg-white p-3">
-                          <h3 className="text-lg font-bold">Draft Availability</h3>
-                          <p className="text-sm text-slate-500">Enable draft here before using a real draft on the Draft page. When enabled, non-captain roster assignment is locked and players must be added through the draft.</p>
-                          <div className="mt-3 space-y-2">
-                            {(season.sessionsEnabled ? season.sessions : [{ id: season.currentSessionId || season.sessions?.[0]?.id || "default-session", name: "Season Draft" }]).map((session) => {
-                              const sessionDraft = normalizeDraftSettings(season.drafts?.[session.id], selectedLeague, session.id);
-                              const sessionDraftStarted = hasDraftStarted(sessionDraft);
-                              return (
-                                <label key={`draft-enabled-${season.id}-${session.id}`} className="flex items-center justify-between gap-3 rounded-xl border bg-slate-50 p-3 text-sm font-semibold">
-                                  <span>
-                                    <span className="block font-black">{session.name}</span>
-                                    <span className="block text-xs font-normal text-slate-500">{sessionDraftStarted ? "Draft started — setting locked." : "Enable this session for real draft use."}</span>
-                                  </span>
-                                  <input
-                                    type="checkbox"
-                                    checked={Boolean(sessionDraft.enabled)}
-                                    disabled={sessionDraftStarted}
-                                    onChange={(event) => updateLeagueDraftEnabledForSession(season.id, session.id, event.target.checked)}
-                                  />
-                                </label>
-                              );
-                            })}
-                          </div>
-                        </div>
-
-                        <div className="mt-4 rounded-xl border bg-white p-3">
-                          <div className="mb-3 flex items-center justify-between gap-2">
-                            <div>
-                              <h3 className="text-lg font-bold">Final Award Winners</h3>
-                              <p className="text-sm text-slate-500">Legacy Points from awards are counted in the Legacy Points leaderboard only.</p>
-                            </div>
-                            <div className="flex flex-wrap gap-2">
-                              <Button variant="outline" onClick={() => saveSeasonAwardsAsDefaults(season.id)}>Save Defaults</Button>
-                              <Button variant="outline" onClick={() => addSeasonAward(season.id)}>+ Add Category</Button>
-                            </div>
-                          </div>
-                          <div className="space-y-2">
-                            {(season.awards || []).map((award) => (
-                              <div key={award.id} className="grid gap-2 rounded-xl border bg-slate-50 p-3 md:grid-cols-[1fr_1fr_8rem_auto] md:items-end">
-                                <div>
-                                  <label className="text-xs font-semibold uppercase text-slate-500">Award Category</label>
-                                  <input className="mt-1 w-full rounded-xl border px-3 py-2 text-sm" value={award.category || ""} onChange={(event) => updateSeasonAward(season.id, award.id, "category", event.target.value)} />
-                                </div>
-                                <div>
-                                  <label className="text-xs font-semibold uppercase text-slate-500">Winner</label>
-                                  <select className="mt-1 w-full rounded-xl border px-3 py-2 text-sm" value={award.winner || ""} onChange={(event) => updateSeasonAward(season.id, award.id, "winner", event.target.value)}>
-                                    <option value="">Select winner</option>
-                                    {selectedLeaguePlayerOptions.map((player) => <option key={player} value={player}>{player}</option>)}
-                                  </select>
-                                </div>
-                                <div>
-                                  <label className="text-xs font-semibold uppercase text-slate-500">Legacy Pts</label>
-                                  <select className="mt-1 w-full rounded-xl border px-3 py-2 text-sm" value={award.legacyPoints || 1} onChange={(event) => updateSeasonAward(season.id, award.id, "legacyPoints", event.target.value)}>
-                                    <option value="1">1</option>
-                                    <option value="2">2</option>
-                                    <option value="3">3</option>
-                                  </select>
-                                </div>
-                                <Button variant="outline" onClick={() => removeSeasonAward(season.id, award.id)}>Remove</Button>
-                              </div>
-                            ))}
-                          </div>
-                        </div>
-                      </div>
-                    ))}
+                    <div className="border-t px-3 py-2">
+                      <span className="mr-2 text-[10px] font-black uppercase tracking-wide text-slate-500">Divisions</span>
+                      {leagueSetupDivisionNames.length > 0 ? (
+                        <span className="text-sm font-bold text-slate-700">{leagueSetupDivisionNames.join(" · ")}</span>
+                      ) : (
+                        <span className="text-sm font-semibold text-slate-500">Off</span>
+                      )}
+                    </div>
                   </div>
                 </div>
               </details>
             </Card>
+
             <Card>
               <details className="group">
                 <summary className="flex cursor-pointer list-none items-center justify-between gap-3 p-5">
@@ -21601,6 +21852,41 @@ export default function WiffleScoringPrototype() {
                         </div>
                       </div>
                     ))}
+                  </div>
+                </div>
+              </details>
+            </Card>
+
+            <Card>
+              <details className="group">
+                <summary className="flex cursor-pointer list-none items-center justify-between gap-3 p-5">
+                  <div>
+                    <h2 className="text-xl font-bold">Award Winners</h2>
+                    <p className="text-sm text-slate-500">{selectedCurrentSeason.year} final awards and legacy points.</p>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <Button variant="outline" onClick={(event) => { event.preventDefault(); setLeagueAwardsWizardOpen(true); }}>Edit Awards</Button>
+                    <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-bold uppercase text-slate-500 group-open:hidden">Open</span>
+                    <span className="hidden rounded-full bg-slate-900 px-3 py-1 text-xs font-bold uppercase text-white group-open:inline-block">Close</span>
+                  </div>
+                </summary>
+                <div className="border-t p-5 pt-4">
+                  <div className="overflow-hidden rounded-xl border bg-white">
+                    <div className="grid grid-cols-[1fr_1fr_6rem] bg-slate-50 px-3 py-2 text-xs font-black uppercase text-slate-500">
+                      <div>Award</div>
+                      <div>Winner</div>
+                      <div className="text-right">Pts</div>
+                    </div>
+                    {(selectedCurrentSeason.awards || []).map((award) => (
+                      <div key={`award-summary-${award.id}`} className="grid grid-cols-[1fr_1fr_6rem] border-t px-3 py-2 text-sm font-semibold">
+                        <div className="min-w-0 truncate text-slate-900">{award.category || "Award"}</div>
+                        <div className="min-w-0 truncate text-slate-600">{award.winner || "Not selected"}</div>
+                        <div className="text-right font-black">{award.legacyPoints || 1}</div>
+                      </div>
+                    ))}
+                    {(!selectedCurrentSeason.awards || selectedCurrentSeason.awards.length === 0) && (
+                      <div className="border-t px-3 py-3 text-sm font-semibold text-slate-500">No award categories yet.</div>
+                    )}
                   </div>
                 </div>
               </details>
@@ -22061,7 +22347,9 @@ export default function WiffleScoringPrototype() {
           );
         })()}
 
-        {pendingMockDraftPlayerRemoval && (
+        {pendingMockDraftPlayerRemoval && (() => {
+          const playerBidHistory = getDraftBidHistory(activeDraftSettings, pendingMockDraftPlayerRemoval.playerName);
+          return (
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4">
             <div className="w-full max-w-md rounded-3xl bg-white p-5 shadow-xl">
               <div className="text-xs font-black uppercase tracking-wide text-purple-700">Mock Draft Roster</div>
@@ -22079,6 +22367,23 @@ export default function WiffleScoringPrototype() {
                     onChange={(event) => setPendingMockDraftPlayerRemoval((prev) => ({ ...prev, value: event.target.value }))}
                   />
                 </label>
+              </div>
+              <div className="mt-3 rounded-xl border bg-white p-3">
+                <div className="text-xs font-black uppercase tracking-wide text-slate-500">Draft History</div>
+                <div className="mt-2 max-h-40 space-y-1 overflow-auto pr-1 text-xs">
+                  {playerBidHistory.length > 0 ? playerBidHistory.map((bid) => {
+                    const bidTeam = (selectedLeague.teams || []).find((team) => team.id === bid.teamId);
+                    return (
+                      <div key={`mock-player-history-${bid.id}`} className="flex items-center justify-between gap-3 rounded-lg bg-slate-50 px-2 py-1.5">
+                        <div className="min-w-0">
+                          <div className="truncate font-black text-slate-900">{bidTeam?.name || "Unknown Team"}</div>
+                          {bid.createdAt && <div className="text-[10px] font-semibold text-slate-500">{bid.createdAt}</div>}
+                        </div>
+                        <div className="text-sm font-black text-green-700">{`$${bid.amount}`}</div>
+                      </div>
+                    );
+                  }) : <div className="rounded-lg bg-slate-50 px-2 py-2 font-semibold text-slate-500">No bid history for this player yet.</div>}
+                </div>
               </div>
               <div className="mt-5 flex flex-wrap justify-end gap-2">
                 <Button variant="outline" onClick={() => setPendingMockDraftPlayerRemoval(null)}>Cancel</Button>
@@ -22103,7 +22408,8 @@ export default function WiffleScoringPrototype() {
               </div>
             </div>
           </div>
-        )}
+          );
+        })()}
 
         {blockedRosterAssignment && (
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4">

@@ -22,6 +22,11 @@ textarea {
   font: inherit;
 }
 
+fieldset {
+  min-inline-size: 0;
+  max-width: 100%;
+}
+
 .mobile-nav {
   -webkit-overflow-scrolling: touch;
   scrollbar-width: none;

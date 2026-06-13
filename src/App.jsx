@@ -5115,7 +5115,7 @@ function runSelfTests() {
 }
 
 function Card({ children }) {
-  return <div className="w-full max-w-full overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm sm:rounded-2xl">{children}</div>;
+  return <div className="min-w-0 w-full max-w-full overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm sm:rounded-2xl">{children}</div>;
 }
 
 function PlayerAvatar({ playerName, profile, size = "md" }) {
@@ -5537,17 +5537,53 @@ function EventLogList({ events, awayTeam, homeTeam }) {
   );
 }
 
+function buildGameRulesSummaryRows(rules = {}) {
+  const normalized = { ...makeDefaultGameRules(), ...rules };
+  const extraRunnerRules = normalized.extraRunnerRules || [];
+  const firstExtraInning = getFirstExtraInning(normalized.gameInnings || 4);
+  const ghostRunnerSummary = extraRunnerRules.length > 0
+    ? extraRunnerRules.map((rule) => {
+        const inning = Number(rule.startInning) || firstExtraInning;
+        const base = extraBaseOptions.find((option) => option.value === rule.bases)?.label || "Runner on second";
+        return `${inning}${getOrdinalSuffix(inning)}: ${base}${rule.sameRestOfGame ? " rest of game" : ""}`;
+      }).join("; ")
+    : "None";
+
+  return [
+    { label: "Innings", value: normalized.gameInnings || 4 },
+    { label: "Set Pitching Order", value: normalized.pitchingOrderPredetermined ? "Yes" : "No" },
+    { label: "Home/Away", value: normalized.confirmHomeAwayBeforeStart ? "Confirm before Start Game" : "Use setup/schedule" },
+    { label: "Power Plays", value: normalized.powerPlaysEnabled ? `${normalized.powerPlayLimitAmount ?? 1} ${normalized.powerPlayLimitType === "per_game" ? "per game" : "per inning"}` : "Off" },
+    { label: "Whammy", value: normalized.powerPlaysEnabled && normalized.whammysEnabled ? "On" : "Off" },
+    { label: "Pudwhacker", value: normalized.pudwhackerEnabled ? "On" : "Off" },
+    { label: "Run Rule", value: normalized.runRuleEnabled ? `${normalized.runRuleRuns || 8} run(s)${normalized.runRuleBeforeFourthOnly ? ` before the ${normalized.gameInnings || 4}${getOrdinalSuffix(normalized.gameInnings || 4)} inning` : ""}` : "Off" },
+    { label: "Walk Run Rule", value: normalized.runRuleEnabled && normalized.walkRunRuleCountsAsHr ? "Walk that triggers run rule counts as HR" : "Off" },
+    { label: "Ghost Runners", value: ghostRunnerSummary },
+    { label: "Ghost Runner RBI", value: normalized.ghostRunnersCountAsRbi ? "Yes" : "No" },
+  ];
+}
+
 function GameRulesSummary({ gameInnings, powerPlaysEnabled, powerPlayLimitAmount, powerPlayLimitType, whammysEnabled, pudwhackerEnabled, runRuleEnabled, runRuleRuns, runRuleBeforeFourthOnly, extraRunnerRules = [], pitchingOrderPredetermined, confirmHomeAwayBeforeStart }) {
+  const rows = buildGameRulesSummaryRows({ gameInnings, powerPlaysEnabled, powerPlayLimitAmount, powerPlayLimitType, whammysEnabled, pudwhackerEnabled, runRuleEnabled, runRuleRuns, runRuleBeforeFourthOnly, extraRunnerRules, pitchingOrderPredetermined, confirmHomeAwayBeforeStart });
   return (
     <div className="space-y-1 text-sm font-semibold text-slate-700">
-      <div>Innings: {gameInnings}</div>
-      <div>Set Pitching Order: {pitchingOrderPredetermined ? "Yes" : "No"}</div>
-      <div>Home/Away: {confirmHomeAwayBeforeStart ? "Confirm before Start Game" : "Use setup/schedule"}</div>
-      <div>Power Plays: {powerPlaysEnabled ? `${powerPlayLimitAmount} ${powerPlayLimitType === "per_game" ? "per game" : "per inning"}` : "Off"}</div>
-      <div>Whammys: {powerPlaysEnabled && whammysEnabled ? "On" : "Off"}</div>
-      <div>Pudwhacker: {pudwhackerEnabled ? "On" : "Off"}</div>
-      <div>Run Rule: {runRuleEnabled ? `${runRuleRuns} run(s)${runRuleBeforeFourthOnly ? ` before the ${gameInnings}${getOrdinalSuffix(gameInnings)} inning` : ""}` : "Off"}</div>
-      <div>Extra Inning Rules: {extraRunnerRules.length > 0 ? `${extraRunnerRules.length} configured` : "None"}</div>
+      {rows.slice(0, 9).map((row) => <div key={row.label}>{row.label}: {row.value}</div>)}
+    </div>
+  );
+}
+
+function GameRulesSummaryTable({ rules = {} }) {
+  const rows = buildGameRulesSummaryRows(rules);
+  return (
+    <div className="overflow-hidden rounded-xl border bg-white">
+      <div className="grid grid-cols-1 divide-y text-sm sm:grid-cols-2 sm:divide-x sm:divide-y-0">
+        {rows.map((row) => (
+          <div key={row.label} className="grid grid-cols-[8rem_1fr] gap-3 border-b px-3 py-2 last:border-b-0 sm:block sm:border-b">
+            <div className="text-[10px] font-black uppercase tracking-wide text-slate-500">{row.label}</div>
+            <div className="text-sm font-black text-slate-900">{row.value}</div>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
@@ -5893,6 +5929,210 @@ function RuleLimitEditor({ title, limitType, setLimitType, limitAmount, setLimit
           disabled={disabled}
           onChange={(event) => setLimitAmount(Math.max(0, Number(event.target.value) || 0))}
         />
+      </div>
+    </div>
+  );
+}
+
+function LeagueDefaultRulesWizard({
+  open,
+  rules,
+  step,
+  steps,
+  stepLabels,
+  onStepChange,
+  onClose,
+  onUpdateRule,
+  onAddExtraRunnerRule,
+  onUpdateExtraRunnerRule,
+  onRemoveExtraRunnerRule,
+}) {
+  if (!open) return null;
+  const stepIndex = Math.max(0, steps.indexOf(step));
+  const currentStep = steps[stepIndex] || steps[0];
+  const firstExtraInning = getFirstExtraInning(rules.gameInnings || 4);
+  const goBack = () => onStepChange(steps[Math.max(0, stepIndex - 1)]);
+  const goNext = () => {
+    if (stepIndex >= steps.length - 1) onClose();
+    else onStepChange(steps[stepIndex + 1]);
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4">
+      <div className="max-h-[90vh] w-full max-w-lg overflow-auto rounded-3xl bg-white p-5 shadow-xl">
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <div className="text-xs font-black uppercase tracking-wide text-slate-500">Default Game Rules</div>
+            <h2 className="mt-1 text-2xl font-black">{stepLabels[currentStep]}</h2>
+            <p className="mt-1 text-sm font-semibold text-slate-500">Step {stepIndex + 1} of {steps.length}</p>
+          </div>
+          <Button variant="outline" onClick={onClose}>Close</Button>
+        </div>
+
+        <div className="mt-4 grid grid-cols-8 gap-1">
+          {steps.map((ruleStep, index) => (
+            <button
+              key={`league-default-rule-step-${ruleStep}`}
+              type="button"
+              className={`h-2 rounded-full ${index <= stepIndex ? "bg-slate-900" : "bg-slate-200"}`}
+              aria-label={stepLabels[ruleStep]}
+              onClick={() => onStepChange(ruleStep)}
+            />
+          ))}
+        </div>
+
+        <div className="mt-4 rounded-2xl border bg-slate-50 p-4">
+          {currentStep === "innings" && (
+            <div className="rounded-xl border bg-white p-3">
+              <label className="text-xs font-semibold uppercase text-slate-500">Innings</label>
+              <input type="number" min="1" max="12" className="mt-1 w-full rounded-xl border px-3 py-2 text-sm font-semibold" value={rules.gameInnings || 4} onChange={(event) => onUpdateRule("gameInnings", Math.max(1, Number(event.target.value) || 1))} />
+              <p className="mt-2 text-xs text-slate-500">This is the regulation game length before extra innings.</p>
+            </div>
+          )}
+
+          {currentStep === "power" && (
+            <div className="rounded-xl border bg-white p-3">
+              <label className="flex items-center gap-2 text-sm font-semibold">
+                <input
+                  type="checkbox"
+                  checked={Boolean(rules.powerPlaysEnabled)}
+                  onChange={(event) => {
+                    onUpdateRule("powerPlaysEnabled", event.target.checked);
+                    if (!event.target.checked) onUpdateRule("whammysEnabled", false);
+                  }}
+                />
+                Enable Power Plays
+              </label>
+              {rules.powerPlaysEnabled && (
+                <div className="mt-3">
+                  <RuleLimitEditor
+                    title="Power Play Limit"
+                    limitType={rules.powerPlayLimitType}
+                    setLimitType={(value) => onUpdateRule("powerPlayLimitType", value)}
+                    limitAmount={rules.powerPlayLimitAmount}
+                    setLimitAmount={(value) => onUpdateRule("powerPlayLimitAmount", value)}
+                  />
+                </div>
+              )}
+            </div>
+          )}
+
+          {currentStep === "whammy" && (
+            <div className="rounded-xl border bg-white p-3">
+              <label className="flex items-center gap-2 text-sm font-semibold">
+                <input type="checkbox" checked={Boolean(rules.whammysEnabled)} disabled={!rules.powerPlaysEnabled} onChange={(event) => onUpdateRule("whammysEnabled", event.target.checked)} />
+                Enable Whammy
+              </label>
+              <p className="mt-2 text-xs text-slate-500">{rules.powerPlaysEnabled ? "Whammy is once per game. A Whammy walk keeps the Power Play available for that half-inning." : "Turn on Power Plays first if this league uses Whammy."}</p>
+            </div>
+          )}
+
+          {currentStep === "pudwhacker" && (
+            <div className="rounded-xl border bg-white p-3">
+              <label className="flex items-center gap-2 text-sm font-semibold">
+                <input type="checkbox" checked={Boolean(rules.pudwhackerEnabled)} onChange={(event) => onUpdateRule("pudwhackerEnabled", event.target.checked)} />
+                Enable Pudwhacker
+              </label>
+              <p className="mt-2 text-xs text-slate-500">Pudwhacker remains a once-per-game option before the final inning.</p>
+            </div>
+          )}
+
+          {currentStep === "runRule" && (
+            <div className="rounded-xl border bg-white p-3">
+              <label className="flex items-center gap-2 text-sm font-semibold">
+                <input type="checkbox" checked={Boolean(rules.runRuleEnabled)} onChange={(event) => onUpdateRule("runRuleEnabled", event.target.checked)} />
+                Enable run rule
+              </label>
+              {rules.runRuleEnabled && (
+                <div className="mt-3 space-y-3">
+                  <div>
+                    <label className="text-xs font-semibold uppercase text-slate-500">Runs per half-inning</label>
+                    <input type="number" min="1" className="mt-1 w-full rounded-xl border px-3 py-2 text-sm font-semibold" value={rules.runRuleRuns || 8} onChange={(event) => onUpdateRule("runRuleRuns", Math.max(1, Number(event.target.value) || 1))} />
+                  </div>
+                  <label className="flex items-center gap-2 rounded-lg border bg-slate-50 p-2 text-sm font-semibold">
+                    <input type="checkbox" checked={Boolean(rules.runRuleBeforeFourthOnly)} onChange={(event) => onUpdateRule("runRuleBeforeFourthOnly", event.target.checked)} />
+                    Only before final inning
+                  </label>
+                  <label className="flex items-center gap-2 rounded-lg border bg-slate-50 p-2 text-sm font-semibold">
+                    <input type="checkbox" checked={Boolean(rules.walkRunRuleCountsAsHr)} onChange={(event) => onUpdateRule("walkRunRuleCountsAsHr", event.target.checked)} />
+                    Walk that triggers run rule counts as HR
+                  </label>
+                </div>
+              )}
+            </div>
+          )}
+
+          {currentStep === "ghostRunners" && (
+            <div className="rounded-xl border bg-white p-3">
+              <label className="flex items-center gap-2 text-sm font-semibold">
+                <input type="checkbox" checked={(rules.extraRunnerRules || []).length > 0} onChange={(event) => { if (event.target.checked) onAddExtraRunnerRule(); else onUpdateRule("extraRunnerRules", []); }} />
+                Use extra-inning ghost runners
+              </label>
+              {(rules.extraRunnerRules || []).length > 0 ? (
+                <div className="mt-3 space-y-2">
+                  {(rules.extraRunnerRules || []).map((rule) => (
+                    <div key={rule.id} className="grid gap-2 rounded-xl border bg-slate-50 p-3 sm:grid-cols-[1fr_1.5fr_auto] sm:items-end">
+                      <div>
+                        <label className="text-xs font-semibold uppercase text-slate-500">Starting inning</label>
+                        <input type="number" min={firstExtraInning} className="mt-1 w-full rounded-xl border px-3 py-2 text-sm font-semibold" value={rule.startInning} onChange={(event) => onUpdateExtraRunnerRule(rule.id, "startInning", event.target.value)} />
+                      </div>
+                      <div>
+                        <label className="text-xs font-semibold uppercase text-slate-500">Bases</label>
+                        <select className="mt-1 w-full rounded-xl border px-3 py-2 text-sm font-semibold" value={rule.bases} onChange={(event) => onUpdateExtraRunnerRule(rule.id, "bases", event.target.value)}>
+                          {extraBaseOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+                        </select>
+                      </div>
+                      <div className="flex flex-col gap-2">
+                        <label className="flex items-center gap-2 rounded-lg border bg-white px-3 py-2 text-xs font-semibold text-slate-600">
+                          <input type="checkbox" checked={Boolean(rule.sameRestOfGame)} onChange={(event) => onUpdateExtraRunnerRule(rule.id, "sameRestOfGame", event.target.checked)} />
+                          Same rest of game
+                        </label>
+                        <Button variant="outline" onClick={() => onRemoveExtraRunnerRule(rule.id)}>Remove</Button>
+                      </div>
+                    </div>
+                  ))}
+                  <div className="flex flex-col justify-between gap-2 sm:flex-row sm:items-center">
+                    <label className="flex items-center gap-2 text-sm font-semibold">
+                      <input type="checkbox" checked={Boolean(rules.ghostRunnersCountAsRbi)} onChange={(event) => onUpdateRule("ghostRunnersCountAsRbi", event.target.checked)} />
+                      Ghost runners count as RBI
+                    </label>
+                    <Button variant="outline" onClick={onAddExtraRunnerRule}>+ Add Rule</Button>
+                  </div>
+                </div>
+              ) : (
+                <p className="mt-2 text-xs text-slate-500">No ghost runners will be placed in extra innings.</p>
+              )}
+            </div>
+          )}
+
+          {currentStep === "pitching" && (
+            <div className="rounded-xl border bg-white p-3">
+              <label className="flex items-center gap-2 text-sm font-semibold">
+                <input type="checkbox" checked={Boolean(rules.pitchingOrderPredetermined)} onChange={(event) => onUpdateRule("pitchingOrderPredetermined", event.target.checked)} />
+                Pitching order is predetermined
+              </label>
+              <p className="mt-2 text-xs text-slate-500">{rules.pitchingOrderPredetermined ? "New games use the team's pitching order." : "The scorer will select pitchers as each half-inning starts."}</p>
+            </div>
+          )}
+
+          {currentStep === "homeAway" && (
+            <div className="rounded-xl border bg-white p-3">
+              <label className="flex items-center gap-2 text-sm font-semibold">
+                <input type="checkbox" checked={Boolean(rules.confirmHomeAwayBeforeStart)} onChange={(event) => onUpdateRule("confirmHomeAwayBeforeStart", event.target.checked)} />
+                Confirm home/away before starting
+              </label>
+              <p className="mt-2 text-xs text-slate-500">When enabled, Start Game asks the scorer to confirm or swap home and away before lineup review.</p>
+            </div>
+          )}
+        </div>
+
+        <div className="mt-5 flex flex-wrap items-center justify-between gap-2">
+          <Button variant="outline" disabled={stepIndex === 0} onClick={goBack}>Back</Button>
+          <div className="flex flex-wrap gap-2">
+            <Button variant="outline" onClick={onClose}>Done</Button>
+            <Button variant="primary" onClick={goNext}>{stepIndex >= steps.length - 1 ? "Finish" : "Next"}</Button>
+          </div>
+        </div>
       </div>
     </div>
   );
@@ -6723,7 +6963,7 @@ function LivePlayerStatsPanel({ awayTeamName, homeTeamName, currentBatter, curre
   );
 }
 
-function LeagueTeamEditor({ team, teamIndex, playersPerTeam, divisions = [], playerOptions = [], playerAssignments = {}, captainsEnabled = true, captainValueLocked = false, captainValueEnabled = true, rosterAssignmentLocked = false, onBlockedRosterAssignment, onTeamNameChange, onTeamDivisionChange, onLogoUpload, onPlayerChange, onCaptainChange, onCaptainValueChange, onMoveDefaultBatting, onMoveDefaultPitching }) {
+function LeagueTeamEditor({ team, teamIndex, playersPerTeam, divisions = [], playerOptions = [], playerAssignments = {}, captainsEnabled = true, captainValueLocked = false, captainValueEnabled = true, rosterAssignmentLocked = false, showPitchingOrder = true, onBlockedRosterAssignment, onTeamNameChange, onTeamDivisionChange, onLogoUpload, onPlayerChange, onCaptainChange, onCaptainValueChange, onMoveDefaultBatting, onMoveDefaultPitching }) {
   const battingOrder = cleanRoster(team.battingOrder || team.players || []);
   const pitchingOrder = cleanRoster(team.pitchingOrder || team.players || []);
 
@@ -6850,7 +7090,7 @@ function LeagueTeamEditor({ team, teamIndex, playersPerTeam, divisions = [], pla
         ))}
       </div>
 
-      <div className="mt-4 grid gap-3 lg:grid-cols-2">
+      <div className={`mt-4 grid gap-3 ${showPitchingOrder ? "lg:grid-cols-2" : ""}`}>
         <div className="rounded-xl border bg-white p-3">
           <h4 className="mb-2 text-sm font-bold">Default Batting Order</h4>
           <p className="mb-2 text-xs text-slate-500">Change players above, then reorder here.</p>
@@ -6867,25 +7107,263 @@ function LeagueTeamEditor({ team, teamIndex, playersPerTeam, divisions = [], pla
             ))}
           </div>
         </div>
-        <div className="rounded-xl border bg-white p-3">
-          <h4 className="mb-2 text-sm font-bold">Default Pitching Order</h4>
-          <p className="mb-2 text-xs text-slate-500">Change players above, then reorder here.</p>
-          <div className="space-y-2">
-            {pitchingOrder.map((player, index) => (
-              <div key={`${team.id}-pitch-${player}-${index}`} className="grid grid-cols-[2rem_1fr_auto] items-center gap-2 rounded-lg bg-slate-50 p-2">
-                <div className="text-center text-xs font-bold text-slate-500">{index + 1}</div>
-                <div className="truncate text-sm font-semibold">{player}</div>
-                <div className="flex gap-1">
-                  <button type="button" className="rounded-lg border bg-white px-2 py-1 text-xs font-bold disabled:opacity-40" onClick={() => onMoveDefaultPitching(teamIndex, index, -1)} disabled={index === 0}>↑</button>
-                  <button type="button" className="rounded-lg border bg-white px-2 py-1 text-xs font-bold disabled:opacity-40" onClick={() => onMoveDefaultPitching(teamIndex, index, 1)} disabled={index === pitchingOrder.length - 1}>↓</button>
+        {showPitchingOrder && (
+          <div className="rounded-xl border bg-white p-3">
+            <h4 className="mb-2 text-sm font-bold">Default Pitching Order</h4>
+            <p className="mb-2 text-xs text-slate-500">Change players above, then reorder here.</p>
+            <div className="space-y-2">
+              {pitchingOrder.map((player, index) => (
+                <div key={`${team.id}-pitch-${player}-${index}`} className="grid grid-cols-[2rem_1fr_auto] items-center gap-2 rounded-lg bg-slate-50 p-2">
+                  <div className="text-center text-xs font-bold text-slate-500">{index + 1}</div>
+                  <div className="truncate text-sm font-semibold">{player}</div>
+                  <div className="flex gap-1">
+                    <button type="button" className="rounded-lg border bg-white px-2 py-1 text-xs font-bold disabled:opacity-40" onClick={() => onMoveDefaultPitching(teamIndex, index, -1)} disabled={index === 0}>↑</button>
+                    <button type="button" className="rounded-lg border bg-white px-2 py-1 text-xs font-bold disabled:opacity-40" onClick={() => onMoveDefaultPitching(teamIndex, index, 1)} disabled={index === pitchingOrder.length - 1}>↓</button>
+                  </div>
                 </div>
-              </div>
-            ))}
+              ))}
+            </div>
           </div>
-        </div>
+        )}
       </div>
       </div>
     </details>
+  );
+}
+
+function LeagueTeamsTable({ teams = [], playersPerTeam = 1, divisions = [], playerOptions = [], playerAssignments = {}, captainsEnabled = true, captainValueLocked = false, captainValueEnabled = true, rosterAssignmentLocked = false, draftSettings = null, showPitchingOrder = true, onBlockedRosterAssignment, onTeamNameChange, onTeamDivisionChange, onLogoUpload, onPlayerChange, onCaptainChange, onCaptainValueChange, onMoveDefaultBatting, onMoveDefaultPitching }) {
+  const [editingTeamIndex, setEditingTeamIndex] = useState(null);
+  const columnStyle = { gridTemplateColumns: `repeat(${Math.max(1, teams.length)}, minmax(10rem, 11rem))` };
+  const rosterRows = Array.from({ length: Math.max(1, Number(playersPerTeam) || 1) });
+  const editingTeam = editingTeamIndex == null ? null : teams[editingTeamIndex];
+  const getPlayerDraftAmount = (team, player, isCaptain = false) => {
+    if (!player || !draftSettings) return "";
+    if (isCaptain) {
+      const captainValue = getCaptainDraftValue(draftSettings, team);
+      return captainValue > 0 ? `$${captainValue}` : "";
+    }
+    const amount = Number(draftSettings?.playerValues?.[player]) || 0;
+    return amount > 0 ? `$${amount}` : "";
+  };
+
+  const cellClass = "border-r border-b border-slate-200 bg-white p-2";
+  const compactOrderClass = "rounded-lg bg-slate-50 p-1.5 text-[11px] font-bold text-slate-700";
+  const handleBoardWheel = (event) => {
+    const target = event.currentTarget;
+    if (!target || target.scrollWidth <= target.clientWidth) return;
+    if (Math.abs(event.deltaY) <= Math.abs(event.deltaX)) return;
+    const canScrollLeft = target.scrollLeft > 0;
+    const canScrollRight = target.scrollLeft + target.clientWidth < target.scrollWidth - 1;
+    if ((event.deltaY < 0 && !canScrollLeft) || (event.deltaY > 0 && !canScrollRight)) return;
+    target.scrollLeft += event.deltaY;
+    event.preventDefault();
+  };
+
+  return (
+    <>
+    <div className="w-full max-w-full min-w-0 overflow-hidden rounded-2xl border bg-white">
+      <div className="w-full max-w-full overflow-x-scroll overflow-y-hidden overscroll-x-contain" onWheel={handleBoardWheel} style={{ WebkitOverflowScrolling: "touch", touchAction: "pan-x" }}>
+        <div className="grid min-w-max" style={columnStyle}>
+          {teams.map((team, teamIndex) => (
+            <div key={`league-team-board-header-${team.id}`} className={`${cellClass} bg-slate-50`}>
+              <div className="flex items-start gap-2">
+                <div className="flex h-8 w-8 shrink-0 items-center justify-center overflow-hidden rounded-lg border bg-white">
+                  {team.logoUrl ? (
+                    <img src={team.logoUrl} alt={`${team.name || `Team ${teamIndex + 1}`} logo`} className="h-full w-full object-contain" />
+                  ) : (
+                    <span className="text-[10px] font-black text-slate-400">LOGO</span>
+                  )}
+                </div>
+                <div className="min-w-0 flex-1">
+                  <div className="truncate text-sm font-black text-slate-900">{team.name || `Team ${teamIndex + 1}`}</div>
+                  {divisions.length > 0 && <div className="mt-0.5 truncate text-[11px] font-bold uppercase tracking-wide text-slate-500">{team.division || divisions[0]}</div>}
+                </div>
+              </div>
+            </div>
+          ))}
+
+          {rosterAssignmentLocked && (
+            <div className="border-b border-amber-200 bg-amber-50 p-2 text-xs font-bold text-amber-900" style={{ gridColumn: `span ${Math.max(1, teams.length)}` }}>
+              Draft is enabled, so only team captains can be assigned to teams. Other players must be added through the draft.
+            </div>
+          )}
+
+          {rosterRows.map((_, playerIndex) => (
+            <React.Fragment key={`league-team-board-player-row-${playerIndex}`}>
+              {teams.map((team, teamIndex) => {
+                const player = team.players?.[playerIndex] || "";
+                const isCaptainSlot = captainsEnabled && playerIndex === 0;
+                const draftAmount = getPlayerDraftAmount(team, player, isCaptainSlot);
+                return (
+                  <div key={`league-team-board-player-${team.id}-${playerIndex}`} className={`${cellClass} ${isCaptainSlot ? "bg-amber-50" : ""}`}>
+                    <div className="flex min-h-9 items-start justify-between gap-2">
+                      <div className="min-w-0">
+                        {isCaptainSlot && <div className="text-[9px] font-black uppercase tracking-wide text-amber-700">Captain</div>}
+                        <div className={`break-words text-xs font-black ${player ? "text-slate-900" : isCaptainSlot ? "text-amber-700" : "text-slate-400"}`}>
+                          {player || (isCaptainSlot ? "Captain" : "Open")}
+                        </div>
+                      </div>
+                      {draftAmount && <div className="shrink-0 text-[11px] font-black text-green-700">{draftAmount}</div>}
+                    </div>
+                  </div>
+                );
+              })}
+            </React.Fragment>
+          ))}
+
+          {teams.map((team, teamIndex) => {
+            const battingOrder = cleanRoster(team.battingOrder || team.players || []);
+            return (
+              <div key={`league-team-board-batting-${team.id}`} className={cellClass}>
+                <div className="mb-1 text-[10px] font-black uppercase tracking-wide text-slate-500">Batting Order</div>
+                <div className="space-y-1">
+                  {battingOrder.length === 0 && <div className="rounded-lg bg-slate-50 p-2 text-xs font-semibold text-slate-400">No players</div>}
+                  {battingOrder.map((player, index) => (
+                    <div key={`${team.id}-table-bat-${player}-${index}`} className={compactOrderClass}>
+                      <span className="break-words">{index + 1}. {player}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            );
+          })}
+
+          {showPitchingOrder && teams.map((team, teamIndex) => {
+            const pitchingOrder = cleanRoster(team.pitchingOrder || team.players || []);
+            return (
+              <div key={`league-team-board-pitching-${team.id}`} className={cellClass}>
+                <div className="mb-1 text-[10px] font-black uppercase tracking-wide text-slate-500">Pitching Order</div>
+                <div className="space-y-1">
+                  {pitchingOrder.length === 0 && <div className="rounded-lg bg-slate-50 p-2 text-xs font-semibold text-slate-400">No players</div>}
+                  {pitchingOrder.map((player, index) => (
+                    <div key={`${team.id}-table-pitch-${player}-${index}`} className={compactOrderClass}>
+                      <span className="break-words">{index + 1}. {player}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            );
+          })}
+
+          {teams.map((team, teamIndex) => (
+            <div key={`league-team-board-edit-${team.id}`} className={`${cellClass} border-b-0`}>
+              <button type="button" className="text-xs font-black uppercase tracking-wide text-slate-500 underline" onClick={() => setEditingTeamIndex(teamIndex)}>
+                Edit
+              </button>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+    {editingTeam && (
+      <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4">
+        <div className="max-h-[90vh] w-full max-w-3xl overflow-auto rounded-3xl bg-white p-5 shadow-xl">
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <div className="text-xs font-black uppercase tracking-wide text-slate-500">Edit Team</div>
+              <h2 className="mt-1 text-2xl font-black">{editingTeam.name || `Team ${editingTeamIndex + 1}`}</h2>
+            </div>
+            <Button variant="outline" onClick={() => setEditingTeamIndex(null)}>Done</Button>
+          </div>
+          <div className="mt-4 grid gap-4 md:grid-cols-[1fr_auto]">
+            <div>
+              <label className="text-xs font-black uppercase text-slate-500">Team Name</label>
+              <input className="mt-1 w-full rounded-xl border px-3 py-2 text-sm font-semibold" value={editingTeam.name || ""} onChange={(event) => onTeamNameChange(editingTeamIndex, event.target.value)} />
+            </div>
+            <label className="flex cursor-pointer items-end">
+              <span className="rounded-xl border bg-white px-4 py-2 text-sm font-black hover:bg-slate-50">Upload Logo</span>
+              <input type="file" accept="image/*" className="hidden" onChange={(event) => onLogoUpload(editingTeamIndex, event.target.files?.[0])} />
+            </label>
+            {divisions.length > 0 && (
+              <div>
+                <label className="text-xs font-black uppercase text-slate-500">Division</label>
+                <select className="mt-1 w-full rounded-xl border px-3 py-2 text-sm font-semibold" value={editingTeam.division || divisions[0]} onChange={(event) => onTeamDivisionChange(editingTeamIndex, event.target.value)}>
+                  {divisions.map((division) => <option key={division} value={division}>{division}</option>)}
+                </select>
+              </div>
+            )}
+          </div>
+          <div className="mt-5 grid gap-4 lg:grid-cols-2">
+            <div className="rounded-2xl border p-3">
+              <div className="text-xs font-black uppercase tracking-wide text-slate-500">Roster</div>
+              <div className="mt-3 space-y-2">
+                {rosterRows.map((_, playerIndex) => {
+                  const player = editingTeam.players?.[playerIndex] || "";
+                  const isCaptainSlot = captainsEnabled && playerIndex === 0;
+                  return (
+                    <div key={`edit-team-player-${playerIndex}`}>
+                      <label className="text-[11px] font-black uppercase text-slate-500">{isCaptainSlot ? "Captain" : `Player ${playerIndex + 1}`}</label>
+                      <select
+                        className="mt-1 w-full rounded-xl border px-3 py-2 text-sm font-semibold"
+                        value={player}
+                        onChange={(event) => {
+                          const selectedPlayer = event.target.value;
+                          if (rosterAssignmentLocked && selectedPlayer && selectedPlayer !== editingTeam.captain && !isCaptainSlot) {
+                            onBlockedRosterAssignment?.(selectedPlayer, editingTeam);
+                            event.currentTarget.value = player || "";
+                            return;
+                          }
+                          onPlayerChange(editingTeamIndex, playerIndex, selectedPlayer);
+                        }}
+                      >
+                        <option value="">{isCaptainSlot ? "Captain" : "Select player"}</option>
+                        {playerOptions.map((option) => {
+                          const duplicateDisabled = isPlayerAssignedSomewhereElse(playerAssignments, option, editingTeamIndex, playerIndex);
+                          const assignedTo = (playerAssignments[option] || []).find((assignment) => assignment.teamIndex !== editingTeamIndex || assignment.playerIndex !== playerIndex);
+                          return <option key={option} value={option} disabled={duplicateDisabled}>{duplicateDisabled && assignedTo ? `${option} - already on ${assignedTo.teamName}` : option}</option>;
+                        })}
+                        {player && !playerOptions.includes(player) && <option value={player}>{player}</option>}
+                      </select>
+                    </div>
+                  );
+                })}
+                {captainValueEnabled && (
+                  <div>
+                    <label className="text-[11px] font-black uppercase text-slate-500">Captain Draft $</label>
+                    <input
+                      type="number"
+                      min="1"
+                      className="mt-1 w-full rounded-xl border px-3 py-2 text-sm font-semibold"
+                      value={editingTeam.captainValue ?? ""}
+                      disabled={captainValueLocked}
+                      onChange={(event) => onCaptainValueChange(editingTeamIndex, event.target.value)}
+                      onBlur={(event) => onCaptainValueChange(editingTeamIndex, normalizeCaptainValueInput(event.target.value, false))}
+                    />
+                  </div>
+                )}
+              </div>
+            </div>
+            <div className="space-y-4">
+              {[
+                ["Batting Order", editingTeam.battingOrder || editingTeam.players || [], onMoveDefaultBatting],
+                ...(showPitchingOrder ? [["Pitching Order", editingTeam.pitchingOrder || editingTeam.players || [], onMoveDefaultPitching]] : []),
+              ].map(([label, list, onMove]) => {
+                const cleanList = cleanRoster(list);
+                return (
+                  <div key={label} className="rounded-2xl border p-3">
+                    <div className="text-xs font-black uppercase tracking-wide text-slate-500">{label}</div>
+                    <div className="mt-3 space-y-2">
+                      {cleanList.length === 0 && <div className="rounded-xl bg-slate-50 p-3 text-sm font-semibold text-slate-400">No players selected.</div>}
+                      {cleanList.map((player, index) => (
+                        <div key={`${label}-${player}-${index}`} className="grid grid-cols-[2rem_1fr_auto] items-center gap-2 rounded-xl bg-slate-50 p-2">
+                          <div className="text-center text-xs font-black text-slate-500">{index + 1}</div>
+                          <div className="text-sm font-bold">{player}</div>
+                          <div className="flex gap-1">
+                            <button type="button" className="rounded-lg border bg-white px-2 py-1 text-[11px] font-black disabled:opacity-40" onClick={() => onMove(editingTeamIndex, index, -1)} disabled={index === 0}>Up</button>
+                            <button type="button" className="rounded-lg border bg-white px-2 py-1 text-[11px] font-black disabled:opacity-40" onClick={() => onMove(editingTeamIndex, index, 1)} disabled={index === cleanList.length - 1}>Down</button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      </div>
+    )}
+    </>
   );
 }
 
@@ -7113,6 +7591,7 @@ export default function WiffleScoringPrototype() {
   const [selectedImportFieldIds, setSelectedImportFieldIds] = useState([]);
   const [fieldLeagueFilter, setFieldLeagueFilter] = useState("all");
   const [fieldEditorDraft, setFieldEditorDraft] = useState(null);
+  const [fieldRuleEditorDraft, setFieldRuleEditorDraft] = useState(null);
   const [pendingFieldSaveConfirm, setPendingFieldSaveConfirm] = useState(false);
   const [pendingFieldDelete, setPendingFieldDelete] = useState(null);
   const [setupAttempted, setSetupAttempted] = useState(false);
@@ -7217,6 +7696,9 @@ export default function WiffleScoringPrototype() {
   const [leagueEditorOpen, setLeagueEditorOpen] = useState(false);
   const [leagueSetupWizardOpen, setLeagueSetupWizardOpen] = useState(false);
   const [leagueSetupWizardStep, setLeagueSetupWizardStep] = useState("identity");
+  const [leagueSessionCountDrafts, setLeagueSessionCountDrafts] = useState({});
+  const [leagueDefaultRulesWizardOpen, setLeagueDefaultRulesWizardOpen] = useState(false);
+  const [leagueDefaultRulesWizardStep, setLeagueDefaultRulesWizardStep] = useState("innings");
   const [leagueAwardsWizardOpen, setLeagueAwardsWizardOpen] = useState(false);
   const [gameStarted, setGameStarted] = useState(false);
   const [gamePaused, setGamePaused] = useState(false);
@@ -7495,11 +7977,10 @@ export default function WiffleScoringPrototype() {
     const sessionDraft = normalizeDraftSettings(selectedCurrentSeason.drafts?.[session.id], selectedLeague, session.id);
     return Boolean(sessionDraft.enabled);
   }).length;
-  const leagueSetupWizardSteps = ["identity", "season", "seasonNotes", "sessions", "sessionNames", "draftAvailability", "teams", "roster", "captains", "divisions", "divisionNames"];
+  const leagueSetupWizardSteps = ["identity", "season", "sessions", "sessionNames", "draftAvailability", "teams", "roster", "captains", "divisions", "divisionNames"];
   const leagueSetupWizardStepLabels = {
     identity: "League Identity",
     season: "Current Season",
-    seasonNotes: "Season Notes",
     sessions: "Season Sessions",
     sessionNames: "Session Details",
     draftAvailability: "Draft Availability",
@@ -7510,10 +7991,20 @@ export default function WiffleScoringPrototype() {
     divisionNames: "Division Names",
   };
   const leagueSetupWizardStepIndex = Math.max(0, leagueSetupWizardSteps.indexOf(leagueSetupWizardStep));
+  const leagueDefaultRuleWizardSteps = ["innings", "power", "whammy", "pudwhacker", "runRule", "ghostRunners", "pitching", "homeAway"];
+  const leagueDefaultRuleWizardStepLabels = {
+    innings: "Game Length",
+    power: "Power Plays",
+    whammy: "Whammy",
+    pudwhacker: "Pudwhacker",
+    runRule: "Run Rule",
+    ghostRunners: "Ghost Runners",
+    pitching: "Pitching",
+    homeAway: "Home/Away",
+  };
   const leagueSetupSummaryItems = [
     { label: "League", value: selectedLeague?.name || "Untitled League" },
     { label: "Season", value: selectedLeague?.currentSeasonYear || currentYearNumber() },
-    { label: "Notes", value: selectedCurrentSeason.notes ? "Added" : "Blank" },
     { label: "Sessions", value: selectedCurrentSeason.sessionsEnabled ? `${selectedCurrentSeason.sessionCount || selectedCurrentSeason.sessions.length} session${Number(selectedCurrentSeason.sessionCount || selectedCurrentSeason.sessions.length) === 1 ? "" : "s"}` : "Off" },
     { label: "Current Session", value: selectedCurrentSeason.sessionsEnabled ? selectedCurrentSession?.name || "Session 1" : "Single season" },
     { label: "Rosters", value: selectedCurrentSeason.sessionsEnabled ? (selectedCurrentSeason.keepRostersForSessions ? "Carry over" : "By session") : "Single roster" },
@@ -10297,16 +10788,19 @@ export default function WiffleScoringPrototype() {
           if (!pitchingOrder.includes(player)) pitchingOrder.push(player);
         });
 
+        const captainUpdate = league.enableCaptains !== false && playerIndex === 0 ? { captain: cleanPlayerName } : {};
+
         if (activeLeagueTeamsSessionId) {
           return {
             ...team,
+            ...captainUpdate,
             sessionRosters: {
               ...(team.sessionRosters || {}),
-              [activeLeagueTeamsSessionId]: { ...(team.sessionRosters?.[activeLeagueTeamsSessionId] || {}), players, battingOrder, pitchingOrder },
+              [activeLeagueTeamsSessionId]: { ...(team.sessionRosters?.[activeLeagueTeamsSessionId] || {}), ...captainUpdate, players, battingOrder, pitchingOrder },
             },
           };
         }
-        return { ...team, players, battingOrder, pitchingOrder };
+        return { ...team, ...captainUpdate, players, battingOrder, pitchingOrder };
       });
       return { ...league, teams };
     });
@@ -10381,6 +10875,35 @@ export default function WiffleScoringPrototype() {
         return normalizeSeasonRecord({ ...normalized, [field]: nextValue });
       }),
     }));
+  }
+
+  function getLeagueSessionCountDraftValue(season) {
+    if (!season?.id) return "2";
+    if (Object.prototype.hasOwnProperty.call(leagueSessionCountDrafts, season.id)) {
+      return leagueSessionCountDrafts[season.id];
+    }
+    return String(Math.max(2, Number(season.sessionCount) || 2));
+  }
+
+  function updateLeagueSessionCountDraft(yearId, value) {
+    setLeagueSessionCountDrafts((drafts) => ({ ...drafts, [yearId]: value }));
+    if (String(value).trim() === "") return;
+    updateLeagueYear(yearId, "sessionCount", value);
+  }
+
+  function commitLeagueSessionCountDraft(yearId) {
+    const draftValue = leagueSessionCountDrafts[yearId];
+    if (draftValue != null) {
+      const year = selectedLeague?.years?.find((yearEntry) => yearEntry.id === yearId);
+      const normalized = normalizeSeasonRecord(year || selectedCurrentSeason);
+      const minimum = normalized.sessionsEnabled ? 2 : 1;
+      updateLeagueYear(yearId, "sessionCount", Math.max(minimum, Number(draftValue) || minimum));
+    }
+    setLeagueSessionCountDrafts((drafts) => {
+      const nextDrafts = { ...drafts };
+      delete nextDrafts[yearId];
+      return nextDrafts;
+    });
   }
 
   function updateLeagueSeasonSession(yearId, sessionId, field, value) {
@@ -13243,14 +13766,62 @@ export default function WiffleScoringPrototype() {
     });
   }
 
+  function makeFieldEditorRuleDraft(rule = null) {
+    return {
+      id: rule?.id || newId(),
+      name: rule?.name || "",
+      description: rule?.description || "",
+      actions: getFieldRuleActions(rule),
+      countBonusRunsAsRbi: Boolean(rule?.countBonusRunsAsRbi),
+      runs: Number(rule?.runs) || 1,
+      outs: Math.max(1, Math.min(3, Number(rule?.outs) || 1)),
+    };
+  }
+
   function addFieldEditorRule() {
-    setFieldEditorDraft((current) => current ? {
-      ...current,
-      rules: [
-        ...(current.rules || []),
-        { id: newId(), name: `Field Rule ${(current.rules || []).length + 1}`, description: "", actions: [], countBonusRunsAsRbi: false, runs: 1, outs: 1 },
-      ],
-    } : current);
+    setFieldRuleEditorDraft(makeFieldEditorRuleDraft({
+      name: `Field Rule ${(fieldEditorDraft?.rules || []).length + 1}`,
+      actions: [],
+      countBonusRunsAsRbi: false,
+      runs: 1,
+      outs: 1,
+    }));
+  }
+
+  function editFieldEditorRule(rule) {
+    setFieldRuleEditorDraft(makeFieldEditorRuleDraft(rule));
+  }
+
+  function updateFieldRuleEditorDraft(property, value) {
+    setFieldRuleEditorDraft((current) => {
+      if (!current) return current;
+      if (property === "runs") return { ...current, runs: Number(value) || 0 };
+      if (property === "outs") return { ...current, outs: Math.max(1, Math.min(3, Number(value) || 1)) };
+      return { ...current, [property]: value };
+    });
+  }
+
+  function saveFieldRuleEditorDraft() {
+    if (!fieldRuleEditorDraft) return;
+    const cleanRule = {
+      ...fieldRuleEditorDraft,
+      id: fieldRuleEditorDraft.id || newId(),
+      name: String(fieldRuleEditorDraft.name || "").trim() || "Field Rule",
+      actions: getFieldRuleActions(fieldRuleEditorDraft),
+      runs: Number(fieldRuleEditorDraft.runs) || 0,
+      outs: Math.max(1, Math.min(3, Number(fieldRuleEditorDraft.outs) || 1)),
+    };
+    setFieldEditorDraft((current) => {
+      if (!current) return current;
+      const ruleExists = (current.rules || []).some((rule) => rule.id === cleanRule.id);
+      return {
+        ...current,
+        rules: ruleExists
+          ? (current.rules || []).map((rule) => (rule.id === cleanRule.id ? cleanRule : rule))
+          : [...(current.rules || []), cleanRule],
+      };
+    });
+    setFieldRuleEditorDraft(null);
   }
 
   function updateFieldEditorRule(ruleId, property, value) {
@@ -13311,6 +13882,7 @@ export default function WiffleScoringPrototype() {
 
     setLeagueDraft(null);
     setLeagueDraftLeagueId("");
+    setFieldRuleEditorDraft(null);
     setFieldEditorDraft(null);
     setPendingFieldSaveConfirm(false);
     return true;
@@ -14552,8 +15124,8 @@ export default function WiffleScoringPrototype() {
   const previewOutcome = calculateAutoAdvance(game.bases, currentBatter, resultButtons[0]);
 
   return (
-    <div className={`min-h-screen bg-slate-100 text-slate-900 ${activePage === "draft" ? "p-0 sm:p-2" : "p-2 sm:p-4"}`}>
-      <div className={`mx-auto space-y-3 sm:space-y-4 ${activePage === "draft" ? "max-w-none" : "max-w-7xl"}`}>
+    <div className={`min-h-screen overflow-x-hidden bg-slate-100 text-slate-900 ${activePage === "draft" ? "p-0 sm:p-2" : "p-2 sm:p-4"}`}>
+      <div className={`mx-auto min-w-0 max-w-full space-y-3 sm:space-y-4 ${activePage === "draft" ? "max-w-none" : "max-w-7xl"}`}>
         <Card>
           <div className="p-3 sm:p-4">
             <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
@@ -17200,7 +17772,7 @@ export default function WiffleScoringPrototype() {
                       <div className="text-xs font-black uppercase tracking-wide text-slate-500">Field Settings</div>
                       <h2 className="mt-1 text-2xl font-black">{fieldEditorDraft.name || "New Field"}</h2>
                     </div>
-                    <Button variant="outline" onClick={() => setFieldEditorDraft(null)}>Close</Button>
+                    <Button variant="outline" onClick={() => { setFieldRuleEditorDraft(null); setFieldEditorDraft(null); }}>Close</Button>
                   </div>
 
                   <div className="grid gap-3 md:grid-cols-3">
@@ -17237,54 +17809,17 @@ export default function WiffleScoringPrototype() {
                       <Button variant="outline" onClick={addFieldEditorRule}>+ Rule</Button>
                     </div>
                     <div className="space-y-2">
-                      {(fieldEditorDraft.rules || []).map((rule) => (
-                        <div key={rule.id} className="rounded-lg border bg-slate-50 p-3">
-                          <div className={`grid gap-2 ${fieldRuleHasRunAction(rule) && fieldRuleHasAutomaticOut(rule) ? "md:grid-cols-[1fr_8rem_8rem_auto]" : fieldRuleHasRunAction(rule) || fieldRuleHasAutomaticOut(rule) ? "md:grid-cols-[1fr_8rem_auto]" : "md:grid-cols-[1fr_auto]"} md:items-end`}>
-                            <div>
-                              <label className="text-xs font-semibold uppercase text-slate-500">Rule Name</label>
-                              <input className="mt-1 w-full rounded-xl border px-3 py-2 text-sm" value={rule.name || ""} onChange={(event) => updateFieldEditorRule(rule.id, "name", event.target.value)} />
+                      {(fieldEditorDraft.rules || []).map((rule, ruleIndex) => (
+                        <button key={rule.id} type="button" className="w-full rounded-lg border bg-slate-50 p-3 text-left transition hover:border-slate-400 hover:bg-white" onClick={() => editFieldEditorRule(rule)}>
+                          <div className="flex items-start justify-between gap-3">
+                            <div className="min-w-0">
+                              <div className="truncate text-sm font-black">{rule.name || `Field Rule ${ruleIndex + 1}`}</div>
+                              <div className="mt-1 truncate text-xs font-semibold text-slate-500">{fieldRuleActionSummary(rule) || "No actions selected"}</div>
+                              {rule.description && <div className="mt-1 line-clamp-2 text-xs font-semibold text-slate-600">{rule.description}</div>}
                             </div>
-                            {fieldRuleHasRunAction(rule) && (
-                              <div>
-                                <label className="text-xs font-semibold uppercase text-slate-500">Bonus Runs</label>
-                                <input type="number" className="mt-1 w-full rounded-xl border px-3 py-2 text-sm" value={rule.runs ?? 1} onChange={(event) => updateFieldEditorRule(rule.id, "runs", event.target.value)} />
-                              </div>
-                            )}
-                            {fieldRuleHasAutomaticOut(rule) && (
-                              <div>
-                                <label className="text-xs font-semibold uppercase text-slate-500">Outs</label>
-                                <input type="number" min="1" max="3" className="mt-1 w-full rounded-xl border px-3 py-2 text-sm" value={rule.outs ?? 1} onChange={(event) => updateFieldEditorRule(rule.id, "outs", Math.max(1, Math.min(3, Number(event.target.value) || 1)))} />
-                              </div>
-                            )}
-                            <Button variant="outline" onClick={() => removeFieldEditorRule(rule.id)}>Remove</Button>
+                            <span className="shrink-0 rounded-full bg-white px-3 py-1 text-xs font-bold uppercase text-slate-500">Edit</span>
                           </div>
-
-                          <div className="mt-3">
-                            <label className="text-xs font-semibold uppercase text-slate-500">Rule Description</label>
-                            <textarea className="mt-1 w-full rounded-xl border px-3 py-2 text-sm" rows="2" value={rule.description || ""} onChange={(event) => updateFieldEditorRule(rule.id, "description", event.target.value)} placeholder="Explain when this rule applies or what the scorer should check before approving." />
-                          </div>
-
-                          <div className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
-                            {fieldRuleActionOptions.map((option) => {
-                              const actions = getFieldRuleActions(rule);
-                              const checked = actions.includes(option.value);
-                              return (
-                                <label key={option.value} className="flex items-center gap-2 rounded-xl border bg-white p-2 text-xs font-semibold text-slate-600">
-                                  <input type="checkbox" checked={checked} onChange={(event) => updateFieldEditorRule(rule.id, "actions", toggleFieldRuleAction(actions, option.value, event.target.checked))} />
-                                  {option.label}
-                                </label>
-                              );
-                            })}
-                          </div>
-
-                          {fieldRuleHasRunAction(rule) && (
-                            <label className="mt-3 flex items-center gap-2 rounded-xl border bg-white p-2 text-xs font-semibold text-slate-600">
-                              <input type="checkbox" checked={Boolean(rule.countBonusRunsAsRbi)} onChange={(event) => updateFieldEditorRule(rule.id, "countBonusRunsAsRbi", event.target.checked)} />
-                              Bonus runs count as RBI for current batter
-                            </label>
-                          )}
-                          <p className="mt-2 text-xs text-slate-500">Selected: {fieldRuleActionSummary(rule) || "No actions selected"}</p>
-                        </div>
+                        </button>
                       ))}
                       {(!fieldEditorDraft.rules || fieldEditorDraft.rules.length === 0) && <p className="text-sm text-slate-500">No field rules yet. Add a rule to show it as a shortcut on the Games page when this field is selected.</p>}
                     </div>
@@ -21357,19 +21892,6 @@ export default function WiffleScoringPrototype() {
                       </div>
                     )}
 
-                    {leagueSetupWizardStep === "seasonNotes" && (
-                      <div>
-                        <label className="text-xs font-black uppercase text-slate-500">Season Notes</label>
-                        <textarea
-                          className="mt-1 min-h-28 w-full rounded-xl border bg-white px-3 py-2 text-sm font-semibold"
-                          value={selectedCurrentSeason.notes || ""}
-                          onChange={(event) => updateLeagueYear(selectedCurrentSeason.id, "notes", event.target.value)}
-                          placeholder="Champion, major changes, season notes, etc."
-                        />
-                        <p className="mt-2 text-sm font-semibold text-slate-500">These notes stay with the selected season.</p>
-                      </div>
-                    )}
-
                     {leagueSetupWizardStep === "sessions" && (
                       <div className="space-y-3">
                         <label className="flex items-center justify-between gap-3 rounded-xl border bg-white p-3 text-sm font-black">
@@ -21380,7 +21902,15 @@ export default function WiffleScoringPrototype() {
                           <>
                             <div>
                               <label className="text-xs font-black uppercase text-slate-500">Number of Sessions</label>
-                              <input type="number" min="2" className="mt-1 w-full rounded-xl border bg-white px-3 py-2 text-sm font-semibold" value={Math.max(2, selectedCurrentSeason.sessionCount || 2)} onChange={(event) => updateLeagueYear(selectedCurrentSeason.id, "sessionCount", event.target.value)} />
+                              <input
+                                type="number"
+                                min="2"
+                                inputMode="numeric"
+                                className="mt-1 w-full rounded-xl border bg-white px-3 py-2 text-sm font-semibold"
+                                value={getLeagueSessionCountDraftValue(selectedCurrentSeason)}
+                                onChange={(event) => updateLeagueSessionCountDraft(selectedCurrentSeason.id, event.target.value)}
+                                onBlur={() => commitLeagueSessionCountDraft(selectedCurrentSeason.id)}
+                              />
                             </div>
                             <label className="flex items-center justify-between gap-3 rounded-xl border bg-white p-3 text-sm font-black">
                               <span>Keep rosters from session to session</span>
@@ -21520,6 +22050,19 @@ export default function WiffleScoringPrototype() {
                 </div>
               </div>
             )}
+            <LeagueDefaultRulesWizard
+              open={leagueDefaultRulesWizardOpen && !leagueSettingsLocked}
+              rules={selectedLeagueDefaultRules}
+              step={leagueDefaultRulesWizardStep}
+              steps={leagueDefaultRuleWizardSteps}
+              stepLabels={leagueDefaultRuleWizardStepLabels}
+              onStepChange={setLeagueDefaultRulesWizardStep}
+              onClose={() => setLeagueDefaultRulesWizardOpen(false)}
+              onUpdateRule={updateLeagueDefaultGameRule}
+              onAddExtraRunnerRule={addLeagueDefaultExtraRunnerRule}
+              onUpdateExtraRunnerRule={updateLeagueDefaultExtraRunnerRule}
+              onRemoveExtraRunnerRule={removeLeagueDefaultExtraRunnerRule}
+            />
             {leagueAwardsWizardOpen && !leagueSettingsLocked && (
               <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4">
                 <div className="max-h-[90vh] w-full max-w-2xl overflow-auto rounded-3xl bg-white p-5 shadow-xl">
@@ -21570,7 +22113,7 @@ export default function WiffleScoringPrototype() {
                 </div>
               </div>
             )}
-            <fieldset disabled={leagueSettingsLocked} aria-disabled={leagueSettingsLocked} className={leagueSettingsLocked ? "pointer-events-none select-none opacity-50" : ""}>
+            <fieldset disabled={leagueSettingsLocked} aria-disabled={leagueSettingsLocked} className={`min-w-0 max-w-full overflow-hidden ${leagueSettingsLocked ? "pointer-events-none select-none opacity-50" : ""}`}>
             <Card>
               <details className="group" open>
                 <summary className="flex cursor-pointer list-none items-center justify-between gap-3 p-5">
@@ -21626,23 +22169,15 @@ export default function WiffleScoringPrototype() {
             </Card>
 
             <Card>
-              <details className="group">
+              <details className="group min-w-0 overflow-hidden">
                 <summary className="flex cursor-pointer list-none items-center justify-between gap-3 p-5">
                   <div>
                     <h2 className="text-xl font-bold">Teams</h2>
-                    <p className="text-sm text-slate-500">Assign database players to teams and set default batting/pitching orders.</p>
                   </div>
                   <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-bold uppercase text-slate-500 group-open:hidden">Open</span>
                   <span className="hidden rounded-full bg-slate-900 px-3 py-1 text-xs font-bold uppercase text-white group-open:inline-block">Close</span>
                 </summary>
-                <div className="border-t p-5 pt-4">
-                  <div className="mb-4 rounded-xl border bg-slate-50 p-3">
-                    <label className="flex items-center gap-2 text-sm font-semibold">
-                      <input type="checkbox" checked={leagueCaptainsEnabled} onChange={(event) => updateLeagueCaptainsEnabled(event.target.checked)} />
-                      Enable Team Captains
-                    </label>
-                    <p className="mt-1 text-xs text-slate-500">When enabled, each team can choose one captain who stays on that team across sessions.</p>
-                  </div>
+                <div className="min-w-0 overflow-hidden border-t p-5 pt-4">
                   {selectedCurrentSeason.sessionsEnabled && (
                     <div className="mb-4 rounded-xl border bg-slate-50 p-3">
                       <label className="text-xs font-semibold uppercase text-slate-500">Viewing Teams For Session</label>
@@ -21668,32 +22203,28 @@ export default function WiffleScoringPrototype() {
                       <p className="mt-2 text-xs">Select a different player in one of the highlighted teams. New selections are blocked from creating duplicates.</p>
                     </div>
                   )}
-                  <div className="grid gap-4 xl:grid-cols-2">
-                    {selectedLeague.teams.map((team, teamIndex) => (
-                      <LeagueTeamEditor
-                        key={team.id}
-                        team={getTeamRosterForSession(team, activeLeagueTeamsSessionId, keepTeamIdentityForSessions)}
-                        teamIndex={teamIndex}
-                        playersPerTeam={selectedLeague.playersPerTeam}
-                        divisions={makeDivisionNames(selectedLeague.divisionCount || 0, selectedLeague.divisions || [])}
-                        playerOptions={selectedLeaguePlayerOptions}
-                        playerAssignments={selectedLeaguePlayerAssignments}
-                        captainsEnabled={leagueCaptainsEnabled}
-                        captainValueLocked={captainValueLockedForCurrentSeason}
-                        captainValueEnabled={leagueDraftEnabledForActiveSession}
-                        rosterAssignmentLocked={teamRosterLockedByDraftEnabled}
-                        onBlockedRosterAssignment={(playerName, team) => setBlockedRosterAssignment({ player: playerName, teamName: team?.name || `Team ${teamIndex + 1}` })}
-                        onTeamNameChange={updateLeagueTeamName}
-                        onTeamDivisionChange={updateLeagueTeamDivision}
-                        onLogoUpload={updateLeagueTeamLogo}
-                        onPlayerChange={updateLeaguePlayer}
-                        onCaptainChange={updateLeagueTeamCaptain}
-                        onCaptainValueChange={updateLeagueTeamCaptainValue}
-                        onMoveDefaultBatting={(teamIndex, index, direction) => moveLeagueTeamOrder(teamIndex, "battingOrder", index, direction)}
-                        onMoveDefaultPitching={(teamIndex, index, direction) => moveLeagueTeamOrder(teamIndex, "pitchingOrder", index, direction)}
-                      />
-                    ))}
-                  </div>
+                  <LeagueTeamsTable
+                    teams={selectedLeague.teams.map((team) => getTeamRosterForSession(team, activeLeagueTeamsSessionId, keepTeamIdentityForSessions))}
+                    playersPerTeam={selectedLeague.playersPerTeam}
+                    divisions={makeDivisionNames(selectedLeague.divisionCount || 0, selectedLeague.divisions || [])}
+                    playerOptions={selectedLeaguePlayerOptions}
+                    playerAssignments={selectedLeaguePlayerAssignments}
+                    captainsEnabled={leagueCaptainsEnabled}
+                    captainValueLocked={captainValueLockedForCurrentSeason}
+                    captainValueEnabled={leagueDraftEnabledForActiveSession}
+                    rosterAssignmentLocked={teamRosterLockedByDraftEnabled}
+                    draftSettings={activeDraftSettings}
+                    showPitchingOrder={Boolean(selectedLeagueDefaultRules.pitchingOrderPredetermined)}
+                    onBlockedRosterAssignment={(playerName, team) => setBlockedRosterAssignment({ player: playerName, teamName: team?.name || "this team" })}
+                    onTeamNameChange={updateLeagueTeamName}
+                    onTeamDivisionChange={updateLeagueTeamDivision}
+                    onLogoUpload={updateLeagueTeamLogo}
+                    onPlayerChange={updateLeaguePlayer}
+                    onCaptainChange={updateLeagueTeamCaptain}
+                    onCaptainValueChange={updateLeagueTeamCaptainValue}
+                    onMoveDefaultBatting={(teamIndex, index, direction) => moveLeagueTeamOrder(teamIndex, "battingOrder", index, direction)}
+                    onMoveDefaultPitching={(teamIndex, index, direction) => moveLeagueTeamOrder(teamIndex, "pitchingOrder", index, direction)}
+                  />
                 </div>
               </details>
             </Card>
@@ -21710,117 +22241,11 @@ export default function WiffleScoringPrototype() {
                   <span className="hidden rounded-full bg-slate-900 px-3 py-1 text-xs font-bold uppercase text-white group-open:inline-block">Close</span>
                 </summary>
                 <div className="border-t p-5 pt-4">
-                  <div className="mb-3 rounded-xl border bg-slate-50 p-3">
-                    <label className="text-xs font-semibold uppercase text-slate-500">Default Game Length</label>
-                    <div className="mt-2 grid gap-2 sm:grid-cols-[1fr_auto] sm:items-center">
-                      <span className="text-sm font-semibold text-slate-700">Innings per game</span>
-                      <input type="number" min="1" max="12" className="w-28 rounded-xl border px-3 py-2 text-sm font-semibold" value={selectedLeagueDefaultRules.gameInnings || 4} onChange={(event) => updateLeagueDefaultGameRule("gameInnings", Math.max(1, Number(event.target.value) || 1))} />
-                    </div>
-                    <label className="mt-3 flex items-center gap-2 text-sm font-semibold">
-                      <input type="checkbox" checked={Boolean(selectedLeagueDefaultRules.pitchingOrderPredetermined)} onChange={(event) => updateLeagueDefaultGameRule("pitchingOrderPredetermined", event.target.checked)} />
-                      Pitching order is preselected
-                    </label>
-                    <p className="mt-1 text-xs text-slate-500">{Boolean(selectedLeagueDefaultRules.pitchingOrderPredetermined) ? "New games use the team pitching order." : "New games prompt the scorer to pick pitchers as half-innings begin."}</p>
-                    <p className="mt-1 text-xs text-slate-500">New games using league defaults will use this inning length.</p>
+                  <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                    <p className="text-sm font-semibold text-slate-500">League defaults used by new games unless a setup wizard chooses custom rules.</p>
+                    <Button variant="outline" onClick={() => { setLeagueDefaultRulesWizardOpen(true); setLeagueDefaultRulesWizardStep("innings"); }}>Edit Rules</Button>
                   </div>
-                  <div className="grid gap-3 lg:grid-cols-3">
-                    <div className="rounded-xl border bg-slate-50 p-3">
-                      <label className="flex items-center gap-2 text-sm font-semibold">
-                        <input type="checkbox" checked={selectedLeagueDefaultRules.powerPlaysEnabled} onChange={(event) => updateLeagueDefaultGameRule("powerPlaysEnabled", event.target.checked)} />
-                        Enable Power Plays
-                      </label>
-                      <p className="mt-1 text-xs text-slate-500">This controls whether Power Play and Whammy options are available by default.</p>
-                      {selectedLeagueDefaultRules.powerPlaysEnabled && (
-                        <div className="mt-3 space-y-3">
-                          <RuleLimitEditor title="Power Play Limit" limitType={selectedLeagueDefaultRules.powerPlayLimitType} setLimitType={(value) => updateLeagueDefaultGameRule("powerPlayLimitType", value)} limitAmount={selectedLeagueDefaultRules.powerPlayLimitAmount} setLimitAmount={(value) => updateLeagueDefaultGameRule("powerPlayLimitAmount", value)} />
-                          <label className="flex items-center gap-2 rounded-lg border bg-white p-3 text-sm font-semibold">
-                            <input type="checkbox" checked={selectedLeagueDefaultRules.whammysEnabled} onChange={(event) => updateLeagueDefaultGameRule("whammysEnabled", event.target.checked)} />
-                            Enable Whammys
-                          </label>
-                          <p className="text-xs text-slate-500">Whammy can only be used once per game which will take the place of 1 power play. A Whammy walk does not block the Power Play.</p>
-                        </div>
-                      )}
-                    </div>
-
-                    <div className="rounded-xl border bg-slate-50 p-3">
-                      <label className="flex items-center gap-2 text-sm font-semibold">
-                        <input type="checkbox" checked={selectedLeagueDefaultRules.pudwhackerEnabled} onChange={(event) => updateLeagueDefaultGameRule("pudwhackerEnabled", event.target.checked)} />
-                        Enable Pudwhacker
-                      </label>
-                      <p className="mt-1 text-xs text-slate-500">Pudwhacker remains once per game and only before the final inning.</p>
-                    </div>
-
-                    <div className="rounded-xl border bg-slate-50 p-3">
-                      <label className="flex items-center gap-2 text-sm font-semibold">
-                        <input type="checkbox" checked={selectedLeagueDefaultRules.runRuleEnabled} onChange={(event) => updateLeagueDefaultGameRule("runRuleEnabled", event.target.checked)} />
-                        Enable inning run rule
-                      </label>
-                      <div className="mt-3 grid gap-2 sm:grid-cols-[1fr_auto] sm:items-center">
-                        <label className="text-xs font-semibold uppercase text-slate-500">Runs per half-inning</label>
-                        <input type="number" min="1" className="w-28 rounded-xl border px-3 py-2 text-sm font-semibold" value={selectedLeagueDefaultRules.runRuleRuns} disabled={!selectedLeagueDefaultRules.runRuleEnabled} onChange={(event) => updateLeagueDefaultGameRule("runRuleRuns", Math.max(1, Number(event.target.value) || 1))} />
-                      </div>
-                      <label className="mt-3 flex items-center gap-2 text-sm font-semibold">
-                        <input type="checkbox" checked={selectedLeagueDefaultRules.runRuleBeforeFourthOnly} disabled={!selectedLeagueDefaultRules.runRuleEnabled} onChange={(event) => updateLeagueDefaultGameRule("runRuleBeforeFourthOnly", event.target.checked)} />
-                        {`Run rule only applies before the ${selectedLeagueDefaultRules.gameInnings || 4}${getOrdinalSuffix(selectedLeagueDefaultRules.gameInnings || 4)} inning`}
-                      </label>
-                      <label className="mt-3 flex items-center gap-2 text-sm font-semibold">
-                        <input type="checkbox" checked={selectedLeagueDefaultRules.walkRunRuleCountsAsHr} disabled={!selectedLeagueDefaultRules.runRuleEnabled} onChange={(event) => updateLeagueDefaultGameRule("walkRunRuleCountsAsHr", event.target.checked)} />
-                        Walk that triggers run rule counts as HR
-                      </label>
-                    </div>
-
-                    <div className="rounded-xl border bg-slate-50 p-3">
-                      <label className="flex items-center gap-2 text-sm font-semibold">
-                        <input type="checkbox" checked={Boolean(selectedLeagueDefaultRules.confirmHomeAwayBeforeStart)} onChange={(event) => updateLeagueDefaultGameRule("confirmHomeAwayBeforeStart", event.target.checked)} />
-                        Confirm home/away before Start Game
-                      </label>
-                      <p className="mt-1 text-xs text-slate-500">When enabled, league games using these defaults ask the scorer to confirm or swap home and away before lineups.</p>
-                    </div>
-                  </div>
-
-                  <div className="mt-5 rounded-2xl border bg-white p-4">
-                    <div className="mb-3 flex items-center justify-between gap-2">
-                      <div>
-                        <h3 className="text-lg font-bold">Default Extra Inning Ghost Runners</h3>
-                        <p className="text-sm text-slate-500">These ghost-runner rules apply when a game uses league default game rules. For a {selectedLeagueDefaultRules.gameInnings || 4}-inning game, rules can start in the {getFirstExtraInning(selectedLeagueDefaultRules.gameInnings || 4)}{getOrdinalSuffix(getFirstExtraInning(selectedLeagueDefaultRules.gameInnings || 4))} inning or later.</p>
-                      </div>
-                      <Button variant="outline" onClick={addLeagueDefaultExtraRunnerRule}>+ Add Rule</Button>
-                    </div>
-
-                    {(selectedLeagueDefaultRules.extraRunnerRules || []).length === 0 ? (
-                      <p className="rounded-xl border bg-slate-50 p-3 text-sm text-slate-500">No default extra-inning runner rules yet.</p>
-                    ) : (
-                      <div className="space-y-2">
-                        {(selectedLeagueDefaultRules.extraRunnerRules || []).map((rule) => (
-                          <div key={rule.id} className="grid gap-2 rounded-xl border bg-slate-50 p-3 sm:grid-cols-[1fr_1.5fr_auto] sm:items-end">
-                            <div>
-                              <label className="text-xs font-semibold uppercase text-slate-500">Starting inning</label>
-                              <input type="number" min={getFirstExtraInning(selectedLeagueDefaultRules.gameInnings || 4)} className="mt-1 w-full rounded-xl border px-3 py-2 text-sm font-semibold" value={rule.startInning} onChange={(event) => updateLeagueDefaultExtraRunnerRule(rule.id, "startInning", event.target.value)} />
-                            </div>
-                            <div>
-                              <label className="text-xs font-semibold uppercase text-slate-500">Bases to start inning</label>
-                              <select className="mt-1 w-full rounded-xl border px-3 py-2 text-sm font-semibold" value={rule.bases} onChange={(event) => updateLeagueDefaultExtraRunnerRule(rule.id, "bases", event.target.value)}>
-                                {extraBaseOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
-                              </select>
-                            </div>
-                            <div className="flex flex-col gap-2">
-                              <label className="flex items-center gap-2 rounded-lg border bg-white px-3 py-2 text-xs font-semibold text-slate-600">
-                                <input type="checkbox" checked={Boolean(rule.sameRestOfGame)} onChange={(event) => updateLeagueDefaultExtraRunnerRule(rule.id, "sameRestOfGame", event.target.checked)} />
-                                Same rest of game
-                              </label>
-                              <Button variant="outline" onClick={() => removeLeagueDefaultExtraRunnerRule(rule.id)}>Remove</Button>
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                    <div className="mt-3 rounded-xl border bg-slate-50 p-3">
-                      <label className="flex items-center gap-2 text-sm font-semibold">
-                        <input type="checkbox" checked={selectedLeagueDefaultRules.ghostRunnersCountAsRbi} onChange={(event) => updateLeagueDefaultGameRule("ghostRunnersCountAsRbi", event.target.checked)} />
-                        Ghost runners count as RBI by default
-                      </label>
-                    </div>
-                  </div>
+                  <GameRulesSummaryTable rules={selectedLeagueDefaultRules} />
                 </div>
               </details>
             </Card>
@@ -21957,7 +22382,7 @@ export default function WiffleScoringPrototype() {
                   <div className="text-xs font-black uppercase tracking-wide text-slate-500">Field Settings</div>
                   <h2 className="mt-1 text-2xl font-black">{fieldEditorDraft.name || "New Field"}</h2>
                 </div>
-                <Button variant="outline" onClick={() => setFieldEditorDraft(null)}>Close</Button>
+                <Button variant="outline" onClick={() => { setFieldRuleEditorDraft(null); setFieldEditorDraft(null); }}>Close</Button>
               </div>
 
               <div className="grid gap-3 md:grid-cols-3">
@@ -22001,78 +22426,20 @@ export default function WiffleScoringPrototype() {
               <div className="mt-5 rounded-2xl border bg-white p-4">
                 <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
                   <h3 className="text-lg font-bold">Field Rules</h3>
-                  <Button variant="outline" onClick={addFieldEditorRule}>+ Rule</Button>
-                </div>
-                <div className="space-y-2">
-                  {(fieldEditorDraft.rules || []).map((rule, ruleIndex) => (
-                    <details key={rule.id} className="group rounded-lg border bg-slate-50">
-                      <summary className="flex cursor-pointer list-none items-center justify-between gap-3 p-3">
+                    <Button variant="outline" onClick={addFieldEditorRule}>+ Rule</Button>
+                  </div>
+                  <div className="space-y-2">
+                    {(fieldEditorDraft.rules || []).map((rule, ruleIndex) => (
+                    <button key={rule.id} type="button" className="w-full rounded-lg border bg-slate-50 p-3 text-left transition hover:border-slate-400 hover:bg-white" onClick={() => editFieldEditorRule(rule)}>
+                      <div className="flex items-start justify-between gap-3">
                         <div className="min-w-0">
                           <div className="truncate text-sm font-black">{rule.name || `Field Rule ${ruleIndex + 1}`}</div>
                           <div className="mt-1 truncate text-xs font-semibold text-slate-500">{fieldRuleActionSummary(rule) || "No actions selected"}</div>
+                          {rule.description && <div className="mt-1 line-clamp-2 text-xs font-semibold text-slate-600">{rule.description}</div>}
                         </div>
-                        <div className="flex shrink-0 items-center gap-2">
-                          <Button
-                            variant="primary"
-                            onClick={(event) => {
-                              event.preventDefault();
-                              event.stopPropagation();
-                              setPendingFieldSaveConfirm({ type: "rule", ruleName: rule.name || `Field Rule ${ruleIndex + 1}` });
-                            }}
-                          >
-                            Save Rule
-                          </Button>
-                          <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-bold uppercase text-slate-500 group-open:hidden">Open</span>
-                          <span className="hidden rounded-full bg-slate-900 px-3 py-1 text-xs font-bold uppercase text-white group-open:inline-block">Close</span>
-                        </div>
-                      </summary>
-                      <div className="border-t p-3">
-                      <div className={`grid gap-2 ${fieldRuleHasRunAction(rule) && fieldRuleHasAutomaticOut(rule) ? "md:grid-cols-[1fr_8rem_8rem_auto]" : fieldRuleHasRunAction(rule) || fieldRuleHasAutomaticOut(rule) ? "md:grid-cols-[1fr_8rem_auto]" : "md:grid-cols-[1fr_auto]"} md:items-end`}>
-                        <div>
-                          <label className="text-xs font-semibold uppercase text-slate-500">Rule Name</label>
-                          <input className="mt-1 w-full rounded-xl border px-3 py-2 text-sm" value={rule.name || ""} onChange={(event) => updateFieldEditorRule(rule.id, "name", event.target.value)} />
-                        </div>
-                        {fieldRuleHasRunAction(rule) && (
-                          <div>
-                            <label className="text-xs font-semibold uppercase text-slate-500">Bonus Runs</label>
-                            <input type="number" className="mt-1 w-full rounded-xl border px-3 py-2 text-sm" value={rule.runs ?? 1} onChange={(event) => updateFieldEditorRule(rule.id, "runs", event.target.value)} />
-                          </div>
-                        )}
-                        {fieldRuleHasAutomaticOut(rule) && (
-                          <div>
-                            <label className="text-xs font-semibold uppercase text-slate-500">Outs</label>
-                            <input type="number" min="1" max="3" className="mt-1 w-full rounded-xl border px-3 py-2 text-sm" value={rule.outs ?? 1} onChange={(event) => updateFieldEditorRule(rule.id, "outs", Math.max(1, Math.min(3, Number(event.target.value) || 1)))} />
-                          </div>
-                        )}
-                        <Button variant="outline" onClick={() => removeFieldEditorRule(rule.id)}>Remove</Button>
+                        <span className="shrink-0 rounded-full bg-white px-3 py-1 text-xs font-bold uppercase text-slate-500">Edit</span>
                       </div>
-
-                      <div className="mt-3">
-                        <label className="text-xs font-semibold uppercase text-slate-500">Rule Description</label>
-                        <textarea className="mt-1 w-full rounded-xl border px-3 py-2 text-sm" rows="2" value={rule.description || ""} onChange={(event) => updateFieldEditorRule(rule.id, "description", event.target.value)} placeholder="Explain when this rule applies or what the scorer should check before approving." />
-                      </div>
-
-                      <div className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
-                        {fieldRuleActionOptions.map((option) => {
-                          const actions = getFieldRuleActions(rule);
-                          const checked = actions.includes(option.value);
-                          return (
-                            <label key={option.value} className="flex items-center gap-2 rounded-xl border bg-white p-2 text-xs font-semibold text-slate-600">
-                              <input type="checkbox" checked={checked} onChange={(event) => updateFieldEditorRule(rule.id, "actions", toggleFieldRuleAction(actions, option.value, event.target.checked))} />
-                              {option.label}
-                            </label>
-                          );
-                        })}
-                      </div>
-
-                      {fieldRuleHasRunAction(rule) && (
-                        <label className="mt-3 flex items-center gap-2 rounded-xl border bg-white p-2 text-xs font-semibold text-slate-600">
-                          <input type="checkbox" checked={Boolean(rule.countBonusRunsAsRbi)} onChange={(event) => updateFieldEditorRule(rule.id, "countBonusRunsAsRbi", event.target.checked)} />
-                          Bonus runs count as RBI for current batter
-                        </label>
-                      )}
-                      </div>
-                    </details>
+                    </button>
                   ))}
                   {(!fieldEditorDraft.rules || fieldEditorDraft.rules.length === 0) && <p className="text-sm text-slate-500">No field rules yet. Add a rule to show it as a shortcut on the Games page when this field is selected.</p>}
                 </div>
@@ -22081,6 +22448,87 @@ export default function WiffleScoringPrototype() {
               <div className="mt-5 flex flex-wrap justify-between gap-2">
                 <Button variant="danger" onClick={() => requestFieldDelete(fieldEditorDraft)}>Delete Field</Button>
                 <Button variant="primary" onClick={() => setPendingFieldSaveConfirm({ type: "field" })}>Save Field</Button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {fieldRuleEditorDraft && fieldEditorDraft && !pendingFieldSaveConfirm && !pendingFieldDelete && (
+          <div className="fixed inset-0 z-[60] flex items-center justify-center bg-slate-900/50 p-4">
+            <div className="max-h-[92vh] w-full max-w-2xl overflow-auto rounded-3xl bg-white p-5 shadow-xl">
+              <div className="mb-4 flex items-start justify-between gap-3">
+                <div>
+                  <div className="text-xs font-black uppercase tracking-wide text-slate-500">Field Rule</div>
+                  <h2 className="mt-1 text-2xl font-black">{fieldRuleEditorDraft.name || "New Rule"}</h2>
+                </div>
+                <Button variant="outline" onClick={() => setFieldRuleEditorDraft(null)}>Cancel</Button>
+              </div>
+
+              <div className={`grid gap-3 ${fieldRuleHasRunAction(fieldRuleEditorDraft) && fieldRuleHasAutomaticOut(fieldRuleEditorDraft) ? "md:grid-cols-[1fr_8rem_8rem]" : fieldRuleHasRunAction(fieldRuleEditorDraft) || fieldRuleHasAutomaticOut(fieldRuleEditorDraft) ? "md:grid-cols-[1fr_8rem]" : "md:grid-cols-1"} md:items-end`}>
+                <div>
+                  <label className="text-xs font-semibold uppercase text-slate-500">Rule Name</label>
+                  <input className="mt-1 w-full rounded-xl border px-3 py-2 text-sm" value={fieldRuleEditorDraft.name || ""} onChange={(event) => updateFieldRuleEditorDraft("name", event.target.value)} />
+                </div>
+                {fieldRuleHasRunAction(fieldRuleEditorDraft) && (
+                  <div>
+                    <label className="text-xs font-semibold uppercase text-slate-500">Bonus Runs</label>
+                    <input type="number" className="mt-1 w-full rounded-xl border px-3 py-2 text-sm" value={fieldRuleEditorDraft.runs ?? 1} onChange={(event) => updateFieldRuleEditorDraft("runs", event.target.value)} />
+                  </div>
+                )}
+                {fieldRuleHasAutomaticOut(fieldRuleEditorDraft) && (
+                  <div>
+                    <label className="text-xs font-semibold uppercase text-slate-500">Outs</label>
+                    <input type="number" min="1" max="3" className="mt-1 w-full rounded-xl border px-3 py-2 text-sm" value={fieldRuleEditorDraft.outs ?? 1} onChange={(event) => updateFieldRuleEditorDraft("outs", event.target.value)} />
+                  </div>
+                )}
+              </div>
+
+              <div className="mt-3">
+                <label className="text-xs font-semibold uppercase text-slate-500">Rule Description</label>
+                <textarea className="mt-1 w-full rounded-xl border px-3 py-2 text-sm" rows="3" value={fieldRuleEditorDraft.description || ""} onChange={(event) => updateFieldRuleEditorDraft("description", event.target.value)} placeholder="Explain when this rule applies or what the scorer should check before approving." />
+              </div>
+
+              <div className="mt-4">
+                <div className="mb-2 text-xs font-semibold uppercase text-slate-500">Rule Actions</div>
+                <div className="grid gap-2 sm:grid-cols-2">
+                  {fieldRuleActionOptions.map((option) => {
+                    const actions = getFieldRuleActions(fieldRuleEditorDraft);
+                    const checked = actions.includes(option.value);
+                    return (
+                      <label key={option.value} className="flex items-center gap-2 rounded-xl border bg-slate-50 p-3 text-xs font-semibold text-slate-600">
+                        <input type="checkbox" checked={checked} onChange={(event) => updateFieldRuleEditorDraft("actions", toggleFieldRuleAction(actions, option.value, event.target.checked))} />
+                        {option.label}
+                      </label>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {fieldRuleHasRunAction(fieldRuleEditorDraft) && (
+                <label className="mt-3 flex items-center gap-2 rounded-xl border bg-slate-50 p-3 text-xs font-semibold text-slate-600">
+                  <input type="checkbox" checked={Boolean(fieldRuleEditorDraft.countBonusRunsAsRbi)} onChange={(event) => updateFieldRuleEditorDraft("countBonusRunsAsRbi", event.target.checked)} />
+                  Bonus runs count as RBI for current batter
+                </label>
+              )}
+
+              <p className="mt-3 rounded-xl border bg-slate-50 p-3 text-xs font-semibold text-slate-500">Summary: {fieldRuleActionSummary(fieldRuleEditorDraft) || "No actions selected"}</p>
+
+              <div className="mt-5 flex flex-wrap justify-between gap-2">
+                {(fieldEditorDraft.rules || []).some((rule) => rule.id === fieldRuleEditorDraft.id) ? (
+                  <Button
+                    variant="danger"
+                    onClick={() => {
+                      removeFieldEditorRule(fieldRuleEditorDraft.id);
+                      setFieldRuleEditorDraft(null);
+                    }}
+                  >
+                    Remove Rule
+                  </Button>
+                ) : <span />}
+                <div className="flex flex-wrap justify-end gap-2">
+                  <Button variant="outline" onClick={() => setFieldRuleEditorDraft(null)}>Cancel</Button>
+                  <Button variant="primary" onClick={saveFieldRuleEditorDraft}>Save Rule</Button>
+                </div>
               </div>
             </div>
           </div>
